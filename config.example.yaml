@@ -1,4 +1,6 @@
-# 依赖版本在 go.mod 管理;此文件仅本地开发复制为 config.yaml 使用
+# 依赖版本在 go.mod 管理;本地开发复制为 config.yaml 使用。
+# 容器部署:挂载宿主目录到 /data,本文件放 /data/config/config.yaml,
+# data_dir 与 plugins_dir 用容器内绝对路径(见 README 部署节)
 listen: ":8080"
 data_dir: "./data"
 api_keys:

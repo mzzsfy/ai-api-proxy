@@ -59,4 +59,24 @@ node --test sdk/test.js plugins/*/test/*.test.js
 
 ## 部署
 
-Docker 镜像由 CI 推送 GHCR(main 分支);容器内配置挂载 `/etc/ai-api-proxy/config.yaml`,数据目录 `/var/lib/ai-api-proxy`。
+Docker 镜像由 CI 推送 GHCR(main 分支)。**单目录挂载**:宿主一个目录映射到容器 `/data`,全部状态都在里面:
+
+```
+/data/
+├── config/config.yaml   # 配置(必需)
+├── lib/                 # 数据(SQLite/会话)
+└── plugins/             # 插件包热载目录(可选)
+```
+
+```bash
+mkdir -p /srv/ai-api-proxy/{config,lib,plugins}
+cp config.example.yaml /srv/ai-api-proxy/config/config.yaml
+# 编辑 config: data_dir: /data/lib  plugins_dir: /data/plugins
+
+docker run -d --name ai-api-proxy \
+  -p 8080:8080 \
+  -v /srv/ai-api-proxy:/data \
+  ghcr.io/mzzsfy/ai-api-proxy:latest
+```
+
+镜像内置 `config.example.yaml`(路径 `/usr/share/ai-api-proxy/`),供首次部署拷贝。

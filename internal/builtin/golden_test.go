@@ -23,11 +23,19 @@ func goldenCtx() *pipeline.PipelineContext {
 
 const goldenKey = "sk-golden"
 
-// loadJSPackage 从 repo plugins/ 目录实例化 js-openai-full 协议(测试依赖仓库文件)
+// loadJSPackage 从 js-openai-full 插件库(与主库同级的 plugins-repo)实例化协议;库缺失则跳过
 func loadJSPackage(t *testing.T) pipeline.Protocol {
 	t.Helper()
 	root := findRepoRoot(t)
 	dir := filepath.Join(root, "plugins", "js-openai-full")
+	if _, err := os.Stat(dir); err != nil {
+		// 插件已拆分独立库(../plugins-repo), 优先从那里取
+		sibling := filepath.Join(root, "..", "plugins-repo", "plugins", "js-openai-full")
+		if _, err2 := os.Stat(sibling); err2 != nil {
+			t.Skip("js-openai-full plugin repo not found (split repo); skipping golden JS-vs-Go comparison")
+		}
+		dir = sibling
+	}
 	manifest, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
