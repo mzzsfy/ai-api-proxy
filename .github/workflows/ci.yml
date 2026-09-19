@@ -13,12 +13,23 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Resolve published modules
+        # go.mod 的 replace 指向本地同级 checkout(离线开发用);CI 上换成已发布版本。
+        # 依赖库(warp-pool / ai-api-proxy-plugin-proxy)为私有库时:在此步前配 PAT insteadOf,
+        # 并设 GOPRIVATE=github.com/mzzsfy/*;公开库则无需任何 secret。
+        env:
+          GOPRIVATE: github.com/mzzsfy/*
+        run: |
+          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
+          go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go get github.com/mzzsfy/warp-pool@v0.1.0 github.com/mzzsfy/ai-api-proxy-plugin-proxy@v0.1.0
+          go mod tidy
       - name: Go test (race)
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
 
-  # withproxy 形态:mihomo 内核集成(vless/vmess 等;依赖 ai-api-proxy-plugin-proxy + warp-pool 公开可达,无 replace)
+  # withproxy 形态:mihomo 内核集成(vless/vmess 等;依赖 warp-pool@v0.1.0 + plugin-proxy@v0.1.0)
   test-withproxy:
     runs-on: ubuntu-latest
     steps:
@@ -26,9 +37,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Strip local replaces
+      - name: Resolve published modules
+        env:
+          GOPRIVATE: github.com/mzzsfy/*
         run: |
-          sed -i '/^replace github.com\/mzzsfy/d' go.mod
+          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
+          go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go get github.com/mzzsfy/warp-pool@v0.1.0 github.com/mzzsfy/ai-api-proxy-plugin-proxy@v0.1.0
           go mod tidy
       - name: Build withproxy
         run: go build -tags withproxy ./...
