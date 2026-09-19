@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // fastProtoSrc 快速 hook

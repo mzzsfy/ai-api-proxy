@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // buildTestApp 全装配 + 假上游 + 注册一条内置协议上游

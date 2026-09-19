@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── P11:socks5 真实服务端到端(测试内最小 RFC 1928 服务,真 TCP) ───
@@ -43,7 +43,7 @@ func newSocks5Server(t *testing.T, allowTarget string) *socks5Server {
 	return s
 }
 
-func (s *socks5Server) addr() string  { return s.ln.Addr().String() }
+func (s *socks5Server) addr() string      { return s.ln.Addr().String() }
 func (s *socks5Server) relayCount() int64 { return s.hits.Load() }
 
 func (s *socks5Server) serve() {
@@ -170,8 +170,8 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	}
 	u := &upstream.Upstream{
 		Name: "g5-socks5", Enabled: true,
-		Base:    upstream.PackageRef{Package: "js-openai"},
-		Models:  []string{"m-socks5"},
+		Base:   upstream.PackageRef{Package: "js-openai"},
+		Models: []string{"m-socks5"},
 		Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: "sx", Enabled: true,
 			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
 	}

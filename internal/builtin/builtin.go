@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // Name 协议名

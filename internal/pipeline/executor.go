@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+
+	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
 // Resolved 上游解析产物(Resolve 组装:extras 引用序 → base 包内序)
@@ -77,8 +79,8 @@ func (e *Executor) tryTarget(ctx context.Context, pctx *PipelineContext, u Resol
 	}
 	out, terr := tr.RoundTrip(ctx, req)
 	if terr != nil {
-		if errors.Is(terr, ErrPoolBusy) {
-			return nil, req, true, terr
+		if errors.Is(terr, ErrPoolBusy) || errors.Is(terr, ipprovider.ErrNoExits) {
+			return nil, req, true, terr // 池忙 503 / 无出口 503(host 语义层)
 		}
 		return nil, req, true, &BuildError{Err: fmt.Errorf("round trip: %w", terr)}
 	}

@@ -13,7 +13,7 @@ import (
 
 	"github.com/dop251/goja"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // ─── JS 部件 → 管道契约适配(runtime 池化;hook 全同步;超时预算 Interrupt)───

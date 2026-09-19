@@ -313,8 +313,9 @@ async function showMonitor() {
     <table><tr><th>名称</th><th>类型</th><th>地址</th><th>最近探测</th><th></th></tr>
     ${(transports || []).map(t => {
       const h = t.health;
-      const health = h ? (h.ok ? `<span style="color:var(--ok)">通 ${h.latency_ms}ms</span> <span class="muted">${new Date(h.checked_at).toLocaleTimeString()}</span>`
-                              : `<span style="color:var(--err)">断</span> <span class="muted" title="${esc(h.error||"")}">${new Date(h.checked_at).toLocaleTimeString()}</span>`) : '<span class="muted">未探测</span>';
+      const egress = h && h.egress_ips && h.egress_ips.length ? `<div class="muted">出口: ${esc(h.egress_ips.join(", "))}</div>` : "";
+      const health = h ? (h.ok ? `<span style="color:var(--ok)">通 ${h.latency_ms}ms</span> <span class="muted">${new Date(h.checked_at).toLocaleTimeString()}</span>${egress}`
+                              : `<span style="color:var(--err)">断</span> <span class="muted" title="${esc(h.error||"")}">${new Date(h.checked_at).toLocaleTimeString()}</span>${egress}`) : '<span class="muted">未探测</span>';
       return `<tr><td>${esc(t.name)}</td><td>${esc(t.type)}</td>
       <td class="muted">${esc(t.url || "direct")}</td><td>${health}</td>
       <td><button data-tt="${esc(t.name)}">测试连通</button> <span id="tr-${esc(t.name)}" class="muted"></span></td></tr>`;

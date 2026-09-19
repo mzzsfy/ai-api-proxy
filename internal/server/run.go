@@ -14,17 +14,17 @@ import (
 	"syscall"
 	"time"
 
-	"ai-api-proxy/internal/admin"
-	"ai-api-proxy/internal/adminweb"
-	"ai-api-proxy/internal/builtin"
-	"ai-api-proxy/internal/convert"
-	"ai-api-proxy/internal/gateway"
-	"ai-api-proxy/internal/metrics"
-	"ai-api-proxy/internal/pipeline"
-	"ai-api-proxy/internal/plugin"
-	"ai-api-proxy/internal/store"
-	"ai-api-proxy/internal/transport"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
+	"github.com/mzzsfy/ai-api-proxy/internal/adminweb"
+	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
+	"github.com/mzzsfy/ai-api-proxy/internal/convert"
+	"github.com/mzzsfy/ai-api-proxy/internal/gateway"
+	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/store"
+	"github.com/mzzsfy/ai-api-proxy/internal/transport"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // App 装配后的应用(server 是唯一知具体类型的装配根)
@@ -63,9 +63,16 @@ func Build(cfg *Config) (*App, error) {
 	// 传输实例
 	defs := make([]transport.TransportDef, 0, len(cfg.Transports))
 	for _, t := range cfg.Transports {
-		defs = append(defs, transport.TransportDef{Name: t.Name, Type: t.Type, URL: t.URL})
+		opts := map[string]any{}
+		if t.Options.Kind != 0 {
+			if err := yamlUnmarshal(&t.Options, &opts); err != nil {
+				_ = st.Close()
+				return nil, fmt.Errorf("transports[%s].options: %w", t.Name, err)
+			}
+		}
+		defs = append(defs, transport.TransportDef{Name: t.Name, Type: t.Type, URL: t.URL, Options: opts})
 	}
-	trMgr, err := transport.NewManager(defs)
+	trMgr, err := transport.NewManagerWithCfg(defs, nil, cfg.DataDir+"/ipp")
 	if err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("transports: %w", err)
@@ -146,7 +153,8 @@ func Build(cfg *Config) (*App, error) {
 		return gw.TestUpstream(context.Background(), u)
 	}
 	// 监控时序:metrics_minutely 最近 n 分钟(老到新)
-	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {		rows, err := st.DB().Query(`SELECT minute, requests, errors, max_concurrent, by_upstream_json, by_target_json
+	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {
+		rows, err := st.DB().Query(`SELECT minute, requests, errors, max_concurrent, by_upstream_json, by_target_json
 			FROM (SELECT * FROM metrics_minutely ORDER BY minute DESC LIMIT ?) ORDER BY minute ASC`, minutes)
 		if err != nil {
 			return nil, err
@@ -204,8 +212,11 @@ func Build(cfg *Config) (*App, error) {
 	}, nil
 }
 
-// Close 释放资源
-func (a *App) Close() error { return a.St.Close() }
+// Close 释放资源(传输供给方级联在先——实例拨号依赖存储后端无关,先关无序约束)
+func (a *App) Close() error {
+	a.trMgr.Close()
+	return a.St.Close()
+}
 
 // recoverMW panic → 500(不带栈;handler 内 panic 兜底)
 func recoverMW(next http.Handler) http.Handler {
@@ -253,10 +264,11 @@ var (
 
 // transportHealthStatus 单传输最近探测结果(序列化进 kv,ns=transport_health)
 type transportHealthStatus struct {
-	OK        bool   `json:"ok"`
-	LatencyMS int64  `json:"latency_ms"`
-	Error     string `json:"error,omitempty"`
-	CheckedAt string `json:"checked_at"`
+	OK        bool     `json:"ok"`
+	LatencyMS int64    `json:"latency_ms"`
+	Error     string   `json:"error,omitempty"`
+	CheckedAt string   `json:"checked_at"`
+	EgressIPs []string `json:"egress_ips,omitempty"` // ipp_* 供给方出口(非 ipp 无此字段)
 }
 
 // startTransportProbeLoop 周期探测全部传输实例,结果落 kv 供 GUI 读取;返回停止函数(同步等待退出)
@@ -271,6 +283,9 @@ func startTransportProbeLoop(app *App, interval time.Duration) func() {
 				st := transportHealthStatus{OK: err == nil, LatencyMS: latency, CheckedAt: utilNowRFC3339()}
 				if err != nil {
 					st.Error = err.Error()
+				}
+				if prov, ok := app.trMgr.Provider(name); ok {
+					st.EgressIPs = prov.Stats().EgressIPs
 				}
 				b, mErr := jsonMarshal(st)
 				if mErr != nil {

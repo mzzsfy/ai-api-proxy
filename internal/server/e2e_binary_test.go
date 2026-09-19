@@ -16,7 +16,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── 真实二进制进程端到端:config.yaml 启动 + 管理 API 装配 + 4 组真实请求 ───

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── opencode 包真实上游 E2E(OpenRouter;真实网络,真实 key) ───

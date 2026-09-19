@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // BuiltinFactory Go 内置协议工厂(secrets 与 JS 部件同机制注入)

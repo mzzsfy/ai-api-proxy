@@ -9,8 +9,8 @@ import (
 
 // configSchema 结构化形态(仅用到的字段)
 type configSchema struct {
-	Type       string `json:"type"`
-	Required   []string          `json:"required"`
+	Type       string                     `json:"type"`
+	Required   []string                   `json:"required"`
 	Properties map[string]json.RawMessage `json:"properties"`
 }
 

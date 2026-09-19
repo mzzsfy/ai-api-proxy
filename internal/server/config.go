@@ -8,13 +8,22 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
+
+// yamlUnmarshal yaml 节点 → 目标(options 展开)
+func yamlUnmarshal(node *yaml.Node, target any) error {
+	return node.Decode(target)
+}
 
 // TransportCfg 命名传输实例定义(部署资产,仅 yaml 可表达嵌套)
 type TransportCfg struct {
 	Name string `yaml:"name"`
-	Type string `yaml:"type"` // direct | http_proxy | socks5
+	Type string `yaml:"type"` // direct | http_proxy | socks5 | ipp_warp | ipp_clash | ipp_remote
 	URL  string `yaml:"url"`
+	// Options ipp_* 供给方私有配置(原样展开传给供给方;其他类型忽略)
+	Options yaml.Node `yaml:"options"`
 }
 
 // Config 服务配置
@@ -107,10 +116,25 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("transports[%s]: url required", t.Name)
 			}
 		default:
-			return fmt.Errorf("transports[%s]: unknown type %q", t.Name, t.Type)
+			if !strings.HasPrefix(t.Type, "ipp_") {
+				return fmt.Errorf("transports[%s]: unknown type %q", t.Name, t.Type)
+			}
+			if !ipproviderKindRegistered(t.Type) {
+				return fmt.Errorf("transports[%s]: provider type %q not registered(缺构建标签或未注册)", t.Name, t.Type)
+			}
 		}
 	}
 	return nil
+}
+
+// ipproviderKindRegistered 供给方类型是否已注册
+func ipproviderKindRegistered(kind string) bool {
+	for _, k := range ipprovider.Kinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // BcryptCost bcrypt 计算成本(注释指语义,值随库常量演进)

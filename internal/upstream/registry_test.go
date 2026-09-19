@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 
 	_ "modernc.org/sqlite"
 )

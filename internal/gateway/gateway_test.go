@@ -11,13 +11,13 @@ import (
 	"strings"
 	"testing"
 
-	"ai-api-proxy/internal/builtin"
-	"ai-api-proxy/internal/convert"
-	"ai-api-proxy/internal/metrics"
-	"ai-api-proxy/internal/pipeline"
-	"ai-api-proxy/internal/plugin"
-	"ai-api-proxy/internal/transport"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
+	"github.com/mzzsfy/ai-api-proxy/internal/convert"
+	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/transport"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 
 	_ "modernc.org/sqlite"
 )

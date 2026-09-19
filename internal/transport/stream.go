@@ -3,9 +3,10 @@ package transport
 import (
 	"bufio"
 	"io"
+	"net/http"
 	"strings"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // isEventStream Content-Type 是否 SSE
@@ -15,6 +16,22 @@ func isEventStream(ct string) bool {
 
 // maxBodySize 非流式响应读取上限(防失控上游)
 const maxBodySize = 32 * 1024 * 1024
+
+// consumeResponse 上游响应 → TransportResponse(流式转帧通道/非流式限量读)
+func consumeResponse(hresp *http.Response) pipeline.TransportResponse {
+	headers := map[string]string{}
+	for k := range hresp.Header {
+		headers[k] = hresp.Header.Get(k)
+	}
+	out := pipeline.TransportResponse{Status: hresp.StatusCode, Headers: headers}
+	if isEventStream(headers["Content-Type"]) {
+		out.Events = frameSSE(hresp.Body)
+	} else {
+		out.Body = readAllLimited(hresp.Body)
+		_ = hresp.Body.Close()
+	}
+	return out
+}
 
 // readAllLimited 限量读取
 func readAllLimited(r io.Reader) []byte {

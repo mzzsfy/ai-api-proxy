@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── P9:管理 GUI 冒烟(单文件内嵌页 + 部件 API 闭环) ───
@@ -90,8 +90,8 @@ func TestGUI_UpstreamTestEndpoint(t *testing.T) {
 	// ② 坏上游:BaseURL 指向不可达端口
 	if err := f.app.Registry.Save(context.Background(), &upstream.Upstream{
 		Name: "g7-dead", Enabled: true,
-		Base:    upstream.PackageRef{Package: "js-openai"},
-		Models:  []string{"m-dead"},
+		Base:   upstream.PackageRef{Package: "js-openai"},
+		Models: []string{"m-dead"},
 		Targets: []upstream.Target{{Name: "t1", BaseURL: "http://127.0.0.1:1", Transport: "", Enabled: true,
 			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
 	}); err != nil {

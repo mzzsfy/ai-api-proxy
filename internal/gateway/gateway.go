@@ -12,11 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"ai-api-proxy/internal/builtin"
-	"ai-api-proxy/internal/convert"
-	"ai-api-proxy/internal/metrics"
-	"ai-api-proxy/internal/pipeline"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
+	"github.com/mzzsfy/ai-api-proxy/internal/convert"
+	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
 // Gateway HTTP 入口
@@ -87,7 +88,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.En
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
 	// 快速路径:openai 入口 ∧ 内置协议 ∧ 有效 filter 链空
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
-		g.fastPath(w, r, u, resolved, body)
+		g.fastPath(w, r, u, resolved, body, model)
 		return
 	}
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
@@ -129,11 +130,15 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.En
 	_, _ = w.Write(out)
 }
 
-// writeRunError Run 错误输出:池耗尽 503;BuildError(部件/传输/本地原因)502 协议格式
+// writeRunError Run 错误输出:池耗尽/无出口 503;BuildError(部件/传输/本地原因)502 协议格式
 // (上游错误状态不走此路径:executor 已作终局响应返回)
 func (g *Gateway) writeRunError(w http.ResponseWriter, codec convert.EntryCodec, pctx *pipeline.PipelineContext, resolved pipeline.Resolved, err error) {
 	if errors.Is(err, pipeline.ErrPoolBusy) {
 		writeError(w, codec, http.StatusServiceUnavailable, "runtime pool busy")
+		return
+	}
+	if errors.Is(err, ipprovider.ErrNoExits) {
+		writeError(w, codec, http.StatusServiceUnavailable, "no available egress")
 		return
 	}
 	writeError(w, codec, http.StatusBadGateway, err.Error())
@@ -265,7 +270,7 @@ func pivotChunkChan(in <-chan *convert.Chunk) <-chan pipeline.ChunkItem {
 }
 
 // fastPath 透传:body 原样,目标 secrets 注入 Authorization,不切换不刷新
-func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte) {
+func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string) {
 	var target *upstream.Target
 	for i := range u.Targets {
 		if u.Targets[i].Enabled {
@@ -309,7 +314,8 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 			"Content-Type":  "application/json",
 			"Authorization": builtin.BearerPrefix + key,
 		},
-		Body: body, // 原样透传,不重序列化
+		Body:  body,  // 原样透传,不重序列化
+		Model: model, // ipp 供给方会话亲和素材(非 ipp 传输忽略)
 	}
 	tresp, err := tr.RoundTrip(r.Context(), preq)
 	if err != nil {
@@ -317,6 +323,11 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 		g.Metrics.IncUpstream(u.Name, true)
 		if r.Context().Err() == nil {
 			g.Metrics.IncError()
+			// 供给方无可用出口:503(临时性,调用方可换 upstream 重试);其余上游不可达:502
+			if errors.Is(err, ipprovider.ErrNoExits) {
+				writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no available egress")
+				return
+			}
 			writeError(w, g.OpenAI, http.StatusBadGateway, "upstream unreachable")
 			return
 		}

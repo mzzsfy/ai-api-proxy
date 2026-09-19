@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/admin"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── 4 组真实插件端到端:直连/代理 × 无/有请求修改 × chat/message × 流/非流 ───
@@ -41,8 +41,8 @@ func openaiCompletionNonStream(model string) string {
 	b, _ := json.Marshal(map[string]any{
 		"id": "chatcmpl-e2e", "object": "chat.completion", "model": model,
 		"choices": []any{map[string]any{
-			"index": 0,
-			"message": map[string]any{"role": "assistant", "content": "hi"},
+			"index":         0,
+			"message":       map[string]any{"role": "assistant", "content": "hi"},
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},

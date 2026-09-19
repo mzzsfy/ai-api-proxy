@@ -13,8 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"ai-api-proxy/internal/pipeline"
-	"ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 )
 
 // Feature 能力协商(与 convert.Feature 字符串语义一致,避免包依赖)

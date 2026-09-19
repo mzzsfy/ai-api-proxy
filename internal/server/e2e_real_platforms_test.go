@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── 平台探测记录(2026-03 实测;免 key 真实推理平台稀缺) ───

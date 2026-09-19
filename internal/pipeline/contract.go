@@ -85,7 +85,8 @@ type Request struct {
 	Method  string
 	Headers map[string]string
 	Body    []byte
-	Stream  bool // 双声明分发意图
+	Stream  bool   // 双声明分发意图
+	Model   string // 会话亲和素材(ipp 供给方传输消费;非 ipp 忽略)
 }
 
 // Protocol 协议适配层(恰一;hook 全同步)

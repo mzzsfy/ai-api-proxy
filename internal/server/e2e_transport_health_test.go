@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/admin"
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
 )
 
 // mustAdminHash 测试管理员口令散列

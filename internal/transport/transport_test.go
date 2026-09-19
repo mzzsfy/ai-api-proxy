@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 func TestRoundTrip_NonStream(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"ai-api-proxy/internal/server"
+	"github.com/mzzsfy/ai-api-proxy/internal/server"
 )
 
 func main() {

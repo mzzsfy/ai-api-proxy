@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"ai-api-proxy/internal/metrics"
-	"ai-api-proxy/internal/plugin"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // Deps 管理 API 业务依赖

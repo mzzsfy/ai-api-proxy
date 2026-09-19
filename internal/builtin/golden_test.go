@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ai-api-proxy/internal/pipeline"
-	"ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 )
 
 // ─── 黄金对照:js-openai-full 包(JS 版)与内置 Go 版同输入同产物 ───

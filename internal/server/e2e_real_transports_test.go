@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"ai-api-proxy/internal/admin"
-	"ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
+	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── 真实代理矩阵 E2E:clash(mihomo 混合端口 http+socks5,vless 系节点出口)× warp-pool(Cloudflare WARP 隧道) ───

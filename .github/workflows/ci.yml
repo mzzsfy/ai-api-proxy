@@ -18,6 +18,23 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  # withproxy 形态:mihomo 内核集成(vless/vmess 等;依赖 ai-api-proxy-plugin-proxy + warp-pool 公开可达,无 replace)
+  test-withproxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Strip local replaces
+        run: |
+          sed -i '/^replace github.com\/mzzsfy/d' go.mod
+          go mod tidy
+      - name: Build withproxy
+        run: go build -tags withproxy ./...
+      - name: Test withproxy
+        run: go test -tags withproxy ./...
+
   docker:
     needs: test
     runs-on: ubuntu-latest
