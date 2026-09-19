@@ -1,0 +1,11 @@
+/data
+/docs
+*.exe
+*.test
+coverage.out
+config.yaml
+node_modules/
+.env.local
+.env.*.local
+*.key
+warp-state/

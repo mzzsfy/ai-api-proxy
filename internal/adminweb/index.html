@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-api-proxy 管理</title>
+<style>
+  :root { --bd:#ddd; --bg:#fafafa; --ok:#0a0; --err:#c00; }
+  * { box-sizing:border-box; }
+  body { font:14px/1.5 system-ui,sans-serif; margin:0; display:flex; min-height:100vh; }
+  nav { width:140px; border-right:1px solid var(--bd); padding:12px; background:var(--bg); }
+  nav a { display:block; padding:6px 8px; color:#333; text-decoration:none; border-radius:4px; cursor:pointer; }
+  nav a.on { background:#e0e7ff; font-weight:600; }
+  main { flex:1; padding:16px 24px; max-width:1100px; }
+  h2 { margin:4px 0 12px; }
+  table { border-collapse:collapse; width:100%; margin:8px 0; }
+  th,td { border:1px solid var(--bd); padding:5px 8px; text-align:left; font-size:13px; }
+  th { background:var(--bg); }
+  input,textarea,select { font:inherit; padding:4px 6px; border:1px solid var(--bd); border-radius:4px; }
+  textarea { font-family:ui-monospace,monospace; width:100%; }
+  button { font:inherit; padding:4px 12px; border:1px solid var(--bd); border-radius:4px; background:#fff; cursor:pointer; margin-right:6px; }
+  button.pri { background:#3b5bdb; color:#fff; border-color:#3b5bdb; }
+  button.danger { color:var(--err); }
+  .row { margin:8px 0; }
+  .cards { display:flex; gap:12px; flex-wrap:wrap; }
+  .card { border:1px solid var(--bd); border-radius:6px; padding:10px 18px; min-width:120px; }
+  .card b { font-size:22px; display:block; }
+  #msg { position:fixed; top:10px; right:10px; padding:8px 14px; border-radius:6px; display:none; color:#fff; }
+  .log { font-family:ui-monospace,monospace; font-size:12px; white-space:pre-wrap; background:#111; color:#9f9; padding:10px; border-radius:6px; max-height:300px; overflow:auto; }
+  .muted { color:#888; font-size:12px; }
+</style>
+</head>
+<body>
+<nav id="nav" style="display:none">
+  <a data-p="ups">上游</a><a data-p="pkgs">包</a><a data-p="mon">监控</a>
+  <a id="logout" style="margin-top:24px;color:#c00">退出</a>
+</nav>
+<main id="main"></main>
+<div id="msg"></div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const api = {
+  async call(method, path, body, raw) {
+    const opt = { method, headers: {} };
+    if (body !== undefined) {
+      opt.body = typeof body === "string" ? body : JSON.stringify(body);
+      opt.headers["Content-Type"] = "application/json";
+    }
+    const r = await fetch("/admin/api" + path, opt);
+    if (r.status === 401) { show("login"); throw new Error("未登录"); }
+    const data = raw ? await r.text() : await r.json();
+    if (!r.ok) throw new Error(data.error || data.message || ("HTTP " + r.status));
+    return data;
+  },
+  get: (p, raw) => api.call("GET", p, undefined, raw),
+  post: (p, b) => api.call("POST", p, b),
+  put: (p, b) => api.call("PUT", p, b),
+  del: p => api.call("DELETE", p),
+};
+function msg(ok, text) {
+  const el = $("#msg");
+  el.style.background = ok ? "var(--ok)" : "var(--err)";
+  el.textContent = text; el.style.display = "block";
+  setTimeout(() => el.style.display = "none", 3000);
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* ─── 登录 ─── */
+function show(page) {
+  if (page === "login") {
+    $("#nav").style.display = "none";
+    $("#main").innerHTML = `
+      <h2>ai-api-proxy 管理登录</h2>
+      <form id="lf" class="row">
+        <input id="u" placeholder="用户名" value="admin" style="width:160px">
+        <input id="p" type="password" placeholder="口令" style="width:160px">
+        <button class="pri">登录</button>
+      </form>`;
+    $("#lf").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        await api.post("/login", { user: $("#u").value, password: $("#p").value });
+        sessionStorage.setItem("in", "1"); show("ups");
+      } catch (err) { msg(false, err.message); }
+    };
+    return;
+  }
+  $("#nav").style.display = "block";
+  document.querySelectorAll("nav a[data-p]").forEach(a => a.classList.toggle("on", a.dataset.p === page));
+  ({ ups: showUpstreams, pkgs: showPackages, mon: showMonitor })[page]();
+}
+
+/* ─── 上游 ─── */
+async function showUpstreams() {
+  const [ups, pkgs, transports] = await Promise.all([api.get("/upstreams"), api.get("/packages"), api.get("/transports")]);
+  const basePkgs = pkgs.filter(p => p.hasProtocol);
+  $("#main").innerHTML = `
+    <h2>上游实例</h2>
+    <div class="row"><button class="pri" id="newu">新建</button></div>
+    <table><tr><th>ID</th><th>名称</th><th>主包</th><th>附加</th><th>模型</th><th>目标</th><th>启用</th><th></th></tr>
+    ${ups.map(u => `<tr>
+      <td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.base.package)}</td>
+      <td>${(u.extras || []).map(e => esc(e.package)).join(",")}</td>
+      <td>${(u.models || []).join(",")}</td>
+      <td>${(u.targets || []).map(t => esc(t.name) + (t.enabled === false ? "⃠" : "")).join("<br>")}</td>
+      <td>${u.enabled ? "✓" : "✗"}</td>
+      <td>
+        <button data-e="${u.id}">编辑</button>
+        <button data-t="${u.id}">测试</button>
+        <button class="danger" data-d="${u.id}">删除</button>
+      </td></tr>`).join("")}</table>
+    <div id="editor"></div>`;
+  $("#newu").onclick = () => editUpstream(null, basePkgs, pkgs, transports);
+  document.querySelectorAll("[data-e]").forEach(b => b.onclick = () => editUpstream(ups.find(u => u.id == b.dataset.e), basePkgs, pkgs, transports));
+  document.querySelectorAll("[data-t]").forEach(b => b.onclick = async () => {
+    try { const r = await api.post(`/upstreams/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${r.latency_ms}ms` : ("失败: " + r.error)); }
+    catch (err) { msg(false, err.message); }
+  });
+  document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
+    if (!confirm("删除该上游?")) return;
+    try { await api.del(`/upstreams/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
+    catch (err) { msg(false, err.message); }
+  });
+}
+
+async function editUpstream(u, basePkgs, allPkgs, transports) {
+  const isNew = !u;
+  u = u || { name: "", enabled: true, base: {}, extras: [], models: [], targets: [{ enabled: true, secrets: {} }], filterParams: {}, filtersEnabled: {}, params: {} };
+  const main = $("#editor");
+  const filterPkgs = allPkgs.filter(p => !p.hasProtocol && (p.filters || []).length > 0);
+  const trOpts = ['<option value="">direct</option>']
+    .concat((transports || []).map(t => `<option value="${esc(t.name)}">${esc(t.name)}(${esc(t.type)})</option>`)).join("");
+  // 现有附加包的 filter 启停行(键=包/filter)
+  const filterRows = [];
+  for (const ex of u.extras || []) {
+    const pkg = allPkgs.find(p => p.name === ex.package);
+    for (const fn of (pkg && pkg.filters) || []) {
+      const key = ex.package + "/" + fn;
+      const on = u.filtersEnabled ? u.filtersEnabled[key] !== false : true;
+      filterRows.push({ key, on });
+    }
+  }
+  main.innerHTML = `
+    <h3>${isNew ? "新建" : "编辑"}上游</h3>
+    <div class="row">名称 <input id="un" value="${esc(u.name)}">
+      主包 <select id="ub">${basePkgs.map(p => `<option ${u.base && u.base.package === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+      启用 <input id="ue" type="checkbox" ${u.enabled ? "checked" : ""}></div>
+    <div class="row">模型(逗号分隔) <input id="um" value="${esc((u.models || []).join(","))}" style="width:360px"></div>
+    <h4>目标</h4>
+    <table id="ut"><tr><th>名称</th><th>BaseURL</th><th>传输</th><th>api_key</th><th>启用</th></tr></table>
+    <button id="addt">+ 目标</button>
+    <h4>附加包(filters)</h4>
+    <div class="row">添加 <select id="exsel">${filterPkgs.map(p => `<option>${esc(p.name)}</option>`).join("") || "<option value=''>无可选 filters 包</option>"}</select>
+      <button id="addex">+ 附加包</button></div>
+    <table id="ext"><tr><th>包</th><th>filter</th><th>启用</th><th>参数(JSON)</th><th></th></tr></table>
+    <div class="row"><button class="pri" id="saveu">保存</button> <button id="cancelu">取消</button></div>`;
+  const transports = ["", "direct"];
+  const tb = $("#ut");
+  const addRow = t => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><input class="tn" value="${esc(t.name || "")}"></td>
+      <td><input class="tb" value="${esc(t.baseURL || "")}" style="width:280px"></td>
+      <td><select class="tt">${trOpts}</select></td>
+      <td><input class="ts" value="${(t.secrets && t.secrets.api_key) || ""}" placeholder="***保留旧值"></td>
+      <td><input class="te" type="checkbox" ${t.enabled !== false ? "checked" : ""}></td>`;
+    tr.querySelector(".tt").value = t.transport || "";
+    tb.appendChild(tr);
+  };
+  (u.targets || []).forEach(addRow);
+  $("#addt").onclick = () => addRow({});
+  const ext = $("#ext");
+  const paramsOf = (pkgName) => (u.filterParams && u.filterParams[pkgName]) || {};
+  const addExRow = (pkgName, filterName, on) => {
+    const key = pkgName + "/" + filterName;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${esc(pkgName)}</td><td>${esc(filterName)}</td>
+      <td><input class="xe" type="checkbox" ${on ? "checked" : ""}></td>
+      <td><input class="xp" style="width:260px" placeholder='{"model":"..."}' value='${esc(JSON.stringify(paramsOf(key)))}'></td>
+      <td><button class="danger">移除</button></td>`;
+    tr.querySelector("button").onclick = () => tr.remove();
+    ext.appendChild(tr);
+  };
+  for (const ex of u.extras || []) {
+    const pkg = allPkgs.find(p => p.name === ex.package);
+    for (const fn of (pkg && pkg.filters) || []) {
+      const key = ex.package + "/" + fn;
+      addExRow(ex.package, fn, u.filtersEnabled ? u.filtersEnabled[key] !== false : true);
+    }
+  }
+  $("#addex").onclick = () => {
+    const pkgName = $("#exsel").value;
+    if (!pkgName) return;
+    const pkg = allPkgs.find(p => p.name === pkgName);
+    for (const fn of (pkg && pkg.filters) || []) addExRow(pkgName, fn, true);
+  };
+  $("#cancelu").onclick = () => main.innerHTML = "";
+  $("#saveu").onclick = async () => {
+    const targets = [...tb.querySelectorAll("tr")].slice(1).map(tr => ({
+      name: tr.querySelector(".tn").value,
+      baseURL: tr.querySelector(".tb").value,
+      transport: tr.querySelector(".tt").value,
+      enabled: tr.querySelector(".te").checked,
+      secrets: { api_key: tr.querySelector(".ts").value },
+    }));
+    const extras = [], filtersEnabled = {}, filterParams = {};
+    const seen = new Set();
+    for (const tr of [...ext.querySelectorAll("tr")].slice(1)) {
+      const cells = tr.querySelectorAll("td");
+      const pkgName = cells[0].textContent, filterName = cells[1].textContent;
+      const key = pkgName + "/" + filterName;
+      if (!seen.has(pkgName)) { extras.push({ package: pkgName }); seen.add(pkgName); }
+      filtersEnabled[key] = tr.querySelector(".xe").checked;
+      try { filterParams[key] = JSON.parse(tr.querySelector(".xp").value || "{}"); }
+      catch (e) { msg(false, `参数 JSON 非法: ${key}`); return; }
+    }
+    const body = {
+      id: u.id || 0, name: $("#un").value, enabled: $("#ue").checked,
+      base: { package: $("#ub").value }, extras,
+      models: $("#um").value.split(",").map(s => s.trim()).filter(Boolean),
+      targets, params: u.params || {}, filterParams, filtersEnabled,
+    };
+    try {
+      await api.call(isNew ? "POST" : "PUT", isNew ? "/upstreams" : `/upstreams/${u.id}`, body);
+      msg(true, "已保存"); main.innerHTML = ""; showUpstreams();
+    } catch (err) { msg(false, err.message); }
+  };
+}
+
+/* ─── 包 ─── */
+async function showPackages() {
+  const pkgs = await api.get("/packages");
+  $("#main").innerHTML = `
+    <h2>插件包</h2>
+    <div class="row">
+      <button class="pri" id="ip">导入 .aap(粘贴 base64 或拖文件)</button>
+      <button id="iu">从 URL 导入</button>
+      <a href="/packages/template"><button>下载模板包</button></a>
+    </div>
+    <div class="row"><input type="file" id="fp" accept=".aap,.zip" style="display:none"></div>
+    <table><tr><th>包</th><th>版本</th><th>revision</th><th>协议</th><th>filters</th><th></th></tr>
+    ${pkgs.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.version)}</td><td>${p.revision}</td>
+      <td>${p.hasProtocol ? "✓" : ""}</td><td>${p.filters}</td>
+      <td>
+        <a href="/admin/api/packages/${esc(p.name)}/export"><button>导出</button></a>
+        <button class="danger" data-del="${esc(p.name)}">卸载</button>
+      </td></tr>`).join("")}</table>
+    <div id="pmsg" class="muted"></div>
+    <h3>在线编辑</h3>
+    <div class="row">包 <select id="ep">${pkgs.map(p => `<option>${esc(p.name)}</option>`).join("")}</select>
+      类型 <select id="ek"><option value="protocol">protocol</option><option value="filter">filter</option></select>
+      filter 名 <input id="en" style="width:120px" placeholder="filter 时必填">
+      <button id="load">载入</button> <button class="pri" id="save">保存(热生效)</button></div>
+    <textarea id="code" rows="18"></textarea>
+    <div class="row muted">保存 = 替换部件源码并整包升级(revision+1),新请求立即用新代码</div>`;
+  $("#load").onclick = async () => {
+    try {
+      const name = $("#ep").value, kind = $("#ek").value, fn = $("#en").value;
+      const src = await api.get(`/packages/${name}/code?kind=${kind}${kind === "filter" ? "&name=" + fn : ""}`, true);
+      $("#code").value = src;
+    } catch (err) { msg(false, err.message); }
+  };
+  $("#save").onclick = async () => {
+    try {
+      const name = $("#ep").value, kind = $("#ek").value, fn = $("#en").value;
+      const q = `?kind=${kind}${kind === "filter" ? "&name=" + fn : ""}`;
+      await api.put(`/packages/${name}/code${q}`, $("#code").value);
+      msg(true, "已保存,新请求热生效");
+    } catch (err) { msg(false, err.message); }
+  };
+  $("#ip").onclick = () => $("#fp").click();
+  $("#fp").onchange = async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(await f.arrayBuffer())));
+    try {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const r = await fetch("/admin/api/packages", { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: bytes });
+      if (!r.ok) throw new Error((await r.json()).error || "HTTP " + r.status);
+      msg(true, "已安装"); showPackages();
+    } catch (err) { msg(false, err.message); }
+  };
+  $("#iu").onclick = async () => {
+    const url = prompt("包 URL (.aap):");
+    if (!url) return;
+    try { await api.post("/packages/import-url", { url }); msg(true, "已安装"); showPackages(); }
+    catch (err) { msg(false, err.message); }
+  };
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`卸载包 ${b.dataset.del}?`)) return;
+    try { await api.del(`/packages/${b.dataset.del}`); msg(true, "已卸载"); showPackages(); }
+    catch (err) { msg(false, err.message); }
+  });
+}
+
+/* ─── 监控 ─── */
+async function showMonitor() {
+  const [m, series, transports] = await Promise.all([
+    api.get("/metrics/live"), api.get("/metrics/series?minutes=60"), api.get("/transports")]);
+  $("#main").innerHTML = `
+    <h2>实时监控</h2>
+    <div class="cards">
+      <div class="card"><b>${m.total_requests}</b>总请求(当前分钟)</div>
+      <div class="card"><b>${m.total_errors}</b>错误</div>
+      <div class="card"><b>${m.active_concurrent}</b>并发</div>
+    </div>
+    <h3>分钟时序(近 60 分钟)</h3>
+    <canvas id="chart" width="960" height="220" style="border:1px solid var(--bd);max-width:100%"></canvas>
+    <div class="muted row">蓝=请求数 红=错误数 <span id="cmin"></span></div>
+    <h3>传输实例</h3>
+    <table><tr><th>名称</th><th>类型</th><th>地址</th><th>最近探测</th><th></th></tr>
+    ${(transports || []).map(t => {
+      const h = t.health;
+      const health = h ? (h.ok ? `<span style="color:var(--ok)">通 ${h.latency_ms}ms</span> <span class="muted">${new Date(h.checked_at).toLocaleTimeString()}</span>`
+                              : `<span style="color:var(--err)">断</span> <span class="muted" title="${esc(h.error||"")}">${new Date(h.checked_at).toLocaleTimeString()}</span>`) : '<span class="muted">未探测</span>';
+      return `<tr><td>${esc(t.name)}</td><td>${esc(t.type)}</td>
+      <td class="muted">${esc(t.url || "direct")}</td><td>${health}</td>
+      <td><button data-tt="${esc(t.name)}">测试连通</button> <span id="tr-${esc(t.name)}" class="muted"></span></td></tr>`;
+    }).join("")}</table>
+    <h3>按上游</h3><pre class="log">${esc(JSON.stringify(m.by_upstream, null, 2))}</pre>
+    <h3>按目标</h3><pre class="log">${esc(JSON.stringify(m.by_target, null, 2))}</pre>`;
+  drawChart(series);
+  document.querySelectorAll("[data-tt]").forEach(b => b.onclick = async () => {
+    const span = $("#tr-" + CSS.escape(b.dataset.tt));
+    span.textContent = "测试中…";
+    try {
+      const r = await api.post(`/transports/${b.dataset.tt}/test`, {});
+      span.textContent = r.ok ? `通 ${r.latency_ms}ms` : `断: ${r.error}`;
+      span.style.color = r.ok ? "var(--ok)" : "var(--err)";
+      // 刷新"最近探测"列(手动测试结果与周期探测同源展示)
+      setTimeout(() => showMonitor(), 300);
+    } catch (err) { span.textContent = err.message; span.style.color = "var(--err)"; }
+  });
+}
+
+function drawChart(series) {
+  const cv = $("#chart"), ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!series || !series.length) {
+    ctx.fillStyle = "#888"; ctx.font = "13px system-ui";
+    ctx.fillText("暂无时序数据(每分钟落一次库)", 20, 40);
+    return;
+  }
+  const W = cv.width, H = cv.height, pad = 28;
+  const maxV = Math.max(1, ...series.map(p => Math.max(p.requests, p.errors)));
+  const x = i => pad + (W - 2 * pad) * (series.length === 1 ? 0.5 : i / (series.length - 1));
+  const y = v => H - pad - (H - 2 * pad) * (v / maxV);
+  // 网格
+  ctx.strokeStyle = "#eee";
+  for (let g = 0; g <= 4; g++) {
+    const gy = y(maxV * g / 4);
+    ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W - pad, gy); ctx.stroke();
+    ctx.fillStyle = "#888"; ctx.font = "11px system-ui";
+    ctx.fillText(String(Math.round(maxV * g / 4)), 2, gy + 4);
+  }
+  const line = (key, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    series.forEach((p, i) => i ? ctx.lineTo(x(i), y(p[key])) : ctx.moveTo(x(i), y(p[key])));
+    ctx.stroke();
+  };
+  line("requests", "#3b5bdb");
+  line("errors", "#c22");
+  $("#cmin").textContent = ` ${series[0].minute} ~ ${series[series.length - 1].minute}`;
+}
+
+$("#logout").onclick = async () => {
+  try { await api.post("/logout", {}); } catch (e) {}
+  sessionStorage.removeItem("in"); show("login");
+};
+document.querySelectorAll("nav a[data-p]").forEach(a => a.onclick = () => show(a.dataset.p));
+
+// 入口:已登录态探测
+(async () => {
+  try { await api.get("/me"); show("ups"); } catch (e) { show("login"); }
+})();
+</script>
+</body>
+</html>

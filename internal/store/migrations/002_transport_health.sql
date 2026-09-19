@@ -1,0 +1,2 @@
+-- 传输连通性状态(kv 即可:ns=transport_health,key=传输名,值=最近探测结果 JSON)
+-- 不建独立表:探测是易变运行态,丢历史无影响, kv 天然幂等 upsert
