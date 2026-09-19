@@ -13,13 +13,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Go test (race)
         run: go test -race ./...
-      - name: Plugin package tests
-        run: node --test plugins/*/test/
       - name: Vet
         run: go vet ./...
 

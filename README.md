@@ -24,8 +24,6 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 - **快速路径**:openai 入口 ∧ 内置协议 ∧ 空 filter 链 → 字节透传(不重序列化)
 - **runtime 池**:JS hook 粒度借还(池 = GOMAXPROCS,env `API_PROXY_POOL_SIZE` 逃生),排队 5s 超时 → 503
 
-详见 `docs/ai-api-proxy/`(设计文档树)。
-
 ## 配置
 
 `config.yaml` > 环境变量(`API_PROXY_` 前缀) > 默认值。字段:
@@ -41,21 +39,22 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 
 ## 插件开发
 
-- 类型与宿主面:`sdk/ai-api-proxy.d.ts`;本地测试宿主:`sdk/test.js`(与 Go host 语义一致)
-- 参考包:`plugins/rewrite-model`(filter + configSchema + 单测)、`plugins/js-openai-full`(完整协议,与内置 Go 版黄金对照)
+插件包已拆分独立仓库:[mzzsfy/ai-api-proxy-plugin](https://github.com/mzzsfy/ai-api-proxy-plugin)(含 `sdk/`、样例包与测试)。
+
+- 类型与宿主面:`sdk/ai-api-proxy.d.ts`(插件库内);本地测试宿主:`sdk/test.js`(与 Go host 语义一致)
 - 起步模板:管理 GUI → 包 → 下载模板包;或 `GET /packages/template`
-- 测试:`node --test plugins/*/test/`;类型守卫:`cd plugins && npx -y -p typescript tsc -p tsconfig.json`
+- 测试:`node --test plugins/*/test/*.test.js`(插件库根执行)
 - 管理包:GUI 在线编辑(保存热生效)/ 导入(文件或 URL)/ 导出 / 卸载
+- 目录热载:`config.plugins_dir` 指向的目录内 `.aap` 启动时自动导入(幂等)
 
 ## 开发
 
 ```bash
 go test -race ./...    # Go 全量
 go vet ./...
-node --test sdk/test.js plugins/*/test/*.test.js
 ```
 
-目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/admin/adminweb/store/transport)、`sdk/`(插件 SDK)、`plugins/`(预置包)、`docs/`(设计文档与进度)。
+目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/admin/adminweb/store/transport)、`sdk/`(镜像内插件 SDK 快照)。
 
 ## 部署
 
