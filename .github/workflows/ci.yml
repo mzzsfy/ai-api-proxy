@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # 默认形态:零私有依赖(warp 走 withwarp 标签、mihomo 走 withproxy 标签,均不进默认构建)
   test:
     runs-on: ubuntu-latest
     steps:
@@ -13,42 +14,35 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Resolve published modules
-        # go.mod 的 replace 指向本地同级 checkout(离线开发用);CI 上换成已发布版本。
-        # 依赖库(warp-pool / ai-api-proxy-plugin-proxy)为私有库时:在此步前配 PAT insteadOf,
-        # 并设 GOPRIVATE=github.com/mzzsfy/*;公开库则无需任何 secret。
-        env:
-          GOPRIVATE: github.com/mzzsfy/*
+      - name: Drop local replaces
+        # go.mod 的 replace/require 指向本地同级 checkout(离线开发用);
+        # 默认构建不 import 这些模块(标签隔离),直接剥掉即可,无需任何网络拉取。
         run: |
           go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
           go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
-          go get github.com/mzzsfy/warp-pool@v0.1.0 github.com/mzzsfy/ai-api-proxy-plugin-proxy@v0.1.0
-          go mod tidy
       - name: Go test (race)
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
 
-  # withproxy 形态:mihomo 内核集成(vless/vmess 等;依赖 warp-pool@v0.1.0 + plugin-proxy@v0.1.0)
-  test-withproxy:
+  # withwarp 形态:warp-pool 已公开,可自由拉取
+  test-withwarp:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Resolve published modules
-        env:
-          GOPRIVATE: github.com/mzzsfy/*
+      - name: Resolve warp-pool
         run: |
           go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
           go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
-          go get github.com/mzzsfy/warp-pool@v0.1.0 github.com/mzzsfy/ai-api-proxy-plugin-proxy@v0.1.0
+          go get github.com/mzzsfy/warp-pool@v0.1.0
           go mod tidy
-      - name: Build withproxy
-        run: go build -tags withproxy ./...
-      - name: Test withproxy
-        run: go test -tags withproxy ./...
+      - name: Build withwarp
+        run: go build -tags withwarp ./...
+      - name: Test withwarp
+        run: go test -tags withwarp ./...
 
   docker:
     needs: test

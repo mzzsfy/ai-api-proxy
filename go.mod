@@ -5,8 +5,8 @@ go 1.27.0
 require (
 	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
 	github.com/google/uuid v1.6.0
-	github.com/mzzsfy/ai-api-proxy-plugin-proxy v0.0.0
-	github.com/mzzsfy/warp-pool v0.0.0
+	github.com/mzzsfy/ai-api-proxy-plugin-proxy v0.0.0-00010101000000-000000000000
+	github.com/mzzsfy/warp-pool v0.1.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -14,8 +14,9 @@ require (
 )
 
 // 本地开发:HTTPS 直连 GitHub 被墙,replace 到同级 checkout;
-// CI/他人构建时删除 replace 行(自有库公开可达)。
-// mihomo 依赖树仅 -tags withproxy 构建路径引用,默认构建不受影响。
+// CI/他人构建时删除 replace 行。warp-pool 已公开(require 落真版本,replace 仅本地提速)。
+// plugin-proxy 为私有库:仅 -tags withproxy 构建路径引用,默认构建零引用;
+// 其 require 版本 v0.1.0 已打 tag。mihomo 依赖树(withproxy 链)默认构建不加载。
 replace github.com/mzzsfy/warp-pool => ../warp-pool
 
 replace github.com/mzzsfy/ai-api-proxy-plugin-proxy => ../ai-api-proxy-plugin-proxy
@@ -141,6 +142,7 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/skye-z/amz v0.2.3 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
+	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a // indirect

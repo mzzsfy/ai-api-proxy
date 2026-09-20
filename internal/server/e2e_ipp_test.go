@@ -267,13 +267,13 @@ func TestE2E_IPP_未注册类型拒绝(t *testing.T) {
 	}
 }
 
-// 路径 5:内置供给方注册名齐备
+// 路径 5:内置供给方注册名齐备(ipp_warp 需 -tags withwarp,此处校验默认构建的非标签集)
 func TestE2E_IPP_注册名齐备(t *testing.T) {
 	kinds := map[string]bool{}
 	for _, k := range ipprovider.Kinds() {
 		kinds[k] = true
 	}
-	for _, want := range []string{"ipp_warp", "ipp_clash", "ipp_remote"} {
+	for _, want := range []string{"ipp_clash", "ipp_remote"} {
 		if !kinds[want] {
 			t.Fatalf("missing builtin provider %s", want)
 		}

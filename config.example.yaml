@@ -22,7 +22,7 @@ transports: []
 #    url: "socks5://user:pass@host:port"
 #
 # ── IP 供给方传输(ipp_ 前缀;出口 IP 池管理,见 docs/ai-api-proxy/feat/ipprovider.md)──
-#  - name: warp-out                # WARP 实例池(进程内,状态落 data_dir/ipp/<name>)
+#  - name: warp-out                # WARP 实例池(进程内,状态落 data_dir/ipp/<name>;需 -tags withwarp 构建)
 #    type: ipp_warp
 #    options:
 #      min: 1                      # 实例数下限(>0)

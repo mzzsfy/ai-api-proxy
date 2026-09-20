@@ -11,6 +11,9 @@ import (
 // bytesReader JSON 桥解码辅助
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
+// logf 供给方日志出口(server 装配时可重定向;默认静默防依赖 internal/log)
+var logf = func(format string, args ...any) {}
+
 // decodeOptions 把供给方私有 Options(map,来源 yaml.RawMessage 展开)解码到目标结构。
 // map 键为 yaml 字段名;经 JSON 桥转(yaml 键为小写下划线形态,与 json tag 对齐)。
 func decodeOptions(opts map[string]any, target any) error {

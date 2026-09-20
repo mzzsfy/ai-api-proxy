@@ -1,3 +1,5 @@
+//go:build withwarp
+
 package ipprovider
 
 import (
@@ -11,6 +13,8 @@ import (
 
 // warpProvider warp-pool 胶水(设计 §4.1):进程内 WARP 实例池,
 // Dial 失败自动顺延候选(库内建),Report(Bad) 触发实例 Draining 重播换出口。
+// 构建约束:withwarp 标签——warp-pool 为可公开的独立库,默认构建不引入
+// (与 ipp_mihomo 的 withproxy 同构);未启用时 ipp_warp 未注册,配置校验拒绝。
 func init() {
 	Register("ipp_warp", newWarpProvider)
 }
@@ -181,6 +185,3 @@ func (l *warpLease) Release() {
 }
 
 func (l *warpLease) Capabilities() Capabilities { return l.p.Capabilities() }
-
-// logf 供给方日志出口(server 装配时可重定向;默认静默防依赖 internal/log)
-var logf = func(format string, args ...any) {}
