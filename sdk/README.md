@@ -12,21 +12,30 @@ JS 部件开发工具集。部件契约与宿主面以 `ai-api-proxy.d.ts` 为�
 ## 本地测试
 
 ```js
-const { loadPart, mockCtx } = require("<repo>/sdk/test.js");
-const hooks = loadPart(src, config, { api_key: "sk-test" });
+const { loadPackage, mockCtx } = require("<repo>/sdk/test.js");
+
+const hooks = loadPackage(__dirname + "/..", { config: {}, secrets: { api_key: "sk-test" } });
 const req = hooks.buildRequest(mockCtx());
 ```
 
-运行:`node --test <包>/test/*.test.js`
+`loadPackage(dir, {config, secrets, entry?})` 按目录内 manifest 自动定位部件入口,免去读文件样板;
+需直接给源码时用 `loadPart(src, config, secrets)`。
+
+运行:`node --test <包>/test/*.test.js`;SDK 自测:`node --test sdk/test.js`
+
+## 唯一源
+
+本目录是 SDK 的唯一源(类型定义 + 测试宿主 + 说明),随宿主演进。
+**外部库(如插件库 plugins-repo)需使用时,从本仓库拉取本目录**,不在外部库内另行维护副本。
 
 ## 类型守卫
 
-部件加 `// @ts-check` + d.ts reference + JSDoc 标注(参考 plugins/ 两包),验证:
+部件加 `// @ts-check` + d.ts reference + JSDoc 标注,验证:
 
 ```
 cd plugins && npx -y -p typescript tsc -p tsconfig.json
 ```
 
-零错误 = 部件与 d.ts 契约一致;新增包应纳入 plugins/tsconfig.json 的 include(默认 **/*.js)。
+零错误 = 部件与 d.ts 契约一致;新增包应纳入 tsconfig 的 include。
 
-参考包:`plugins/rewrite-model`(factory 形态 filter + configSchema + 单测)、`plugins/js-openai-full`(完整协议 + 黄金对照)
+参考:`examples/gemini`(协议转换最小完整示例,四 hook 全实现 + [编写说明](examples/gemini/README.md))

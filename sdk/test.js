@@ -1,9 +1,12 @@
 // ai-api-proxy 插件开发本地测试宿主
 // 用法:在包 test/*.test.js 中 require 本文件,获得与 Go host 一致的注入面
 // 行为基准 = internal/plugin/runtime.go(bindUtil/bindLog/bindStorage)
+// 本文件是 SDK 唯一源;插件库等外部库需使用时从本仓库拉取
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 
 // ─── util 全集(与 host 绑定语义一致) ───
 
@@ -107,6 +110,17 @@ function loadPart(src, config, secrets) {
   return typeof exported === "function" ? exported(config || {}) : exported;
 }
 
+// loadPackage 直接装载包目录(免去各测试文件的读文件样板)
+// dir 为包含 manifest.json 的目录;entry 缺省取协议部件入口,可用 config/secrets 覆盖
+function loadPackage(dir, opts) {
+  const o = opts || {};
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+  const entry = o.entry || (manifest.parts && manifest.parts.protocol && manifest.parts.protocol.entry);
+  if (!entry) throw new Error(`package ${dir}: no part entry declared`);
+  const src = fs.readFileSync(path.join(dir, entry), "utf8");
+  return loadPart(src, o.config, o.secrets);
+}
+
 const util = {
   deepMerge, deepClone, get, set, pick, omit,
   b64encode, b64decode, b64urlEncode, b64urlDecode,
@@ -128,7 +142,7 @@ function mockCtx(over) {
   }, over);
 }
 
-module.exports = { loadPart, mockCtx, util, log, storage, makeStorage };
+module.exports = { loadPart, loadPackage, mockCtx, util, log, storage, makeStorage };
 
 // ─── 自测(node --test sdk/test.js) ───
 if (require.main === module) {
@@ -166,6 +180,23 @@ if (require.main === module) {
     const req = hooks.buildRequest(mockCtx());
     assert.equal(req.url, "https://upstream.test/v1");
     assert.equal(req.headers.Authorization, "Bearer sk-1");
+  });
+
+  test("loadPackage reads manifest entry and passes config/secrets", () => {
+    const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "aap-pkg-"));
+    fs.writeFileSync(
+      path.join(dir, "manifest.json"),
+      JSON.stringify({ manifestVersion: 1, name: "t", parts: { protocol: { entry: "protocol.js" } } })
+    );
+    fs.writeFileSync(
+      path.join(dir, "protocol.js"),
+      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: ctx.target.baseUrl + '/' + (config.p || 'd'), headers: { k: util.secret('api_key') } }; } }; };"
+    );
+    const hooks = loadPackage(dir, { config: { p: "v2" }, secrets: { api_key: "sk-9" } });
+    const req = hooks.buildRequest(mockCtx());
+    assert.equal(req.url, "https://upstream.test/v2");
+    assert.equal(req.headers.k, "sk-9");
+    assert.throws(() => loadPackage(path.join(dir, "nope")), /manifest/);
   });
 
   test("secret missing throws", () => {

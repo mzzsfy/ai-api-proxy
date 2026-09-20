@@ -50,27 +50,20 @@ func findRepoRoot(t *testing.T) string {
 	return ""
 }
 
-// mustGeminiFiles 从插件库加载 gemini 包(与主库同级的 plugins-repo;双处均缺失则跳过)
+// mustGeminiFiles 加载 gemini 示例包(SDK 内置;缺失则跳过)
 func mustGeminiFiles(t *testing.T) (string, string) {
 	t.Helper()
 	root := findRepoRoot(t)
-	candidates := []string{
-		filepath.Join(root, "plugins", "gemini"),
-		filepath.Join(root, "..", "plugins-repo", "plugins", "gemini"),
+	dir := filepath.Join(root, "sdk", "examples", "gemini")
+	manifest, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Skip("gemini example package not found; skipping real-upstream E2E")
 	}
-	for _, dir := range candidates {
-		manifest, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-		if err != nil {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Join(dir, "protocol.js"))
-		if err != nil {
-			t.Fatalf("read gemini protocol: %v", err)
-		}
-		return string(manifest), string(src)
+	src, err := os.ReadFile(filepath.Join(dir, "protocol.js"))
+	if err != nil {
+		t.Fatalf("read gemini protocol: %v", err)
 	}
-	t.Skip("gemini plugin repo not found (split repo); skipping real-upstream E2E")
-	return "", ""
+	return string(manifest), string(src)
 }
 
 func geminiTestEnv(t *testing.T) (key, model string) {
