@@ -416,6 +416,73 @@ func TestAnthropicChunker_OpenAIFormChunk(t *testing.T) {
 	}
 }
 
+func TestAnthropicParse_ThinkingEcho(t *testing.T) {
+	// Given assistant 消息回传 thinking 块 When Parse Then reasoning_content 入 pivot
+	// 且不检出 FeatureThinking(回传是历史上下文,不要求上游具备思考能力)
+	body := `{"model":"glm-4.6","max_tokens":100,
+	  "messages":[
+	    {"role":"user","content":"q"},
+	    {"role":"assistant","content":[
+	      {"type":"thinking","thinking":"先前推理","signature":"sig"},
+	      {"type":"text","text":"先前回答"}]},
+	    {"role":"user","content":"继续"}]}`
+	p, feats, err := NewAnthropicCodec().Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := p.Raw["messages"].([]any)
+	ast := msgs[1].(map[string]any)
+	if ast["reasoning_content"] != "先前推理" {
+		t.Fatalf("reasoning_content: %v", ast["reasoning_content"])
+	}
+	content := ast["content"].([]any)
+	if len(content) != 1 || content[0].(map[string]any)["text"] != "先前回答" {
+		t.Fatalf("content: %v", content)
+	}
+	for _, f := range feats {
+		if f == FeatureThinking {
+			t.Fatalf("echo must not negotiate thinking: %v", feats)
+		}
+	}
+}
+
+func TestAnthropicParse_ThinkingEchoBoundaries(t *testing.T) {
+	// Given redacted_thinking 块与 user 消息内 thinking 块 When Parse Then 均丢弃不产 reasoning_content
+	body := `{"model":"m","max_tokens":10,
+	  "messages":[
+	    {"role":"assistant","content":[{"type":"redacted_thinking","data":"QQ=="}]},
+	    {"role":"user","content":[{"type":"thinking","thinking":"非法位置"},{"type":"text","text":"问"}]}]}`
+	p, _, err := NewAnthropicCodec().Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := p.Raw["messages"].([]any)
+	if _, ok := msgs[0].(map[string]any)["reasoning_content"]; ok {
+		t.Fatalf("redacted_thinking must be dropped: %v", msgs[0])
+	}
+	if _, ok := msgs[1].(map[string]any)["reasoning_content"]; ok {
+		t.Fatalf("user thinking block must not map: %v", msgs[1])
+	}
+}
+
+func TestAnthropicParse_ThinkingOnlyAssistant(t *testing.T) {
+	// Given assistant 仅 thinking 块 When Parse Then reasoning_content 保留,content 归一空串
+	body := `{"model":"m","max_tokens":10,
+	  "messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"只有推理"}]}]}`
+	p, _, err := NewAnthropicCodec().Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := p.Raw["messages"].([]any)
+	ast := msgs[0].(map[string]any)
+	if ast["reasoning_content"] != "只有推理" {
+		t.Fatalf("reasoning_content: %v", ast["reasoning_content"])
+	}
+	if content := ast["content"].([]any); len(content) != 0 {
+		t.Fatalf("content: %v", content)
+	}
+}
+
 func TestAnthropicParse_ThinkingExtension(t *testing.T) {
 	// Given thinking 配置 When Parse Then x_thinking 原样入 pivot(插件经此恢复预算)
 	body := `{"model":"glm-4.6","max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":2048},

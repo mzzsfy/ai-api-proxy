@@ -134,6 +134,14 @@ func normalizeAnthropicMessages(m map[string]any) []any {
 		case string:
 			nm["content"] = content
 		case []any:
+			// thinking 块(assistant 多轮回传)归一为 reasoning_content(与响应向映射对称;
+			// signature/redacted_thinking 在 openai 形态不可承载,丢弃;
+			// 回传块不参与能力协商——历史上下文不要求上游具备思考能力)
+			if mm["role"] == "assistant" {
+				if thinking := extractAnthropicThinking(content); thinking != "" {
+					nm["reasoning_content"] = thinking
+				}
+			}
 			nm["content"] = normalizeAnthropicContent(content)
 		default:
 			nm["content"] = ""
@@ -141,6 +149,23 @@ func normalizeAnthropicMessages(m map[string]any) []any {
 		out = append(out, nm)
 	}
 	return out
+}
+
+// extractAnthropicThinking 拼接 content 块数组中的 thinking 文本
+func extractAnthropicThinking(parts []any) string {
+	var b strings.Builder
+	for _, p := range parts {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := pm["type"].(string); t == "thinking" {
+			if s, ok := pm["thinking"].(string); ok {
+				b.WriteString(s)
+			}
+		}
+	}
+	return b.String()
 }
 
 // normalizeAnthropicContent 块数组 → openai content parts 形态(text 字符串化,image 转 image_url)
