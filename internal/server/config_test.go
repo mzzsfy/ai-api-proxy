@@ -37,11 +37,40 @@ transports:
 	}
 }
 
-func TestLoad_MissingFileError(t *testing.T) {
-	// Given 不存在的配置文件路径 When Load Then 报错且含路径
-	_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err == nil {
-		t.Fatal("expect error for missing file")
+func TestLoad_MissingFileReleasesExample(t *testing.T) {
+	// Given 不存在的配置路径 When Load Then 释放示例配置且解析成功
+	p := filepath.Join(t.TempDir(), "sub", "config.yaml")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load with missing file: %v", err)
+	}
+	if len(cfg.APIKeys) == 0 {
+		t.Fatalf("released example should contain api_keys: %+v", cfg)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("released file unreadable: %v", err)
+	}
+	if len(b) == 0 {
+		t.Fatal("released example config is empty")
+	}
+}
+
+func TestLoad_ExistingFileNotOverwritten(t *testing.T) {
+	// Given 已存在的配置文件 When Load Then 内容不被覆盖
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("listen: \":9999\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "listen: \":9999\"\n" {
+		t.Fatalf("existing config overwritten: %q", b)
 	}
 }
 

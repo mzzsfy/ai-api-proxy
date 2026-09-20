@@ -3,12 +3,15 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/mzzsfy/ai-api-proxy/configexample"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
@@ -45,10 +48,14 @@ type Config struct {
 	TransportProbeIntervalSec int `yaml:"transport_probe_interval_sec"`
 }
 
-// Load 按优先级合并配置;空 APIKeys 视为拒绝启动的调用方职责
+// Load 按优先级合并配置;空 APIKeys 视为拒绝启动的调用方职责。
+// 配置文件不存在时释放内嵌示例配置到该路径(缺失才写,不覆盖),再行读取
 func Load(path string) (*Config, error) {
 	cfg := &Config{}
 	if path != "" {
+		if err := releaseExample(path); err != nil {
+			return nil, err
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read config %s: %w", path, err)
@@ -60,6 +67,25 @@ func Load(path string) (*Config, error) {
 	applyEnv(cfg)
 	applyDefaults(cfg)
 	return cfg, nil
+}
+
+// releaseExample 配置文件缺失时把内嵌示例写到 path(含父目录创建);已存在则不动
+func releaseExample(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat config %s: %w", path, err)
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, configexample.Example, 0o600); err != nil {
+		return fmt.Errorf("release example config %s: %w", path, err)
+	}
+	log.Printf("config %s not found: released example config (edit api_keys before production use)", path)
+	return nil
 }
 
 // applyEnv 扁平标量的环境变量覆盖(API_PROXY_ 前缀)

@@ -1,0 +1,63 @@
+# 依赖版本在 go.mod 管理;本地开发复制为 config.yaml 使用。
+# 容器部署:挂载宿主目录到 /data,本文件放 /data/config/config.yaml,
+# data_dir 与 plugins_dir 用容器内绝对路径(见 README 部署节)
+listen: ":8080"
+data_dir: "./data"
+api_keys:
+  - "sk-local-dev-key"
+admin_user: "admin"
+# 空口令则启动生成随机口令打印一次
+admin_pass_bcrypt: ""
+log_level: "info"
+plugins_dir: "./plugins"
+
+# 全局传输实例(部署资产,target 按名引用;仅 yaml 可表达嵌套)
+# 管理面 /admin → 监控 → 传输实例:可对每个实例做连通测试(ipp_* 同时展示出口 IP)
+transports: []
+#  - name: cn-relay
+#    type: http_proxy        # direct | http_proxy | socks5
+#    url: "http://user:pass@host:port"
+#  - name: socks-relay
+#    type: socks5
+#    url: "socks5://user:pass@host:port"
+#
+# ── IP 供给方传输(ipp_ 前缀;出口 IP 池管理,见 docs/ai-api-proxy/feat/ipprovider.md)──
+#  - name: warp-out                # WARP 实例池(进程内,状态落 data_dir/ipp/<name>;需 -tags withwarp 构建)
+#    type: ipp_warp
+#    options:
+#      min: 1                      # 实例数下限(>0)
+#      max: 3                      # 实例数上限
+#      listen_base: "127.0.0.1:51367"  # 实例 listener 端口起点(可选)
+#      dial_transport: "socks5"    # socks5(默认)| http
+#
+#  - name: clash-out               # 既有 clash/mihomo 混合端口(单出口,不可轮换)
+#    type: ipp_clash
+#    options:
+#      type: http_proxy            # http_proxy | socks5
+#      url: "http://127.0.0.1:6654"
+#
+#  - name: remote-out              # 远程供给 API(v1 协议,见 ipprovider-remote-api 规范)
+#    type: ipp_remote
+#    options:
+#      base: "https://provider.example"
+#      api_key: "sk-..."
+#      can_rotate_ip: true         # 配置静态声明;服务端 lease 级不一致时以服务端为准
+#      session_affinity: true
+#
+#  - name: mihomo-out              # mihomo 内核进程内集成(vless/vmess 等,需 -tags withproxy 构建)
+#    type: ipp_mihomo
+#    options:
+#      config: |                   # mihomo 配置片段(proxies,原生 clash 语法)
+#        proxies:
+#          - name: vless-1
+#            type: vless
+#            server: 1.2.3.4
+#            port: 443
+#            uuid: 9c0c15c8-...
+#            tls: true
+#            network: ws
+#            ws-opts: { path: /ws }
+
+# 传输健康周期探测(秒;0 或缺省=关闭,仅保留管理台手动"测试连通")
+# 开启后按周期对全部传输实例发一次 HEAD(默认探 gstatic 204),结果展示在管理台监控页
+transport_probe_interval_sec: 0
