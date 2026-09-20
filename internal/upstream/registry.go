@@ -446,9 +446,12 @@ func (r *Registry) Pick(model string, features []Feature, entry string, stream b
 	sort.Slice(withModel, func(i, j int) bool { return withModel[i].ID < withModel[j].ID })
 	var candidates []Candidate
 	capMissing := false
+	// 逐上游被滤原因(capability 错误文案;用户据此自救:换入口/关流/补能力声明或换上游)
+	var reasons []string
 	for _, u := range withModel {
-		if !r.matches(u, features, entry, stream) {
+		if reason, ok := r.mismatchReason(u, features, entry, stream); !ok {
 			capMissing = true
+			reasons = append(reasons, reason)
 			continue
 		}
 		if !hasEnabledTarget(u) {
@@ -458,35 +461,46 @@ func (r *Registry) Pick(model string, features []Feature, entry string, stream b
 	}
 	if len(candidates) == 0 {
 		if capMissing {
-			return nil, PickCapability, PickCapability
+			// 上限防御:上游多时长串;声明该模型的上游数量级小,5 条足够定位
+			if len(reasons) > 5 {
+				reasons = reasons[:5]
+			}
+			return nil, PickCapability, fmt.Errorf("%w: model %s: %s", PickCapability, model, strings.Join(reasons, "; "))
 		}
 		return nil, PickUnhealthy, PickUnhealthy
 	}
 	return candidates, 0, nil
 }
 
-// matches 主包声明是否可服务该入口请求(协议全名 + 形态 + features;禁用包不协商)
-func (r *Registry) matches(u *Upstream, features []Feature, entry string, stream bool) bool {
+// mismatchReason 上游被滤原因(可服务=false 时返回 reason);可服务=true 时 reason 空
+func (r *Registry) mismatchReason(u *Upstream, features []Feature, entry string, stream bool) (string, bool) {
 	if !r.pkgs.IsEnabled(u.Base.Package) {
-		return false
+		return u.Name + " package disabled", false
 	}
 	pkg, err := r.pkgs.GetPackage(u.Base.Package)
 	if err != nil || pkg.Manifest.Parts.Protocol == nil {
-		return false
+		return u.Name + " package not loadable", false
 	}
 	d := pkg.Manifest.Parts.Protocol
 	if d.Protocol != entry {
-		return false
+		return u.Name + " declares " + d.Protocol, false
 	}
 	if !hasForm(d.Form, stream) {
-		return false
+		if stream {
+			return u.Name + " declares non_streaming only", false
+		}
+		return u.Name + " declares streaming only", false
 	}
+	var missing []string
 	for _, f := range features {
 		if !containsString(d.Features, f) {
-			return false
+			missing = append(missing, string(f))
 		}
 	}
-	return true
+	if len(missing) > 0 {
+		return u.Name + " lacks " + strings.Join(missing, ", "), false
+	}
+	return "", true
 }
 
 // hasForm 入口形态是否被声明

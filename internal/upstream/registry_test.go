@@ -224,6 +224,43 @@ func TestPick_FormMismatchIsCapability(t *testing.T) {
 	}
 }
 
+func TestPick_CapabilityErrorCarriesReasons(t *testing.T) {
+	// Given 多上游声明同一模型但各缺一样(槽/形态/feature) When Pick Then 错误文案逐上游给出可自救原因
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkgForm(t, pkgs, "oa", `["streaming","non_streaming"]`, `["tools"]`)
+	installBuiltinLikePkgForm(t, pkgs, "ns", `["non_streaming"]`, `["tools"]`)
+	installBuiltinLikePkgForm(t, pkgs, "nv", `["streaming","non_streaming"]`, `["tools","vision"]`)
+	for _, name := range []string{"oa", "ns", "nv"} {
+		u := &Upstream{Name: name, Enabled: true, Base: PackageRef{Package: name}, Models: []string{"m"},
+			Targets: []Target{{Name: "t", Enabled: true, Secrets: map[string]string{"api_key": "k"}}}}
+		if err := reg.Save(context.Background(), u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// anthropic 入口:oa/ns 槽不符;nv 缺 streaming 形态下再缺 vision 无意义,单维断言
+	_, pe, err := reg.Pick("m", nil, "anthropic-messages", false)
+	if pe != PickCapability {
+		t.Fatalf("want Capability, got %v", pe)
+	}
+	if !strings.Contains(err.Error(), "oa declares openai-completions") {
+		t.Fatalf("slot reason missing: %v", err)
+	}
+	// openai 入口 stream + vision + thinking:ns 缺 streaming,nv 缺 thinking
+	_, pe, err = reg.Pick("m", []Feature{"vision", "thinking"}, "openai-completions", true)
+	if pe != PickCapability {
+		t.Fatalf("want Capability, got %v", pe)
+	}
+	if !strings.Contains(err.Error(), "ns declares non_streaming only") {
+		t.Fatalf("form reason missing: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nv lacks thinking") {
+		t.Fatalf("feature reason missing: %v", err)
+	}
+	if !strings.Contains(err.Error(), "oa lacks vision, thinking") {
+		t.Fatalf("multi-feature reason missing: %v", err)
+	}
+}
+
 func TestPick_UnhealthyWhenNoEnabledTarget(t *testing.T) {
 	// Given 全部目标禁用 When Pick Then PickUnhealthy
 	pkgs, reg := testEnv(t)

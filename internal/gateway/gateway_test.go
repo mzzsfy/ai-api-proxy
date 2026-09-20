@@ -311,7 +311,7 @@ func TestExhausted_LastStatusPassthrough(t *testing.T) {
 }
 
 func TestMessages_CapabilityMismatch400(t *testing.T) {
-	// Given 上游仅声明 openai-completions When anthropic 入口请求 Then 400(不转换,不透传)
+	// Given 上游仅声明 openai-completions When anthropic 入口请求 Then 400 且错误体含可自救原因
 	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[]}`)
 	body := `{"model":"test-model","max_tokens":10,"messages":[{"role":"user","content":"q"}]}`
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
@@ -322,6 +322,13 @@ func TestMessages_CapabilityMismatch400(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"type":"error"`) {
 		t.Fatalf("anthropic error shape: %s", w.Body.String())
+	}
+	// 逐上游原因(槽不符)+ 模型声明方汇总,用户可据此换入口或换上游
+	if !strings.Contains(w.Body.String(), "u1 declares openai-completions") {
+		t.Fatalf("reason missing: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "declared by u1(openai-completions)") {
+		t.Fatalf("slot summary missing: %s", w.Body.String())
 	}
 }
 

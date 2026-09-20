@@ -104,7 +104,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		case upstream.PickNoModel:
 			writeErrorWithModels(w, entry, http.StatusNotFound, "no upstream for model", g.availableModels(entry.Protocol))
 		case upstream.PickCapability:
-			writeError(w, entry, http.StatusBadRequest, "capability mismatch: model declared by "+g.slotSummary(model))
+			writeError(w, entry, http.StatusBadRequest, err.Error()+"; declared by "+g.slotSummary(model))
 		default:
 			writeError(w, entry, http.StatusServiceUnavailable, "no healthy target")
 		}
