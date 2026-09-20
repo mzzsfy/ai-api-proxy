@@ -206,7 +206,16 @@ const (
 	adminTestPass    = "e2e-admin-pass"
 )
 
+// newFourGroups 默认夹具:真实网关 + 假上游 + 本地转发代理 + 2 真实插件包 + 4 上游实例;
+// 网关客户端超时按本地假上游给(真实上游 E2E 用 newFourGroupsWith 放宽)
 func newFourGroups(t *testing.T) *fourGroupsFixture {
+	t.Helper()
+	return newFourGroupsWith(t, 10*time.Second)
+}
+
+// newFourGroupsWith 指定网关客户端超时的夹具(真实网络 E2E 需要更长等待)
+// extraTransports 追加命名传输实例(真实网络 E2E 从环境注入真实出口用)
+func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransports ...TransportCfg) *fourGroupsFixture {
 	t.Helper()
 	upSrv, spy := newMockUpstream(t)
 	proxySrv, proxyHits := newForwardProxy(t)
@@ -217,7 +226,7 @@ func newFourGroups(t *testing.T) *fourGroupsFixture {
 	cfg := &Config{
 		Listen: ":0", DataDir: t.TempDir(),
 		APIKeys: []string{"sk-test"}, AdminUser: adminTestUser, AdminPassBcrypt: adminHash,
-		Transports: []TransportCfg{{Name: "px", Type: "http_proxy", URL: proxySrv.URL}},
+		Transports: append([]TransportCfg{{Name: "px", Type: "http_proxy", URL: proxySrv.URL}}, extraTransports...),
 	}
 	app, err := Build(cfg)
 	if err != nil {
@@ -257,7 +266,7 @@ func newFourGroups(t *testing.T) *fourGroupsFixture {
 	t.Cleanup(gateway.Close)
 	return &fourGroupsFixture{
 		app: app, gateway: gateway, upstreamSrv: upSrv, spy: spy, proxySrv: proxySrv, proxyHits: proxyHits,
-		client:       &http.Client{Timeout: 10 * time.Second},
+		client:       &http.Client{Timeout: clientTimeout},
 		upstreamBase: upSrv.URL,
 	}
 }
