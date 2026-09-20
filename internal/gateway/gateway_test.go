@@ -365,7 +365,7 @@ func TestStreaming_Output(t *testing.T) {
 }
 
 func TestStreaming_NonBuiltin_GeneratedDONE(t *testing.T) {
-	// Given 非内置协议(JS 包)走管道 When 流式 Then convert 生成 [DONE] 收尾
+	// Given 非内置协议(JS 包)走管道 When 流式 Then convert 生成 [DONE] 收尾,且每行 data 为单对象(非数组包裹)
 	f := newFixture(t, 200, "text/event-stream", "data: {\"id\":\"c\",\"delta\":{\"content\":\"a\"}}\n\n")
 	f.installJSProtocol(t)
 	body := `{"model":"test-model","stream":true,"messages":[{"role":"user","content":"x"}]}`
@@ -375,6 +375,9 @@ func TestStreaming_NonBuiltin_GeneratedDONE(t *testing.T) {
 	out := w.Body.String()
 	if !strings.Contains(out, "[DONE]") || !strings.Contains(out, `"id":"c"`) {
 		t.Fatalf("sse out: %q", out)
+	}
+	if strings.Contains(out, "data: [{") {
+		t.Fatalf("chunk must not be array-wrapped: %q", out)
 	}
 }
 

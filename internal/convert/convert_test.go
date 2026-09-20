@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
@@ -55,16 +56,41 @@ func TestOpenAICodec_Inspect_NoMutation(t *testing.T) {
 	}
 }
 
-// TestOpenAICodec_Framer 逐 chunk 一事件 + [DONE] 收尾
+// TestOpenAICodec_Framer 事件对象数组逐元素一事件(契约同 anthropic framer)+ [DONE] 收尾
 func TestOpenAICodec_Framer(t *testing.T) {
 	f := NewOpenAICodec().Framer()
-	evs := f.Frame([]byte(`{"id":"c1"}`))
-	if len(evs) != 1 || evs[0].Event != "" || evs[0].Data != `{"id":"c1"}` {
-		t.Fatalf("frame: %+v", evs)
+	evs := f.Frame([]byte(`[{"id":"c1","choices":[{"delta":{"role":"assistant"}}]},{"id":"c1","choices":[{"delta":{"content":"a"}}]}]`))
+	if len(evs) != 2 {
+		t.Fatalf("events: %+v", evs)
+	}
+	if evs[0].Event != "" || evs[1].Event != "" {
+		t.Fatalf("openai chunks carry no event line: %+v", evs)
+	}
+	if !strings.HasPrefix(evs[0].Data, `{`) || !strings.HasSuffix(evs[0].Data, `}`) {
+		t.Fatalf("element must be a bare object, got: %s", evs[0].Data)
+	}
+	if !strings.Contains(evs[1].Data, `"content":"a"`) {
+		t.Fatalf("second chunk: %s", evs[1].Data)
 	}
 	fin := f.Flush()
 	if len(fin) != 1 || fin[0].Data != "[DONE]" {
 		t.Fatalf("flush: %+v", fin)
+	}
+}
+
+// TestOpenAICodec_Framer_EmptyArray 空数组 → 零事件(契约:[] 跳帧)
+func TestOpenAICodec_Framer_EmptyArray(t *testing.T) {
+	if evs := NewOpenAICodec().Framer().Frame([]byte(`[]`)); len(evs) != 0 {
+		t.Fatalf("events: %+v", evs)
+	}
+}
+
+// TestOpenAICodec_Framer_Fallback 非数组载荷降级原样单事件(镜像 anthropicFramer)
+func TestOpenAICodec_Framer_Fallback(t *testing.T) {
+	f := NewOpenAICodec().Framer()
+	evs := f.Frame([]byte(`{"id":"c1"}`))
+	if len(evs) != 1 || evs[0].Data != `{"id":"c1"}` {
+		t.Fatalf("fallback: %+v", evs)
 	}
 }
 
