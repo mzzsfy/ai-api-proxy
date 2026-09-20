@@ -16,7 +16,8 @@ require (
 // 本地开发:HTTPS 直连 GitHub 被墙,replace 到同级 checkout;
 // CI/他人构建时删除 replace 行。warp-pool 已公开(require 落真版本,replace 仅本地提速)。
 // plugin-proxy 为私有库:仅 -tags withproxy 构建路径引用,默认构建零引用;
-// 其 require 版本 v0.1.0 已打 tag。mihomo 依赖树(withproxy 链)默认构建不加载。
+// require 的替身版本(tidy 对目录 replace 的标准产物)不会被默认构建解析;
+// 需解析模块图的操作(go mod download/tidy)须先 droprequire 它。mihomo 依赖树默认构建不加载。
 replace github.com/mzzsfy/warp-pool => ../warp-pool
 
 replace github.com/mzzsfy/ai-api-proxy-plugin-proxy => ../ai-api-proxy-plugin-proxy

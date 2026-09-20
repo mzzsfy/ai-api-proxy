@@ -26,6 +26,8 @@ jobs:
         run: go vet ./...
 
   # withwarp 形态:warp-pool 已公开,可自由拉取
+  # (禁用 go mod tidy:tidy 扫全标签图会试图解析私有 plugin-proxy 的替身版本;
+  #  droprequire 剥掉即可——withwarp 形态不 import 该模块)
   test-withwarp:
     runs-on: ubuntu-latest
     steps:
@@ -35,10 +37,9 @@ jobs:
           go-version-file: go.mod
       - name: Resolve warp-pool
         run: |
-          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
-          go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go mod edit -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
           go get github.com/mzzsfy/warp-pool@v0.1.0
-          go mod tidy
       - name: Build withwarp
         run: go build -tags withwarp ./...
       - name: Test withwarp
