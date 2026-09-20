@@ -3,6 +3,8 @@ package convert
 import (
 	"encoding/json"
 	"errors"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // OpenAICodec openai-completions 入口只读面
@@ -12,7 +14,7 @@ type OpenAICodec struct{}
 func NewOpenAICodec() *OpenAICodec { return &OpenAICodec{} }
 
 // Protocol 协议全名
-func (c *OpenAICodec) Protocol() string { return "openai-completions" }
+func (c *OpenAICodec) Protocol() string { return pipeline.ProtocolOpenAICompletions }
 
 // Framer 逐请求帧格式化器
 func (c *OpenAICodec) Framer() Framer { return &openAIFramer{} }

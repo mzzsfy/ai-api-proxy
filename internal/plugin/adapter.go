@@ -227,7 +227,8 @@ func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte)
 func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]byte, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapEvent == nil {
-			return string(event), false, nil // 未实现:原帧透传
+			// 未实现:声明缺 streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
+			return nil, false, errors.New("mapEvent not implemented")
 		}
 		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapEvent, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, event))
@@ -282,7 +283,8 @@ func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]
 func (g *gojaProtocol) MapResponse(ctx *pipeline.PipelineContext, body []byte) ([]byte, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapResponse == nil {
-			return string(body), false, nil // 未实现:原体透传
+			// 未实现:声明缺 non_streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
+			return nil, false, errors.New("mapResponse not implemented")
 		}
 		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapResponse, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, body))

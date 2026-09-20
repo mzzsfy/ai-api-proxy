@@ -128,13 +128,13 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 // openaiEntry openai 入口装配
 func openaiEntry() Entry {
 	c := convert.NewOpenAICodec()
-	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: openaiProtocol}
+	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: pipeline.ProtocolOpenAICompletions}
 }
 
 // anthropicEntry anthropic 入口装配
 func anthropicEntry() Entry {
 	c := convert.NewAnthropicCodec()
-	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: anthropicProtocol}
+	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: pipeline.ProtocolAnthropicMessages}
 }
 
 func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {

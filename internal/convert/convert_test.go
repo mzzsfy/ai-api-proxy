@@ -1,10 +1,14 @@
 package convert
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+)
 
 // TestOpenAICodec_Protocol 协议全名与入口枚举一致
 func TestOpenAICodec_Protocol(t *testing.T) {
-	if got := NewOpenAICodec().Protocol(); got != "openai-completions" {
+	if got := NewOpenAICodec().Protocol(); got != pipeline.ProtocolOpenAICompletions {
 		t.Fatalf("protocol: %s", got)
 	}
 }
@@ -75,7 +79,7 @@ func TestOpenAICodec_ErrorBody(t *testing.T) {
 
 // TestAnthropicCodec_Protocol 协议全名
 func TestAnthropicCodec_Protocol(t *testing.T) {
-	if got := NewAnthropicCodec().Protocol(); got != "anthropic-messages" {
+	if got := NewAnthropicCodec().Protocol(); got != pipeline.ProtocolAnthropicMessages {
 		t.Fatalf("protocol: %s", got)
 	}
 }

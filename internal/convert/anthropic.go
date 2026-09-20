@@ -2,6 +2,8 @@ package convert
 
 import (
 	"encoding/json"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // AnthropicCodec anthropic-messages 入口只读面
@@ -11,7 +13,7 @@ type AnthropicCodec struct{}
 func NewAnthropicCodec() *AnthropicCodec { return &AnthropicCodec{} }
 
 // Protocol 协议全名
-func (c *AnthropicCodec) Protocol() string { return "anthropic-messages" }
+func (c *AnthropicCodec) Protocol() string { return pipeline.ProtocolAnthropicMessages }
 
 // Framer 逐请求帧格式化器
 func (c *AnthropicCodec) Framer() Framer { return &anthropicFramer{} }

@@ -4,27 +4,29 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // ManifestVersion 当前支持的 manifest 版本
 const ManifestVersion = 1
 
-// EntryProtocol 入口协议全名(插件协议槽与入口共用的枚举)
-type EntryProtocol string
+// ProtocolSlot 协议槽全名(插件协议槽与入口协议共用的枚举;唯一定义在 pipeline)
+type ProtocolSlot = pipeline.ProtocolSlot
 
-// 协议全名枚举
+// 协议全名枚举别名(调用点可读性)
 const (
-	ProtocolOpenAICompletions EntryProtocol = "openai-completions"
-	ProtocolAnthropicMessages EntryProtocol = "anthropic-messages"
+	ProtocolOpenAICompletions = pipeline.ProtocolOpenAICompletions
+	ProtocolAnthropicMessages = pipeline.ProtocolAnthropicMessages
 )
 
-// Form 请求形态(流式/非流式;协议槽声明的可处理形态枚举)
-type Form string
+// Form 请求形态(流式/非流式;协议槽声明的可处理形态枚举;唯一定义在 pipeline)
+type Form = pipeline.Form
 
-// 形态枚举(与 SDK Form 一字不差)
+// 形态枚举别名
 const (
-	FormStreaming    Form = "streaming"
-	FormNonStreaming Form = "non_streaming"
+	FormStreaming    = pipeline.FormStreaming
+	FormNonStreaming = pipeline.FormNonStreaming
 )
 
 // ProtocolPart protocol 部件声明(声明式单协议:一个包恰服务一种协议)

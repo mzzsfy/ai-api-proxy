@@ -12,8 +12,8 @@ import (
 // Name 协议名
 const Name = "openai-compatible"
 
-// DeclaredProtocol 声明的协议全名(入口路由据此把关)
-const DeclaredProtocol = "openai-completions"
+// DeclaredProtocol 声明的协议全名(入口路由据此把关;唯一源在 pipeline)
+const DeclaredProtocol = pipeline.ProtocolOpenAICompletions
 
 // Protocol 内置协议:入口原文 1:1 透传(声明 openai-completions),凭据注入授权头
 type Protocol struct {

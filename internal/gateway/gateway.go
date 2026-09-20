@@ -48,18 +48,12 @@ type Gateway struct {
 	Secrets   upstream.SecretsStore
 }
 
-// openaiProtocol / anthropicProtocol 协议槽枚举值(与 internal/plugin 声明一致)
-const (
-	openaiProtocol    = "openai-completions"
-	anthropicProtocol = "anthropic-messages"
-)
-
-// requestID 请求标识(header 键)
+// requestIDHeader 请求标识(header 键)
 const requestIDHeader = "X-Request-Id"
 
 // testBody 管理连通性测试体:按上游声明协议构造最小请求
 func testBody(declared, model string) ([]byte, error) {
-	if declared == anthropicProtocol {
+	if declared == pipeline.ProtocolAnthropicMessages {
 		return json.Marshal(map[string]any{
 			"model":      model,
 			"max_tokens": 1,
@@ -110,7 +104,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		case upstream.PickNoModel:
 			writeErrorWithModels(w, entry, http.StatusNotFound, "no upstream for model", g.availableModels(entry.Protocol))
 		case upstream.PickCapability:
-			writeError(w, entry, http.StatusBadRequest, "capability missing")
+			writeError(w, entry, http.StatusBadRequest, "capability mismatch: model declared by "+g.slotSummary(model))
 		default:
 			writeError(w, entry, http.StatusServiceUnavailable, "no healthy target")
 		}
@@ -351,9 +345,9 @@ func (g *Gateway) passthroughStream(w http.ResponseWriter, tresp pipeline.Transp
 // Models GET /v1/models(双形态)+ /v1/models/{id}
 func (g *Gateway) Models(w http.ResponseWriter, r *http.Request) {
 	anthropicForm := r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != ""
-	protocol := openaiProtocol
+	protocol := pipeline.ProtocolOpenAICompletions
 	if anthropicForm {
-		protocol = anthropicProtocol
+		protocol = pipeline.ProtocolAnthropicMessages
 	}
 	models := g.availableModels(protocol)
 	if anthropicForm {
@@ -373,7 +367,7 @@ func (g *Gateway) Models(w http.ResponseWriter, r *http.Request) {
 
 // ModelByID GET /v1/models/{id}(openai 形态)
 func (g *Gateway) ModelByID(w http.ResponseWriter, r *http.Request, id string) {
-	for _, m := range g.availableModels(openaiProtocol) {
+	for _, m := range g.availableModels(pipeline.ProtocolOpenAICompletions) {
 		if m == id {
 			writeJSON(w, http.StatusOK, map[string]any{"id": id, "object": "model", "owned_by": "ai-api-proxy"})
 			return
@@ -438,6 +432,40 @@ func featsToStrings(feats []convert.Feature) []string {
 		out = append(out, string(f))
 	}
 	return out
+}
+
+// slotSummary 声明该模型的启用上游所持协议槽(去重稳定序;诊断用)
+func (g *Gateway) slotSummary(model string) string {
+	seen := map[string]bool{}
+	out := ""
+	for _, u := range g.Registry.List() {
+		if !u.Enabled || !containsModel(u.Models, model) {
+			continue
+		}
+		slot := u.Name + "(" + g.Registry.DeclaredProtocol(u) + ")"
+		if seen[slot] {
+			continue
+		}
+		seen[slot] = true
+		if out != "" {
+			out += ","
+		}
+		out += slot
+	}
+	if out == "" {
+		return "none"
+	}
+	return out
+}
+
+// containsModel 模型是否在该上游声明内
+func containsModel(models []string, model string) bool {
+	for _, m := range models {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 // pipelineStatus 非流式响应状态(0 → 200)

@@ -424,7 +424,6 @@ func (r *Registry) DeclaredProtocol(u *Upstream) string {
 }
 
 // Pick 路由:模型声明发现 → 协议/能力/形态过滤 → 目标可用性。
-// 载体(对象方法/具体协议)同一替换(Registry/Protocol),但因载体不同无法逐行机械替换——见
 // 分类优先级:① 无任何上游声明该模型 → PickNoModel;② 有声明但因协议/能力/形态被滤 → PickCapability;
 // ③ 能力一致但零可用目标 → PickUnhealthy。禁用上游仍参与 ①(避免 404 与真实声明矛盾)。
 func (r *Registry) Pick(model string, features []Feature, entry string, stream bool) ([]Candidate, PickError, error) {

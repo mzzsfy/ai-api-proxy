@@ -13,6 +13,15 @@ const TransportRef = "direct"
 // ErrPoolBusy runtime 池排队超时/已关闭(本地资源问题;503)
 var ErrPoolBusy = errors.New("runtime pool busy")
 
+// ProtocolSlot 协议槽全名(协议部件声明与入口协议共用的唯一枚举源)
+type ProtocolSlot = string
+
+// 协议全名枚举(管道权威格式 = 插件声明协议格式 = 入口协议格式)
+const (
+	ProtocolOpenAICompletions ProtocolSlot = "openai-completions"
+	ProtocolAnthropicMessages ProtocolSlot = "anthropic-messages"
+)
+
 // Form 请求形态(串行管道的形态口径)
 type Form = string
 
