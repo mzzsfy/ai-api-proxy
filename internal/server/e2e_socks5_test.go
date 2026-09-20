@@ -184,8 +184,6 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	scenarios := []scenario{
 		{group: "m-socks5", entry: "chat", stream: false, proxy: true},
 		{group: "m-socks5", entry: "chat", stream: true, proxy: true},
-		{group: "m-socks5", entry: "message", stream: false, proxy: true},
-		{group: "m-socks5", entry: "message", stream: true, proxy: true},
 	}
 	relayBefore := socks.relayCount()
 	runScenariosTable(t, gateway.URL, func() int64 { return socks.relayCount() }, spy, scenarios, false)

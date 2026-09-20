@@ -110,23 +110,21 @@ func TestGolden_JSvsBuiltin_BuildRequest(t *testing.T) {
 	jsProto := loadJSPackage(t)
 	cases := []struct {
 		name  string
-		pivot string
+		entry string
 	}{
 		{"plain", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`},
-		{"anthropic system", `{"model":"m","system":"be nice","messages":[{"role":"user","content":"hi"}]}`},
-		{"stop_sequences", `{"model":"m","messages":[],"stop_sequences":["END"]}`},
-		{"x_top_k", `{"model":"m","messages":[],"x_top_k":5}`},
-		{"x_stripped", `{"model":"m","messages":[],"x_block":{"index":0},"x_custom":1}`},
-		{"full combo", `{"model":"m","system":"s","messages":[],"stop_sequences":["E"],"x_top_k":3,"x_trash":0}`},
+		{"tools", `{"model":"m","messages":[],"tools":[{"type":"function"}]}`},
+		{"top_k", `{"model":"m","messages":[],"top_k":5}`},
+		{"nested", `{"model":"m","messages":[],"response_format":{"type":"json_object"}}`},
 		{"non json", `not-json`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			goReq, err := goProto.BuildRequest(goldenCtx(), []byte(tc.pivot))
+			goReq, err := goProto.BuildRequest(goldenCtx(), []byte(tc.entry))
 			if err != nil {
 				t.Fatal(err)
 			}
-			jsReq, err := jsProto.BuildRequest(goldenCtx(), []byte(tc.pivot))
+			jsReq, err := jsProto.BuildRequest(goldenCtx(), []byte(tc.entry))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +143,7 @@ func TestGolden_JSvsBuiltin_BuildRequest(t *testing.T) {
 	}
 }
 
-// TestGolden_JSvsBuiltin_Events 信封解包与 [DONE] 跳帧一致
+// TestGolden_JSvsBuiltin_Events 信封解包与 [DONE] 跳帧一致(两侧产物均为"声明协议事件对象数组")
 func TestGolden_JSvsBuiltin_Events(t *testing.T) {
 	goProto := New()
 	jsProto := loadJSPackage(t)
@@ -154,14 +152,30 @@ func TestGolden_JSvsBuiltin_Events(t *testing.T) {
 		`{"event":"ping","data":"keepalive"}`,
 		`{"event":"","data":"[DONE]"}`,
 	}
-	for _, f := range frames {
+	wants := []string{
+		`[{"id":1,"delta":{"content":"x"}}]`,
+		`[{"event":"ping","data":"keepalive"}]`,
+		"",
+	}
+	for i, f := range frames {
 		got, gerr := goProto.MapEvent(goldenCtx(), []byte(f))
 		jv, jerr := jsProto.MapEvent(goldenCtx(), []byte(f))
 		if (gerr == nil) != (jerr == nil) {
 			t.Fatalf("err mismatch on %s: go=%v js=%v", f, gerr, jerr)
 		}
-		if string(got) != string(jv) {
+		// 跳帧语义:双方均为空(JS 侧 null → Go 侧 nil)
+		if (got == nil) != (jv == nil) {
+			t.Fatalf("skip mismatch on %s: go=%s js=%s", f, got, jv)
+		}
+		if got == nil {
+			continue
+		}
+		// 语义等价:JS 侧为 JSON 文本(未解码裸值),两侧统一按文本解码后比较
+		if !jsonEqual(got, jsonUnquote(jv)) {
 			t.Fatalf("event mismatch on %s: go=%s js=%s", f, got, jv)
+		}
+		if !jsonEqual(got, []byte(wants[i])) {
+			t.Fatalf("go event on %s: got=%s want=%s", f, got, wants[i])
 		}
 	}
 }
@@ -176,6 +190,15 @@ func TestGolden_JSvsBuiltin_MapResponse(t *testing.T) {
 	if gerr != nil || jerr != nil || string(gb) != string(jb) {
 		t.Fatalf("response mismatch: go=(%s,%v) js=(%s,%v)", gb, gerr, jb, jerr)
 	}
+}
+
+// jsonUnquote JS 侧返回的 JSON 文本字面量(解析失败即原样返回)
+func jsonUnquote(b []byte) []byte {
+	var s string
+	if json.Unmarshal(b, &s) == nil && json.Valid([]byte(s)) {
+		return []byte(s)
+	}
+	return b
 }
 
 // jsonEqual 语义等价(双端产物均 JSON 时规范化比较;均非 JSON 时字符串比较)

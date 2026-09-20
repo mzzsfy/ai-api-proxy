@@ -9,7 +9,7 @@ const SECRETS = { api_key: "AIza-test-key" };
 const BASE = { id: "t", name: "gemini", baseUrl: "https://generativelanguage.googleapis.com" };
 const CTX = mockCtx({ target: BASE, vars: { model: "gemini-2.0-flash", entryStream: false } });
 
-const CHAT_PIVOT = JSON.stringify({
+const CHAT_ENTRY = JSON.stringify({
   model: "gemini-2.0-flash",
   messages: [
     { role: "system", content: "Be terse." },
@@ -25,7 +25,7 @@ const CHAT_PIVOT = JSON.stringify({
 
 test("buildRequest: generateContent endpoint + api key header + body translation", () => {
   const hooks = pkg();
-  const req = hooks.buildRequest(CTX, CHAT_PIVOT);
+  const req = hooks.buildRequest(CTX, CHAT_ENTRY);
   assert.equal(req.method, "POST");
   assert.equal(req.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent");
   assert.equal(req.headers["x-goog-api-key"], "AIza-test-key");
@@ -55,7 +55,7 @@ test("buildRequest: stream endpoint via entryStream; apiVersion config", () => {
   assert.equal(req.stream, true);
 });
 
-test("mapEvent: text delta frame → openai chunk; empty frame → null", () => {
+test("mapEvent: text delta frame → 单元素事件数组; empty frame → null", () => {
   const hooks = pkg();
   const frame = JSON.stringify({
     event: "message",
@@ -64,7 +64,10 @@ test("mapEvent: text delta frame → openai chunk; empty frame → null", () => 
       candidates: [{ content: { parts: [{ text: "he" }], role: "model" } }]
     })
   });
-  const chunk = JSON.parse(hooks.mapEvent(CTX, frame));
+  const arr = JSON.parse(hooks.mapEvent(CTX, frame));
+  assert.equal(Array.isArray(arr), true);
+  assert.equal(arr.length, 1);
+  const chunk = arr[0];
   assert.equal(chunk.object, "chat.completion.chunk");
   assert.equal(chunk.id, "r1");
   assert.equal(chunk.model, "gemini-2.0-flash");
@@ -79,17 +82,16 @@ test("mapEvent: text delta frame → openai chunk; empty frame → null", () => 
     event: "message",
     data: JSON.stringify({ candidates: [{ content: { parts: [{ text: "x" }] } }] })
   });
-  assert.equal(JSON.parse(hooks.mapEvent(CTX, noId)).id, "test-req"); // 无 responseId 回退 ctx.requestId
+  assert.equal(JSON.parse(hooks.mapEvent(CTX, noId))[0].id, "test-req"); // 无 responseId 回退 ctx.requestId
 });
 
-test("mapEvent: in-stream error frame → x_error chunk", () => {
+test("mapEvent: 流内错误帧跳帧(不再以 x_error 终止)", () => {
   const hooks = pkg();
   const frame = JSON.stringify({
     event: "message",
     data: JSON.stringify({ error: { code: 429, message: "quota exceeded", status: "RESOURCE_EXHAUSTED" } })
   });
-  const chunk = JSON.parse(hooks.mapEvent(CTX, frame));
-  assert.deepEqual(chunk, { x_error: { type: "RESOURCE_EXHAUSTED", message: "quota exceeded" } });
+  assert.equal(hooks.mapEvent(CTX, frame), null);
 });
 
 test("mapEvent: final frame finishReason + usage; finish-only frame yields empty delta", () => {
@@ -102,7 +104,7 @@ test("mapEvent: final frame finishReason + usage; finish-only frame yields empty
       usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 7, totalTokenCount: 12 }
     })
   });
-  const chunk = JSON.parse(hooks.mapEvent(CTX, frame));
+  const chunk = JSON.parse(hooks.mapEvent(CTX, frame))[0];
   assert.deepEqual(chunk.choices[0].delta, { content: "!" });
   assert.equal(chunk.choices[0].finish_reason, "length");
   assert.deepEqual(chunk.usage, { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 });
@@ -114,7 +116,7 @@ test("mapEvent: final frame finishReason + usage; finish-only frame yields empty
       usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 0, totalTokenCount: 1 }
     })
   });
-  const fin = JSON.parse(hooks.mapEvent(CTX, finOnly));
+  const fin = JSON.parse(hooks.mapEvent(CTX, finOnly))[0];
   assert.deepEqual(fin.choices[0].delta, {});
   assert.equal(fin.choices[0].finish_reason, "content_filter");
   assert.deepEqual(fin.usage, { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 });
@@ -131,7 +133,7 @@ test("usage: 候选截断时上游省略 candidatesTokenCount 且思考 token �
       usageMetadata: { promptTokenCount: 3, totalTokenCount: 16, thoughtsTokenCount: 13 }
     })
   });
-  const chunk = JSON.parse(hooks.mapEvent(CTX, truncated));
+  const chunk = JSON.parse(hooks.mapEvent(CTX, truncated))[0];
   assert.deepEqual(chunk.usage, { prompt_tokens: 3, completion_tokens: 13, total_tokens: 16 });
   assert.equal(chunk.usage.prompt_tokens + chunk.usage.completion_tokens, chunk.usage.total_tokens);
   assert.equal(chunk.choices[0].finish_reason, "length");
@@ -215,7 +217,7 @@ test("mapError: 上游错误原样反映(type/status/details 不做翻译)", () 
 
 test("buildRequest: consecutive same-role merged; empty messages skipped; empty contents throws", () => {
   const hooks = pkg();
-  const pivot = JSON.stringify({
+  const entry = JSON.stringify({
     model: "gemini-2.0-flash",
     messages: [
       { role: "user", content: "a" },
@@ -224,7 +226,7 @@ test("buildRequest: consecutive same-role merged; empty messages skipped; empty 
       { role: "assistant", content: "c" }
     ]
   });
-  const body = JSON.parse(hooks.buildRequest(CTX, pivot).body);
+  const body = JSON.parse(hooks.buildRequest(CTX, entry).body);
   assert.deepEqual(body.contents, [
     { role: "user", parts: [{ text: "a" }, { text: "b" }] },
     { role: "model", parts: [{ text: "c" }] }
@@ -237,7 +239,7 @@ test("buildRequest: consecutive same-role merged; empty messages skipped; empty 
 
 test("buildRequest: developer role as system; stop/max_completion_tokens mapped", () => {
   const hooks = pkg();
-  const pivot = JSON.stringify({
+  const entry = JSON.stringify({
     model: "gemini-2.0-flash",
     messages: [
       { role: "developer", content: "sys" },
@@ -247,7 +249,7 @@ test("buildRequest: developer role as system; stop/max_completion_tokens mapped"
     max_completion_tokens: 55,
     max_tokens: 99
   });
-  const req = hooks.buildRequest(CTX, pivot);
+  const req = hooks.buildRequest(CTX, entry);
   const body = JSON.parse(req.body);
   assert.deepEqual(body.systemInstruction, { parts: [{ text: "sys" }] });
   assert.deepEqual(body.generationConfig, { maxOutputTokens: 55, stopSequences: ["END", "STOP"] });
@@ -266,7 +268,7 @@ test("mapEvent: promptFeedback blockReason yields finish chunk regardless of val
     event: "message",
     data: JSON.stringify({ promptFeedback: { blockReason: "OTHER" } })
   });
-  const chunk = JSON.parse(hooks.mapEvent(CTX, frame));
+  const chunk = JSON.parse(hooks.mapEvent(CTX, frame))[0];
   assert.deepEqual(chunk.choices[0].delta, {});
   assert.equal(chunk.choices[0].finish_reason, "content_filter");
 });

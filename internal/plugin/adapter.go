@@ -35,9 +35,10 @@ func poolSize() int {
 // 并发模型:hook 粒度借还(池内并行,实例内串行);借出期间独占实例,
 // util.secret 经实例 cursor(借出时按 ctx 更新,调用全程有效)
 type gojaProtocol struct {
-	name    string
-	support pipeline.Supports
-	pool    *runtimePool
+	name     string
+	declared string
+	support  pipeline.Supports
+	pool     *runtimePool
 }
 
 // ClosePools 释放池(Reload 销毁;等待在途归零)
@@ -71,6 +72,8 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, Storage: storage,
 		}
 	}
+	// 声明的协议全名并入实例配置:部件按协议名渲染请求/事件(config.protocol)
+	params = mergeProtocol(params, part.Protocol)
 	factory := func() (*hookInstance, error) {
 		return newInstance(prog, part.Entry, params, newDeps())
 	}
@@ -88,23 +91,33 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 	if err != nil {
 		return nil, err
 	}
-	return &gojaProtocol{name: pkg.Manifest.Name, support: support, pool: pool}, nil
+	return &gojaProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool}, nil
+}
+
+// mergeProtocol 声明协议名并入实例配置(不改写调用方 map;声明为准覆盖同名字段)
+func mergeProtocol(params map[string]any, protocol string) map[string]any {
+	out := make(map[string]any, len(params)+1)
+	for k, v := range params {
+		out[k] = v
+	}
+	out["protocol"] = protocol
+	return out
 }
 
 // validateProtocolBindings 声明↔实现双向对称 + buildRequest 必备
 func validateProtocolBindings(name string, part *ProtocolPart, hooks *Hooks) error {
 	for _, f := range part.Form {
-		if f == "streaming" && hooks.MapEvent == nil {
+		if f == string(FormStreaming) && hooks.MapEvent == nil {
 			return fmt.Errorf("protocol %s: declares streaming but mapEvent missing", name)
 		}
-		if f == "non_streaming" && hooks.MapResponse == nil {
+		if f == string(FormNonStreaming) && hooks.MapResponse == nil {
 			return fmt.Errorf("protocol %s: declares non_streaming but mapResponse missing", name)
 		}
 	}
-	if hooks.MapEvent != nil && !formDeclared(part.Form, "streaming") {
+	if hooks.MapEvent != nil && !formDeclared(part.Form, string(FormStreaming)) {
 		return fmt.Errorf("protocol %s: mapEvent implemented but streaming not declared", name)
 	}
-	if hooks.MapResponse != nil && !formDeclared(part.Form, "non_streaming") {
+	if hooks.MapResponse != nil && !formDeclared(part.Form, string(FormNonStreaming)) {
 		return fmt.Errorf("protocol %s: mapResponse implemented but non_streaming not declared", name)
 	}
 	if hooks.BuildRequest == nil {
@@ -127,6 +140,9 @@ func (g *gojaProtocol) Name() string { return g.name }
 func (g *gojaProtocol) Supports() pipeline.Supports {
 	return g.support
 }
+
+// Declared 主包声明的协议全名
+func (g *gojaProtocol) Declared() string { return g.declared }
 
 // HookTimeout 单次 hook 执行预算(超时 Interrupt,实例污染丢弃)
 const HookTimeout = 250 * time.Millisecond
@@ -165,10 +181,10 @@ func (g *gojaProtocol) borrowWrap(fn func(inst *hookInstance) (any, bool, error)
 	return res, err
 }
 
-func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, pivot []byte) (pipeline.Request, error) {
+func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pipeline.Request, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
 		inst.cursor.Set(targetName(ctx))
-		out, broken, err := callHook(inst, HookTimeout, inst.hooks.BuildRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, pivot))
+		out, broken, err := callHook(inst, HookTimeout, inst.hooks.BuildRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
 		}
@@ -219,13 +235,40 @@ func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]
 			return nil, broken, err
 		}
 		if out == nil || goja.IsUndefined(out) || goja.IsNull(out) {
-			return nil, broken, nil // 跳帧
+			return nil, broken, nil // 裸值 undefined/null:跳帧
 		}
-		s, ok := out.Export().(string)
-		if !ok {
-			return nil, broken, errors.New("mapEvent: non-string return")
+		exported := out.Export()
+		if s, ok := exported.(string); ok {
+			// 返回 JSON 文本:可以是声明协议事件对象"数组"或"单个对象",两者统一归一为数组
+			if s == "" {
+				return nil, broken, nil
+			}
+			var items []any
+			if err := json.Unmarshal([]byte(s), &items); err != nil {
+				var one map[string]any
+				if err2 := json.Unmarshal([]byte(s), &one); err2 != nil {
+					return nil, broken, fmt.Errorf("mapEvent: non-json return")
+				}
+				items = []any{one}
+			}
+			if len(items) == 0 {
+				return nil, broken, nil
+			}
+			b, err := json.Marshal(items)
+			if err != nil {
+				return nil, broken, fmt.Errorf("mapEvent: marshal %w", err)
+			}
+			return string(b), broken, nil
 		}
-		return s, broken, nil
+		// 返回裸数组:声明协议事件对象数组;数组长度为 0 亦视为跳帧
+		b, err := json.Marshal(exported)
+		if err != nil {
+			return nil, broken, fmt.Errorf("mapEvent: marshal %w", err)
+		}
+		if string(b) == "[]" || string(b) == "null" {
+			return nil, broken, nil
+		}
+		return string(b), broken, nil
 	})
 	if err != nil {
 		return nil, err
@@ -361,10 +404,10 @@ func (g *gojaFilter) borrowWrap(fn func(inst *hookInstance) (any, bool, error)) 
 	return res, err
 }
 
-func (g *gojaFilter) MapRequest(ctx *pipeline.PipelineContext, pivot []byte) ([]byte, error) {
+func (g *gojaFilter) MapRequest(ctx *pipeline.PipelineContext, entry []byte) ([]byte, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
 		inst.cursor.Set(targetName(ctx))
-		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, pivot))
+		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
 		}
@@ -465,7 +508,7 @@ func ctxToValue(vm *goja.Runtime, ctx *pipeline.PipelineContext) goja.Value {
 	return o
 }
 
-// vmBytes []byte → JS 字符串(pivot/chunk 权威形态=JSON 字节串)
+// vmBytes []byte → JS 字符串(入口/响应权威形态=JSON 字节串)
 func vmBytes(vm *goja.Runtime, b []byte) goja.Value { return vm.ToValue(string(b)) }
 
 // logHookTimeout hook 超时可观测(池自动补建)

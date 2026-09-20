@@ -13,6 +13,15 @@ const TransportRef = "direct"
 // ErrPoolBusy runtime 池排队超时/已关闭(本地资源问题;503)
 var ErrPoolBusy = errors.New("runtime pool busy")
 
+// Form 请求形态(串行管道的形态口径)
+type Form = string
+
+// 形态枚举(与 manifest 协议槽/SDK Form 同一组字面量)
+const (
+	FormStreaming    Form = "streaming"
+	FormNonStreaming Form = "non_streaming"
+)
+
 // Vars 入口形态路由元数据(优化参考,正确性不得依赖)
 type Vars struct {
 	Model       string
@@ -79,6 +88,11 @@ func (s Supports) HasFeature(feat string) bool {
 	return false
 }
 
+// Declarer 协议全名声明(路由把关入口协议与声明是否一致;不匹配即拒绝,无转换)
+type Declarer interface {
+	Declared() string
+}
+
 // Request 上游请求载体(传输由 host 执行)
 type Request struct {
 	URL     string
@@ -89,11 +103,12 @@ type Request struct {
 	Model   string // 会话亲和素材(ipp 供给方传输消费;非 ipp 忽略)
 }
 
-// Protocol 协议适配层(恰一;hook 全同步)
+// Protocol 协议适配层(恰一;声明式单协议;hook 全同步)
 type Protocol interface {
+	Declarer
 	Name() string
 	Supports() Supports
-	BuildRequest(ctx *PipelineContext, pivot []byte) (Request, error)
+	BuildRequest(ctx *PipelineContext, entry []byte) (Request, error)
 	MapEvent(ctx *PipelineContext, event []byte) ([]byte, error)
 	MapResponse(ctx *PipelineContext, body []byte) ([]byte, error)
 }
@@ -106,7 +121,7 @@ type ErrorMapper interface {
 // Filter 请求修改层(0..n 串行)
 type Filter interface {
 	Name() string
-	MapRequest(ctx *PipelineContext, pivot []byte) ([]byte, error)
+	MapRequest(ctx *PipelineContext, entry []byte) ([]byte, error)
 	MapChunk(ctx *PipelineContext, chunkJSON []byte) ([]byte, error)
 	MapResponse(ctx *PipelineContext, respJSON []byte) ([]byte, error)
 }

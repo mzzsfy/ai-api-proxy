@@ -1,247 +1,28 @@
 package convert
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "encoding/json"
 
-// anthropicChunker anthropic 流式输出状态机(per-request)
-// 事件序列:message_start → content_block_start(x_block 建块或首个文本块)
-//
-//	→ content_block_delta(增量)→ content_block_stop(x_block.stop)
-//	→ ... → message_delta(usage/finish)→ Flush 补未闭合块 stop + message_stop
-type anthropicChunker struct {
-	started      bool   // message_start 已发
-	blockOpen    bool   // 当前有未闭合 content block
-	blockIndex   int    // 当前块索引
-	blockType    string // 当前开块类型(text/thinking)
-	messageDelta bool   // message_delta 已发
-}
+// anthropicFramer anthropic-messages 流式帧格式化器(直通:声明协议的事件对象原样成帧)
+// 事件序列由上游部件产出([{type:...},...] 数组),本层只做 JSON → SSE 事件包装
+type anthropicFramer struct{}
 
-// NewFromPivotChunker 构造 per-request 状态机
-func (c *AnthropicCodec) NewFromPivotChunker() FromPivotChunker {
-	return &anthropicChunker{}
-}
-
-// ev 构造 SSE 事件
-func ev(v any) sseEvent {
-	b, _ := json.Marshal(v)
-	return sseEvent{Data: string(b)}
-}
-
-// Next 输入 pivot chunk,输出 0..n 事件;raw 帧原样透传
-func (a *anthropicChunker) Next(chunkJSON []byte) ([]sseEvent, error) {
-	ch, err := ParseChunk(chunkJSON)
-	if err != nil {
-		return nil, err
+// Frame 事件对象数组 → SSE 事件序列;数组元素 type 非空即写 event 行
+func (f *anthropicFramer) Frame(payload []byte) []Event {
+	var items []map[string]any
+	if err := json.Unmarshal(payload, &items); err != nil {
+		return []Event{{Data: string(payload)}}
 	}
-	if ch.HasRaw {
-		return []sseEvent{{Data: ch.RawFrame, RawPass: true}}, nil
-	}
-	var out []sseEvent
-	// x_error:按 anthropic 流内 error 事件终止
-	if ch.XError != nil {
-		out = append(out, ev(map[string]any{
-			"type":  "error",
-			"error": map[string]any{"type": ch.XError.Type, "message": ch.XError.Message},
-		}))
-		return out, nil
-	}
-	// 首 chunk:message_start(+ 可能联合 content_block_start/delta)
-	if !a.started {
-		a.started = true
-		msgStart := map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"type": "message", "role": "assistant",
-				"content": []any{}, "stop_reason": nil,
-			},
+	out := make([]Event, 0, len(items))
+	for _, it := range items {
+		b, err := json.Marshal(it)
+		if err != nil {
+			continue
 		}
-		if ch.ID != "" {
-			msgStart["message"].(map[string]any)["id"] = ch.ID
-		}
-		if ch.Model != "" {
-			msgStart["message"].(map[string]any)["model"] = ch.Model
-		}
-		out = append(out, ev(msgStart))
-	}
-	// usage/finish chunk(message_delta;可能同时带最后增量)
-	if len(ch.Usage) > 0 || ch.FinishReason != "" {
-		if len(ch.Delta) > 0 {
-			out = append(out, a.deltaEvents(ch)...)
-		}
-		stop := anthropicStopReason(ch.FinishReason)
-		md := map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": stop},
-		}
-		if len(ch.Usage) > 0 {
-			var u map[string]any
-			_ = json.Unmarshal(ch.Usage, &u)
-			md["usage"] = map[string]any{"output_tokens": u["completion_tokens"]}
-		}
-		out = append(out, ev(md))
-		a.messageDelta = true
-		return out, nil
-	}
-	if ch.XBlock != nil {
-		out = append(out, a.blockEvents(ch)...)
-		return out, nil
-	}
-	out = append(out, a.deltaEvents(ch)...)
-	return out, nil
-}
-
-// blockEvents x_block 建块/闭块事件
-func (a *anthropicChunker) blockEvents(ch *Chunk) []sseEvent {
-	var out []sseEvent
-	xb := ch.XBlock
-	if xb.Stop {
-		if a.blockOpen {
-			out = append(out, ev(map[string]any{
-				"type": "content_block_stop", "index": a.blockIndex,
-			}))
-			a.blockOpen = false
-			a.blockIndex++
-		}
-		return out
-	}
-	// 建块:纯文本块已隐式开启时,先闭旧文本块再开新块
-	if a.blockOpen {
-		out = append(out, ev(map[string]any{"type": "content_block_stop", "index": a.blockIndex}))
-		a.blockIndex++
-		a.blockOpen = false
-	}
-	a.blockType = xb.Type
-	if a.blockType == "" {
-		a.blockType = "text"
-	}
-	out = append(out, ev(map[string]any{
-		"type":          "content_block_start",
-		"index":         a.blockIndex,
-		"content_block": blockShell(a.blockType),
-	}))
-	a.blockOpen = true
-	// 建块可能同时带首增量
-	if len(ch.Delta) > 0 {
-		out = append(out, a.deltaEvents(ch)...)
+		t, _ := it["type"].(string)
+		out = append(out, Event{Event: t, Data: string(b)})
 	}
 	return out
 }
 
-// blockShell content_block_start 的块载体;仅支持 text/thinking 两类,
-// 其余 x_block 声明类型降级为 text shell(残缺 tool_use/redacted 块比合法文本块更糟)
-func blockShell(blockType string) map[string]any {
-	if blockType == "thinking" {
-		return map[string]any{"type": "thinking", "thinking": ""}
-	}
-	return map[string]any{"type": "text", "text": ""}
-}
-
-// deltaEvents 文本/推理增量事件;隐式开块与跨类型自动闭块:
-// reasoning_content → thinking 块(thinking_delta),content → 文本块(text_delta)
-func (a *anthropicChunker) deltaEvents(ch *Chunk) []sseEvent {
-	if ch.Delta == nil {
-		return nil
-	}
-	var d map[string]any
-	if json.Unmarshal(ch.Delta, &d) != nil {
-		return nil
-	}
-	s, _ := d["content"].(string)
-	r, _ := d["reasoning_content"].(string)
-	if s == "" && r == "" {
-		return nil
-	}
-	var out []sseEvent
-	if r != "" {
-		out = append(out, a.switchBlock("thinking")...)
-		out = append(out, ev(map[string]any{
-			"type":  "content_block_delta",
-			"index": a.blockIndex,
-			"delta": map[string]any{"type": "thinking_delta", "thinking": r},
-		}))
-	}
-	if s != "" {
-		out = append(out, a.switchBlock("text")...)
-		out = append(out, ev(map[string]any{
-			"type":  "content_block_delta",
-			"index": a.blockIndex,
-			"delta": map[string]any{"type": "text_delta", "text": s},
-		}))
-	}
-	return out
-}
-
-// switchBlock 确保当前开块为 want 类型:异型先闭,未开则建
-func (a *anthropicChunker) switchBlock(want string) []sseEvent {
-	var out []sseEvent
-	if a.blockOpen && a.blockType != want {
-		out = append(out, ev(map[string]any{"type": "content_block_stop", "index": a.blockIndex}))
-		a.blockIndex++
-		a.blockOpen = false
-	}
-	if !a.blockOpen {
-		out = append(out, ev(map[string]any{
-			"type":          "content_block_start",
-			"index":         a.blockIndex,
-			"content_block": blockShell(want),
-		}))
-		a.blockOpen = true
-		a.blockType = want
-	}
-	return out
-}
-
-// Flush 收尾:未闭合块补发 content_block_stop(未闭合块规则)+ message_stop
-func (a *anthropicChunker) Flush() ([]sseEvent, error) {
-	var out []sseEvent
-	if !a.started {
-		// 零 chunk 流:最小合法序列
-		out = append(out, ev(map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"type": "message", "role": "assistant",
-				"content": []any{}, "stop_reason": nil,
-			},
-		}))
-		a.started = true
-	}
-	if a.blockOpen {
-		out = append(out, ev(map[string]any{"type": "content_block_stop", "index": a.blockIndex}))
-		a.blockOpen = false
-	}
-	if !a.messageDelta {
-		out = append(out, ev(map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": "end_turn"},
-			"usage": map[string]any{"output_tokens": 0},
-		}))
-	}
-	out = append(out, ev(map[string]any{"type": "message_stop"}))
-	return out, nil
-}
-
-// anthropicStopReason openai finish_reason → anthropic stop_reason
-func anthropicStopReason(fr string) string {
-	switch fr {
-	case "stop":
-		return "end_turn"
-	case "length":
-		return "max_tokens"
-	case "tool_calls":
-		return "tool_use"
-	case "":
-		return "end_turn"
-	default:
-		return fr
-	}
-}
-
-// ParseChunkError 包装解析失败(供测试断言)
-func ParseChunkError(b []byte) error {
-	if _, err := ParseChunk(b); err != nil {
-		return fmt.Errorf("chunk: %w", err)
-	}
-	return nil
-}
+// Flush anthropic 无统一终止帧(部件以 message_stop 事件收尾)
+func (f *anthropicFramer) Flush() []Event { return nil }

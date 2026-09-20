@@ -176,19 +176,24 @@ func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 		Version:         "0.1.0",
 	}
 	tpl.Parts.Protocol = &plugin.ProtocolPart{
-		Entry: "protocol.js", Form: []string{"streaming", "non_streaming"},
+		Entry: "protocol.js", Protocol: string(plugin.ProtocolOpenAICompletions),
+		Form:     []string{string(plugin.FormStreaming), string(plugin.FormNonStreaming)},
 		Features: []string{"tools"}, SecretRefs: []string{"api_key"},
 	}
 	tpl.Parts.Filters = []plugin.FilterPart{{Name: "log-request", Entry: "filter.js"}}
 	files := map[string][]byte{
-		"protocol.js": []byte(`// openai-compatible 起步模板:按需改造
+		"protocol.js": []byte(`// openai-completions 起步模板:按需改造
 module.exports = {
-  buildRequest: function (ctx, pivot) {
+  buildRequest: function (ctx, entry) {
     return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + util.secret("api_key") },
-      body: pivot, stream: ctx.vars.entryStream };
+      body: entry, stream: ctx.vars.entryStream };
   },
-  mapEvent: function (ctx, e) { var f = JSON.parse(e); return f.data === "[DONE]" ? null : f.data; },
+  mapEvent: function (ctx, e) {
+    var f = JSON.parse(e);
+    if (f.data === "[DONE]") return null;
+    return JSON.stringify([JSON.parse(f.data)]);
+  },
   mapResponse: function (ctx, body) { return body; }
 };`),
 		"filter.js": []byte(`// filter 起步模板:透传

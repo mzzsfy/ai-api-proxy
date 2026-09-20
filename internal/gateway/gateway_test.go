@@ -94,7 +94,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		return &builtin.Protocol{TargetSecrets: deps.TargetSecrets}, nil
 	})
 	manifest := `{"manifestVersion":1,"name":"openai-compatible","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
 	protoSrc := `module.exports = {};`
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"p.js": protoSrc})); err != nil {
 		t.Fatal(err)
@@ -115,14 +115,26 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 	f.reg = reg
 	f.tr = trMgr
 	f.g = &Gateway{
-		OpenAI:    convert.NewOpenAICodec(),
-		Anthropic: convert.NewAnthropicCodec(),
+		OpenAI:    openaiEntry(),
+		Anthropic: anthropicEntry(),
 		Executor:  &pipeline.Executor{Transports: trMgr.Get},
 		Registry:  reg,
 		Metrics:   metrics.NewRecorder(),
 		Secrets:   secrets,
 	}
 	return f
+}
+
+// openaiEntry openai 入口装配
+func openaiEntry() Entry {
+	c := convert.NewOpenAICodec()
+	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: openaiProtocol}
+}
+
+// anthropicEntry anthropic 入口装配
+func anthropicEntry() Entry {
+	c := convert.NewAnthropicCodec()
+	return Entry{EntryInspector: c, ErrorRenderer: c, FramerFactory: c, Protocol: anthropicProtocol}
 }
 
 func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
@@ -139,6 +151,12 @@ func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 
 // installJSProtocol 换装 JS 协议包(非内置,走完整管道;上游 SSE 直通语义)
 func (f *fixture) installJSProtocol(t *testing.T) {
+	t.Helper()
+	f.installJSProtocolAs(t, "openai-completions", []string{"streaming"})
+}
+
+// installJSProtocolAs 装 JS 协议包并换装注册表(声明协议与形态可指定)
+func (f *fixture) installJSProtocolAs(t *testing.T, protocol string, forms []string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/js.db")
 	if err != nil {
@@ -159,21 +177,41 @@ func (f *fixture) installJSProtocol(t *testing.T) {
 		}
 	}
 	pkgs := plugin.NewRegistry(db)
-	manifest := `{"manifestVersion":1,"name":"js-openai","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+	openaiForm := []string{"streaming", "non_streaming"}
+	anthropicFormDecl := []string{"non_streaming"}
+	declaredForm := openaiForm
+	if protocol == "anthropic-messages" {
+		declaredForm = anthropicFormDecl
+	}
+	formJSON, _ := json.Marshal(declaredForm)
+	manifest := `{"manifestVersion":1,"name":"js-proto","version":"1","parts":{
+		"protocol":{"entry":"p.js","protocol":"` + protocol + `","form":` + string(formJSON) + `,"features":["tools","vision"],"secretRefs":["api_key"]}}}`
 	src := `module.exports = function (config) {
-		return { buildRequest: function (ctx, pivot) {
+		return { buildRequest: function (ctx, entry) {
 			var key = util.secret("api_key");
 			return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
 				headers: {"Content-Type": "application/json", "Authorization": "Bearer " + key},
-				body: pivot, stream: ctx.vars.entryStream };
-		}, mapEvent: function (ctx, e) { var f = JSON.parse(e); return f.data; } };
+				body: entry, stream: ctx.vars.entryStream };
+		},
+		mapResponse: function (ctx, b) { return b; },
+		mapEvent: function (ctx, e) { var f = JSON.parse(e); return JSON.stringify([JSON.parse(f.data)]); } };
 	};`
+	if protocol == "anthropic-messages" {
+		src = `module.exports = function (config) {
+		return { buildRequest: function (ctx, entry) {
+			var key = util.secret("api_key");
+			return { url: ctx.target.baseUrl + "/v1/messages", method: "POST",
+				headers: {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"},
+				body: entry, stream: ctx.vars.entryStream };
+		},
+		mapResponse: function (ctx, b) { return b; } };
+	};`
+	}
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"p.js": src})); err != nil {
 		t.Fatal(err)
 	}
 	reg := upstream.NewRegistry(db, pkgs, f.g.Secrets)
-	u := &upstream.Upstream{Name: "u1", Enabled: true, Base: upstream.PackageRef{Package: "js-openai"},
+	u := &upstream.Upstream{Name: "u1", Enabled: true, Base: upstream.PackageRef{Package: "js-proto"},
 		Models: []string{"test-model"},
 		Targets: []upstream.Target{{Name: "t1", BaseURL: f.upstreamSrv.URL, Enabled: true,
 			Secrets: map[string]string{"api_key": "sk-live-key"}}}}
@@ -256,9 +294,9 @@ func TestChatCompletions_UpstreamTerminal(t *testing.T) {
 }
 
 func TestExhausted_LastStatusPassthrough(t *testing.T) {
-	// Given 非内置协议(JS 包)+ 上游 503 When 全目标耗尽 Then 透传末次状态与原始 body
+	// Given 非内置协议(JS 包)+ 上游 503 When 请求 Then 透传上游状态与原始 body
 	f := newFixture(t, 503, "application/json", `{"error":{"message":"overloaded upstream"}}`)
-	f.installJSProtocol(t)
+	f.installJSProtocolAs(t, "openai-completions", []string{"streaming", "non_streaming"})
 	body := `{"model":"test-model","messages":[]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -272,10 +310,25 @@ func TestExhausted_LastStatusPassthrough(t *testing.T) {
 	}
 }
 
-func TestMessages_NeverFastPath(t *testing.T) {
-	// Given anthropic 入口 When 请求 Then 不走快速路径(经过态适配,响应为 anthropic 形态)
-	f := newFixture(t, 200, "application/json",
-		`{"id":"c1","model":"test-model","choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+func TestMessages_CapabilityMismatch400(t *testing.T) {
+	// Given 上游仅声明 openai-completions When anthropic 入口请求 Then 400(不转换,不透传)
+	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[]}`)
+	body := `{"model":"test-model","max_tokens":10,"messages":[{"role":"user","content":"q"}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	f.g.Messages(w, req)
+	if w.Code != 400 {
+		t.Fatalf("status: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"error"`) {
+		t.Fatalf("anthropic error shape: %s", w.Body.String())
+	}
+}
+
+func TestMessages_DeclaredProtocolServes(t *testing.T) {
+	// Given 上游声明 anthropic-messages When anthropic 入口请求 Then 响应体原样透传
+	f := newFixture(t, 200, "application/json", `{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}]}`)
+	f.installJSProtocolAs(t, "anthropic-messages", []string{"streaming", "non_streaming"})
 	body := `{"model":"test-model","max_tokens":10,"messages":[{"role":"user","content":"q"}]}`
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 	w := httptest.NewRecorder()

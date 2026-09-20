@@ -20,18 +20,58 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
+// Entry 入口协议(codec + 协议全名)
+type Entry struct {
+	convert.EntryInspector
+	convert.ErrorRenderer
+	convert.FramerFactory
+	// Protocol 入口协议全名(与插件协议槽同枚举)
+	Protocol string
+}
+
+// Inspect 入口解析:只读,原文不改
+func (e Entry) Inspect(body []byte) (model string, stream bool, feats []convert.Feature, err error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return "", false, nil, fmt.Errorf("parse request: %w", err)
+	}
+	return e.EntryInspector.Inspect(m)
+}
+
 // Gateway HTTP 入口
 type Gateway struct {
-	OpenAI    convert.EntryCodec
-	Anthropic convert.EntryCodec
+	OpenAI    Entry
+	Anthropic Entry
 	Executor  *pipeline.Executor
 	Registry  *upstream.Registry
 	Metrics   *metrics.Recorder
 	Secrets   upstream.SecretsStore
 }
 
+// openaiProtocol / anthropicProtocol 协议槽枚举值(与 internal/plugin 声明一致)
+const (
+	openaiProtocol    = "openai-completions"
+	anthropicProtocol = "anthropic-messages"
+)
+
 // requestID 请求标识(header 键)
 const requestIDHeader = "X-Request-Id"
+
+// testBody 管理连通性测试体:按上游声明协议构造最小请求
+func testBody(declared, model string) ([]byte, error) {
+	if declared == anthropicProtocol {
+		return json.Marshal(map[string]any{
+			"model":      model,
+			"max_tokens": 1,
+			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
+		})
+	}
+	return json.Marshal(map[string]any{
+		"model":    model,
+		"stream":   false,
+		"messages": []any{map[string]any{"role": "user", "content": "ping"}},
+	})
+}
 
 // ChatCompletions POST /v1/chat/completions(openai 入口)
 func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -43,38 +83,36 @@ func (g *Gateway) Messages(w http.ResponseWriter, r *http.Request) {
 	g.serve(w, r, g.Anthropic, true)
 }
 
-// serve 主流程
-func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.EntryCodec, anthropicEntry bool) {
+// serve 主流程:入口只读解析 → 按声明协议协商路由 → 管道执行 → 入口格式输出
+func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, anthropicEntry bool) {
 	exit := g.Metrics.EnterRequest()
 	defer exit()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
-		writeError(w, codec, http.StatusBadRequest, "read body")
+		writeError(w, entry, http.StatusBadRequest, "read body")
 		return
 	}
-	pivot, feats, err := codec.Parse(body)
+	model, entryStream, feats, err := entry.Inspect(body)
 	if err != nil {
-		writeError(w, codec, http.StatusBadRequest, fmt.Sprintf("parse: %v", err))
+		writeError(w, entry, http.StatusBadRequest, err.Error())
 		return
 	}
 	// n>1 → 400
 	for _, f := range feats {
 		if f == convert.FeatureN {
-			writeError(w, codec, http.StatusBadRequest, "n>1 unsupported")
+			writeError(w, entry, http.StatusBadRequest, "n>1 unsupported")
 			return
 		}
 	}
-	model, _ := pivot.GetScalar("model")
-	entryStream := pivot.GetBool("stream")
-	candidates, pickErr, err := g.Registry.Pick(model, featsToStrings(feats))
+	candidates, pickErr, err := g.Registry.Pick(model, featsToStrings(feats), entry.Protocol, entryStream)
 	if err != nil {
 		switch pickErr {
 		case upstream.PickNoModel:
-			writeErrorWithModels(w, codec, http.StatusNotFound, "no upstream for model", g.availableModels())
+			writeErrorWithModels(w, entry, http.StatusNotFound, "no upstream for model", g.availableModels(entry.Protocol))
 		case upstream.PickCapability:
-			writeError(w, codec, http.StatusBadRequest, "capability missing")
+			writeError(w, entry, http.StatusBadRequest, "capability missing")
 		default:
-			writeError(w, codec, http.StatusServiceUnavailable, "no healthy target")
+			writeError(w, entry, http.StatusServiceUnavailable, "no healthy target")
 		}
 		return
 	}
@@ -82,7 +120,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.En
 	resolved, release, err := g.Registry.Resolve(u)
 	if err != nil {
 		log.Printf("resolve %s: %v", u.Name, err)
-		writeError(w, codec, http.StatusBadGateway, "resolve failed")
+		writeError(w, entry, http.StatusBadGateway, "resolve failed")
 		return
 	}
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
@@ -93,13 +131,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.En
 	}
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
-	resp, err := g.Executor.Run(r.Context(), pctx, resolved, mustJSON(pivot))
+	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
 		g.Metrics.IncUpstream(u.Name, true)
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
-		g.writeRunError(w, codec, pctx, resolved, err)
+		g.writeRunError(w, entry, pctx, resolved, err)
 		return
 	}
 	if resp.Status >= 400 {
@@ -110,38 +148,32 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, codec convert.En
 		return
 	}
 	g.Metrics.IncUpstream(u.Name, false)
-	// 态适配:入口形态 × 上游形态 失配时协议无关转换
-	if entryStream != resp.Stream {
-		g.adapted(w, r, codec, entryStream, resp)
-		return
-	}
 	if resp.Stream {
-		g.writeStream(w, codec, resp)
-		return
-	}
-	out, err := codec.FromPivotResponse(&convert.PivotResponse{JSON: resp.Body})
-	if err != nil {
-		g.Metrics.IncError()
-		writeError(w, codec, http.StatusBadGateway, "format response")
+		g.writeStream(w, entry, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(pipelineStatus(resp.Status))
-	_, _ = w.Write(out)
+	_, _ = w.Write(resp.Body)
 }
 
-// writeRunError Run 错误输出:池耗尽/无出口 503;BuildError(部件/传输/本地原因)502 协议格式
+// writeRunError Run 错误输出:形态不符 400;池耗尽/无出口 503;其余 502 协议格式
 // (上游错误状态不走此路径:executor 已作终局响应返回)
-func (g *Gateway) writeRunError(w http.ResponseWriter, codec convert.EntryCodec, pctx *pipeline.PipelineContext, resolved pipeline.Resolved, err error) {
+func (g *Gateway) writeRunError(w http.ResponseWriter, entry Entry, pctx *pipeline.PipelineContext, resolved pipeline.Resolved, err error) {
+	var capErr *pipeline.CapabilityError
+	if errors.As(err, &capErr) {
+		writeError(w, entry, http.StatusBadRequest, capErr.Reason)
+		return
+	}
 	if errors.Is(err, pipeline.ErrPoolBusy) {
-		writeError(w, codec, http.StatusServiceUnavailable, "runtime pool busy")
+		writeError(w, entry, http.StatusServiceUnavailable, "runtime pool busy")
 		return
 	}
 	if errors.Is(err, ipprovider.ErrNoExits) {
-		writeError(w, codec, http.StatusServiceUnavailable, "no available egress")
+		writeError(w, entry, http.StatusServiceUnavailable, "no available egress")
 		return
 	}
-	writeError(w, codec, http.StatusBadGateway, err.Error())
+	writeError(w, entry, http.StatusBadGateway, err.Error())
 }
 
 // TestUpstream 管理连通性测试:首个模型发最小请求走完整管道(非流式;经 executor,OnTargetExit 照常计数)
@@ -155,14 +187,9 @@ func (g *Gateway) TestUpstream(ctx context.Context, u *upstream.Upstream) (int64
 		return 0, "resolve: " + err.Error()
 	}
 	defer release()
-	pivot := map[string]any{
-		"model":      u.Models[0],
-		"max_tokens": 1,
-		"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
-	}
-	raw, err := json.Marshal(pivot)
+	raw, err := testBody(g.Registry.DeclaredProtocol(u), u.Models[0])
 	if err != nil {
-		return 0, "marshal pivot: " + err.Error()
+		return 0, "marshal test body: " + err.Error()
 	}
 	pctx := pipeline.NewContext("admin-test-"+u.Name, pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
 		pipeline.Vars{Model: u.Models[0], EntryStream: false})
@@ -192,82 +219,7 @@ func writeRaw(w http.ResponseWriter, status int, body []byte) {
 	_, _ = w.Write(body)
 }
 
-// adapted 态适配分派:入口流×上游非流 → Chunkify 后按流输出;入口非流×上游流 → Aggregate 后按整体输出
-func (g *Gateway) adapted(w http.ResponseWriter, r *http.Request, codec convert.EntryCodec, entryStream bool, resp *pipeline.Response) {
-	ad := convert.StreamAdapter{}
-	if entryStream {
-		chunks, err := ad.Chunkify(&convert.PivotResponse{JSON: resp.Body})
-		if err != nil {
-			g.Metrics.IncError()
-			writeError(w, codec, http.StatusBadGateway, "chunkify failed")
-			return
-		}
-		ch := make(chan *convert.Chunk, len(chunks))
-		for _, c := range chunks {
-			ch <- c
-		}
-		close(ch)
-		g.writeStream(w, codec, &pipeline.Response{Stream: true, Chunks: pivotChunkChan(ch), Status: resp.Status})
-		return
-	}
-	pivotCh := make(chan *convert.Chunk)
-	go func() {
-		defer close(pivotCh)
-		for item := range resp.Chunks {
-			if item.RawPass {
-				continue
-			}
-			ch, err := convert.ParseChunk(item.JSON)
-			if err != nil {
-				continue
-			}
-			pivotCh <- ch
-		}
-	}()
-	agg, err := ad.Aggregate(pivotCh)
-	// Aggregate 提前返回(x_error 中止)时泵 goroutine 可能阻塞在 send:排空防泄漏
-	for range pivotCh {
-	}
-	if err != nil {
-		g.Metrics.IncError()
-		writeError(w, codec, http.StatusBadGateway, "aggregate failed")
-		return
-	}
-	if agg.Err != nil {
-		g.Metrics.IncError()
-		status := http.StatusBadGateway
-		if agg.Err.Status > 0 {
-			status = agg.Err.Status
-		}
-		writeError(w, codec, status, agg.Err.Message)
-		return
-	}
-	out, err := codec.FromPivotResponse(agg)
-	if err != nil {
-		g.Metrics.IncError()
-		writeError(w, codec, http.StatusBadGateway, "format response")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(pipelineStatus(resp.Status))
-	_, _ = w.Write(out)
-}
-
-// pivotChunkChan convert.Chunk 通道适配为 pipeline chunk 项通道(仅用于态适配输出)
-func pivotChunkChan(in <-chan *convert.Chunk) <-chan pipeline.ChunkItem {
-	out := make(chan pipeline.ChunkItem)
-	go func() {
-		defer close(out)
-		for c := range in {
-			b, err := json.Marshal(c)
-			if err != nil {
-				continue
-			}
-			out <- pipeline.ChunkItem{JSON: b}
-		}
-	}()
-	return out
-}
+// 声明式单协议下无 pivot 中转:入口原文经 filters 直达 buildRequest,回程帧直接来自 mapEvent
 
 // fastPath 透传:body 原样,目标 secrets 注入 Authorization,不切换不刷新
 func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string) {
@@ -349,29 +301,24 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 	_, _ = w.Write(tresp.Body)
 }
 
-// writeStream 流式输出:逐 chunk Flush;raw 帧原样;[DONE] 收尾
-func (g *Gateway) writeStream(w http.ResponseWriter, codec convert.EntryCodec, resp *pipeline.Response) {
+// writeStream 流式输出:逐帧经入口 Framer 归一;降级帧原样;尾帧由 Flush 收尾
+func (g *Gateway) writeStream(w http.ResponseWriter, entry Entry, resp *pipeline.Response) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, codec, http.StatusInternalServerError, "stream unsupported")
+		writeError(w, entry, http.StatusInternalServerError, "stream unsupported")
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	chunker := codec.NewFromPivotChunker()
+	framer := entry.Framer()
 	for item := range resp.Chunks {
 		var events []sseEventOut
 		if item.RawPass {
 			events = []sseEventOut{{data: string(item.JSON)}}
 		} else {
-			evs, err := chunker.Next(item.JSON)
-			if err != nil {
-				log.Printf("chunker next: %v", err)
-				continue
-			}
-			for _, e := range evs {
-				events = append(events, sseEventOut{data: e.Data, done: e.Done})
+			for _, e := range framer.Frame(item.JSON) {
+				events = append(events, sseEventOut{event: e.Event, data: e.Data})
 			}
 		}
 		for _, e := range events {
@@ -379,13 +326,10 @@ func (g *Gateway) writeStream(w http.ResponseWriter, codec convert.EntryCodec, r
 		}
 		flusher.Flush()
 	}
-	fin, err := chunker.Flush()
-	if err == nil {
-		for _, e := range fin {
-			writeSSE(w, sseEventOut{data: e.Data, done: e.Done})
-		}
-		flusher.Flush()
+	for _, e := range framer.Flush() {
+		writeSSE(w, sseEventOut{event: e.Event, data: e.Data})
 	}
+	flusher.Flush()
 }
 
 // passthroughStream 快速路径流式:上游帧原样转发
@@ -406,8 +350,12 @@ func (g *Gateway) passthroughStream(w http.ResponseWriter, tresp pipeline.Transp
 
 // Models GET /v1/models(双形态)+ /v1/models/{id}
 func (g *Gateway) Models(w http.ResponseWriter, r *http.Request) {
-	models := g.availableModels()
 	anthropicForm := r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != ""
+	protocol := openaiProtocol
+	if anthropicForm {
+		protocol = anthropicProtocol
+	}
+	models := g.availableModels(protocol)
 	if anthropicForm {
 		data := make([]map[string]any, 0, len(models))
 		for _, m := range models {
@@ -425,7 +373,7 @@ func (g *Gateway) Models(w http.ResponseWriter, r *http.Request) {
 
 // ModelByID GET /v1/models/{id}(openai 形态)
 func (g *Gateway) ModelByID(w http.ResponseWriter, r *http.Request, id string) {
-	for _, m := range g.availableModels() {
+	for _, m := range g.availableModels(openaiProtocol) {
 		if m == id {
 			writeJSON(w, http.StatusOK, map[string]any{"id": id, "object": "model", "owned_by": "ai-api-proxy"})
 			return
@@ -434,12 +382,15 @@ func (g *Gateway) ModelByID(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"type": "not_found", "message": "model not found"}})
 }
 
-// availableModels 聚合启用上游模型声明去重(稳定序)
-func (g *Gateway) availableModels() []string {
+// availableModels 聚合启用上游模型声明去重(稳定序;协议非空时仅计声明该协议的上游)
+func (g *Gateway) availableModels(protocol string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, u := range g.Registry.List() {
 		if !u.Enabled {
+			continue
+		}
+		if protocol != "" && g.Registry.DeclaredProtocol(u) != protocol {
 			continue
 		}
 		for _, m := range u.Models {
@@ -452,10 +403,14 @@ func (g *Gateway) availableModels() []string {
 	return out
 }
 
-// sseEventOut 输出事件
+// allModels 聚合启用上游模型声明去重(不分协议)
+func (g *Gateway) allModels() []string { return g.availableModels("") }
+
+// sseEventOut 输出事件(event 非空即写 event 行;done 仅 openai 收尾用)
 type sseEventOut struct {
-	data string
-	done bool
+	event string
+	data  string
+	done  bool
 }
 
 // writeSSE 写单事件
@@ -463,6 +418,9 @@ func writeSSE(w io.Writer, e sseEventOut) {
 	if e.done {
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return
+	}
+	if e.event != "" {
+		_, _ = fmt.Fprintf(w, "event: %s\n", e.event)
 	}
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", e.data)
 }
@@ -482,12 +440,6 @@ func featsToStrings(feats []convert.Feature) []string {
 	return out
 }
 
-// mustJSON pivot 序列化
-func mustJSON(p *convert.PivotRequest) []byte {
-	b, _ := json.Marshal(p)
-	return b
-}
-
 // pipelineStatus 非流式响应状态(0 → 200)
 func pipelineStatus(status int) int {
 	if status == 0 {
@@ -497,21 +449,17 @@ func pipelineStatus(status int) int {
 }
 
 // writeError 协议格式错误体
-func writeError(w http.ResponseWriter, codec convert.EntryCodec, status int, msg string) {
-	out, _ := codec.FromPivotResponse(&convert.PivotResponse{Err: &convert.XError{Type: "api_error", Message: msg}})
+func writeError(w http.ResponseWriter, entry Entry, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(out)
+	_, _ = w.Write(entry.ErrorBody(status, msg, nil))
 }
 
 // writeErrorWithModels 404 附可用模型
-func writeErrorWithModels(w http.ResponseWriter, codec convert.EntryCodec, status int, msg string, models []string) {
-	out, _ := codec.FromPivotResponse(&convert.PivotResponse{Err: &convert.XError{
-		Type: "api_error", Message: msg + ": " + strings.Join(models, ","),
-	}})
+func writeErrorWithModels(w http.ResponseWriter, entry Entry, status int, msg string, models []string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(out)
+	_, _ = w.Write(entry.ErrorBody(status, msg, models))
 }
 
 // writeJSON 直接 JSON 输出

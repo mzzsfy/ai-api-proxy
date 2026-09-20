@@ -25,7 +25,7 @@ const busyProtoSrc = `module.exports = { buildRequest: function (ctx) {
 func mustProto(t *testing.T, name, src, poolSize string) *gojaProtocol {
 	t.Helper()
 	pkg, err := ParseAAP(buildAAP(t, `{"manifestVersion":1,"name":"`+name+`","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["non_streaming"]}}}`, map[string]string{"p.js": src}))
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["non_streaming"]}}}`, map[string]string{"p.js": src}))
 	if err != nil {
 		t.Fatal(err)
 	}

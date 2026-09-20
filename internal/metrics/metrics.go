@@ -2,7 +2,6 @@
 package metrics
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -160,15 +159,6 @@ func (row SnapshotRow) TargetJSON() (string, error) {
 	return string(b), nil
 }
 
-// LiveStats 实时统计(GUI live 查询;非重置读)
-type LiveStats struct {
-	ActiveConcurrent int64
-	TotalRequests    int64
-	TotalErrors      int64
-	ByUpstream       map[string]*UpstreamCounters
-	ByTarget         map[string]*UpstreamCounters
-}
-
 // SnapshotLive 非重置实时读
 func (r *Recorder) SnapshotLive() (requests, errors, concurrent int64, byUp, byTarget map[string]*UpstreamCounters) {
 	r.mu.Lock()
@@ -184,9 +174,4 @@ func copyCounters(src map[string]*UpstreamCounters) map[string]*UpstreamCounters
 		out[k] = &vc
 	}
 	return out
-}
-
-// Store 快照落库接口(metrics 不依赖 store 包)
-type Store interface {
-	InsertMetricsMinute(ctx context.Context, row SnapshotRow, byUpJSON, byTargetJSON string) error
 }

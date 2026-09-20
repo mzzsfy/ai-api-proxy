@@ -1,6 +1,14 @@
 // ai-api-proxy 插件 SDK 类型定义(hook 全同步;代理层恰一次上游请求,无重试——归下游)
-// 部件导出形态:hooks 对象(无参)或 factory 函数 (config) => hooks
+// 声明式单协议:一个协议部件服务且仅服务 manifest 声明的唯一协议槽
+// 槽位取值只允许 "openai-completions" | "anthropic-messages";入口与槽位不符由主体 400 拒绝,不做任何转换
+// 部件导出形态:hooks 对象(无参)或 factory 函数 (config) => hooks;config 含 host 注入的 protocol
 // 全局注入:util / log / storage / module / exports;无 require(禁 npm)
+
+/** 协议槽枚举(manifest:parts.protocol.protocol) */
+export type ProtocolSlot = "openai-completions" | "anthropic-messages";
+
+/** 声明形态(manifest:parts.protocol.forms 子集) */
+export type Form = "streaming" | "non_streaming";
 
 /** 管道请求上下文(部件只读;私有数据用 state) */
 export interface Context {
@@ -16,40 +24,60 @@ export interface UpstreamRequest {
   url: string;
   method: string;
   headers: Record<string, string>;
+  /** 入口原文字节;声明式单协议下与入口同格式,部件不得改写语义 */
   body: string;
+  /** 声明分发意图;须 ∈ 本部件 manifest 的 forms */
   stream: boolean;
 }
 
-/** 流式单帧(host 分帧;入方向 {"event","data"} 形态) */
+/** 流式单帧(host 分帧;入方向恒为 {"event","data"} 信封) */
 export interface SSEFrame {
   event: string;
   data: string;
 }
 
-/** 协议适配部件(恰一;主包必须含) */
+/** 协议适配部件(恰一;主包必须含;协议槽由 manifest 声明) */
 export interface ProtocolHooks {
-  /** 构造上游请求(同步;stream 标志承载双声明分发意图) */
-  buildRequest(ctx: Context, pivot: string): UpstreamRequest;
-  /** 流式帧 → pivot chunk JSON 字符串;返回 null 跳帧 */
+  /**
+   * 构造上游请求(同步)
+   * @param entry 入口原文字节(声明协议格式,未经任何转换)
+   */
+  buildRequest(ctx: Context, entry: string): UpstreamRequest;
+  /**
+   * 流式帧 → 声明协议事件对象数组的 JSON 字符串;返回 null / "[]" / "" 跳帧
+   * 仅在 manifest 声明 streaming 时实现,否则校验期拒绝
+   * 失败 = 该帧降级原样透传并告警,流不中断
+   */
   mapEvent?(ctx: Context, event: string): string | null;
-  /** 非流式响应体 → pivot JSON 字符串 */
+  /**
+   * 非流式响应体 → 声明协议响应 JSON 字符串
+   * 仅在 manifest 声明 non_streaming 时实现,否则校验期拒绝
+   */
   mapResponse?(ctx: Context, body: string): string;
   /** 错误终局映射(可选;一次;未实现原样透传) */
   mapError?(ctx: Context, status: number, body: string): string;
 }
 
-/** 请求修改部件(0..n 串行) */
+/** 请求修改部件(0..n 串行;不参与能力协商) */
 export interface FilterHooks {
-  /** 请求改写(pivot → pivot);失败 = 请求 502 带部件名 */
-  mapRequest(ctx: Context, pivot: string): string | null;
+  /** 请求改写(入口格式 → 入口格式);失败 = 请求 502 带部件名 */
+  mapRequest(ctx: Context, entry: string): string | null;
   /** 流式 chunk 改写(逆序);失败 = 单 chunk 降级 raw */
   mapChunk?(ctx: Context, chunk: string): string | null;
   /** 非流式响应改写(逆序);失败 = 502 */
   mapResponse?(ctx: Context, resp: string): string | null;
 }
 
-/** 部件 configSchema 实例值(factory 闭包捕获,不经 ctx) */
-export type PartConfig = Record<string, unknown>;
+/**
+ * 部件 configSchema 实例值(factory 闭包捕获,不经 ctx)
+ * 注意:config 另含 host 注入的 protocol(即本部件声明的协议槽),不得在 configSchema 中重复声明该键,
+ * 否则 key 剥离会把注入值删掉而看不到声明槽
+ */
+export interface PartConfig {
+  /** host 注入的协议槽值(= manifest 声明的 protocol) */
+  protocol: ProtocolSlot;
+  [key: string]: unknown;
+}
 
 export type ProtocolPart = ProtocolHooks | ((config: PartConfig) => ProtocolHooks);
 export type FilterPart = FilterHooks | ((config: PartConfig) => FilterHooks);

@@ -274,7 +274,7 @@ func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*
 	return &hookInstance{vm: vm, hooks: hooks, cursor: deps.Cursor}, nil
 }
 
-// Hooks 部件导出的 hook 函数集(同步调用)
+// Hooks 部件导出的 hook 函数集(同步调用);恰一次直发语义下无 refresh
 type Hooks struct {
 	VM           *goja.Runtime
 	Obj          goja.Value
@@ -282,7 +282,6 @@ type Hooks struct {
 	MapEvent     goja.Callable
 	MapResponse  goja.Callable
 	MapError     goja.Callable
-	Refresh      goja.Callable
 	MapRequest   goja.Callable
 	MapChunk     goja.Callable
 }
@@ -310,7 +309,6 @@ func ExtractHooks(vm *goja.Runtime, obj goja.Value) (*Hooks, error) {
 		MapEvent:     get("mapEvent"),
 		MapResponse:  get("mapResponse"),
 		MapError:     get("mapError"),
-		Refresh:      get("refresh"),
 		MapRequest:   get("mapRequest"),
 		MapChunk:     get("mapChunk"),
 	}

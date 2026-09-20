@@ -36,9 +36,9 @@ func (s *upstreamSpy) snapshot() (auth, model, path string, hits int64) {
 	return s.lastAuth, s.lastModel, s.lastPath, s.hits.Load()
 }
 
-// openaiCompletionNonStream 非流式完成体
-func openaiCompletionNonStream(model string) string {
-	b, _ := json.Marshal(map[string]any{
+// openaiCompletionNonStream 非流式完成体;overrides 覆盖响应对象字段(anthropic 声明变体)
+func openaiCompletionNonStream(model string, overrides map[string]any) string {
+	obj := map[string]any{
 		"id": "chatcmpl-e2e", "object": "chat.completion", "model": model,
 		"choices": []any{map[string]any{
 			"index":         0,
@@ -46,12 +46,35 @@ func openaiCompletionNonStream(model string) string {
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-	})
+	}
+	for k, v := range overrides {
+		if k == "message_content" {
+			obj["content"] = []any{map[string]any{"type": "text", "text": v}}
+			continue
+		}
+		obj[k] = v
+	}
+	b, _ := json.Marshal(obj)
 	return string(b)
 }
 
-// openaiChunkStream 流式帧体(单 delta + [DONE])
-const openaiChunkStream = "data: {\"id\":\"chatcmpl-e2e\",\"model\":\"%s\",\"delta\":{\"content\":\"hi\"}}\n\ndata: [DONE]\n\n"
+// anthropicOverrides /v1/messages 路径(anthropic 声明上游)的响应对象覆盖字段
+func anthropicOverrides(path string) map[string]any {
+	if path != "/v1/messages" {
+		return nil
+	}
+	return map[string]any{"type": "message", "message_content": "hi"}
+}
+
+// openaiChunkStream 流式帧体(单 delta + [DONE];overrides 覆盖响应对象字段,用于 anthropic 声明变体)
+func openaiChunkStream(model string, overrides map[string]any) string {
+	obj := map[string]any{"id": "chatcmpl-e2e", "model": model, "delta": map[string]any{"content": "hi"}}
+	for k, v := range overrides {
+		obj[k] = v
+	}
+	b, _ := json.Marshal(obj)
+	return "data: " + string(b) + "\n\ndata: [DONE]\n\n"
+}
 
 // newMockUpstream 真实 HTTP 假上游:按请求 stream 标志分流式/非流式
 func newMockUpstream(t *testing.T) (*httptest.Server, *upstreamSpy) {
@@ -73,12 +96,12 @@ func newMockUpstream(t *testing.T) (*httptest.Server, *upstreamSpy) {
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, openaiChunkStream, req.Model)
+			_, _ = fmt.Fprintf(w, "%s", openaiChunkStream(req.Model, anthropicOverrides(r.URL.Path)))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(openaiCompletionNonStream(req.Model)))
+		_, _ = w.Write([]byte(openaiCompletionNonStream(req.Model, anthropicOverrides(r.URL.Path))))
 	}))
 	t.Cleanup(srv.Close)
 	return srv, spy
@@ -146,26 +169,45 @@ func aapZip(t *testing.T, manifest string, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-const jsProtoManifest = `{"manifestVersion":1,"name":"js-openai","version":"1.0.0","parts":{
-	"protocol":{"entry":"p.js","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+const jsProtoManifest = `{"manifestVersion":1,"name":"js-openai","version":"1.0.0",
+	"parts":{"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
 
-// jsProtoSrc 真实 JS 协议部件:构造请求/帧解包/响应透传
-const jsProtoSrc = `module.exports = {
-	buildRequest: function (ctx, pivot) {
+// jsProtoAnthropicManifest 同一部件源码的另一协议声明(anthropic-messages)
+const jsProtoAnthropicManifest = `{"manifestVersion":1,"name":"js-anthropic","version":"1.0.0",
+	"parts":{"protocol":{"entry":"p.js","protocol":"anthropic-messages","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+
+// jsProtoSrc 真实 JS 协议部件:构造请求/帧解包(声明协议事件数组)/响应透传
+// 协议由工厂 config 注入(部件声明的协议名随 config.protocol 下发)
+const jsProtoSrc = `module.exports = function (config) {
+	var DECLARED = (config && config.protocol) || "openai-completions";
+	return {
+	buildRequest: function (ctx, entry) {
+		var ant = DECLARED === "anthropic-messages";
 		return {
-			url: ctx.target.baseUrl + "/v1/chat/completions",
+			url: ctx.target.baseUrl + (ant ? "/v1/messages" : "/v1/chat/completions"),
 			method: "POST",
 			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.secret("api_key") },
-			body: pivot,
+			body: entry,
 			stream: ctx.vars.entryStream
 		};
 	},
 	mapEvent: function (ctx, e) {
 		var f = JSON.parse(e);
 		if (f.data === "[DONE]") return null;
-		return f.data;
+		var o = JSON.parse(f.data);
+		if (DECLARED === "anthropic-messages") {
+			var out = [];
+			if (o.delta) {
+				out.push({ type: "message_start", message: { role: "assistant" } });
+				out.push({ type: "content_block_delta", delta: { type: "text_delta", text: o.delta.content } });
+			}
+			out.push({ type: "message_stop" });
+			return JSON.stringify(out);
+		}
+		return JSON.stringify([o]);
 	},
 	mapResponse: function (ctx, body) { return body; }
+	};
 };`
 
 const rewriteManifest = `{"manifestVersion":1,"name":"rewrite-model","version":"1.0.0","parts":{
@@ -175,9 +217,9 @@ const rewriteManifest = `{"manifestVersion":1,"name":"rewrite-model","version":"
 const rewriteSrc = `module.exports = function (config) {
 	var target = (config && config.model) || "";
 	return {
-		mapRequest: function (ctx, pivot) {
-			if (!target) return pivot;
-			var o = JSON.parse(pivot);
+		mapRequest: function (ctx, entry) {
+			if (!target) return entry;
+			var o = JSON.parse(entry);
 			o.model = target;
 			return JSON.stringify(o);
 		},
@@ -238,14 +280,18 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{"p.js": jsProtoSrc})); err != nil {
 		t.Fatal(err)
 	}
+	// 同源码的 anthropic 协议声明包(声明式单协议:入口 anthropic 需上游声明 anthropic-messages)
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{"p.js": jsProtoSrc})); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"f.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	// 4 组上游实例:(直连/代理)×(无/有请求修改)
-	mkUpstream := func(name, model, transport string, withFilter bool) {
+	// mkUpstream 按入口协议装组:anthropic 入口组用 anthropic 声明包
+	mkUpstream := func(name, model, base, transport string, withFilter bool) {
 		u := &upstream.Upstream{
 			Name: name, Enabled: true,
-			Base:   upstream.PackageRef{Package: "js-openai"},
+			Base:   upstream.PackageRef{Package: base},
 			Models: []string{model},
 			Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: transport, Enabled: true,
 				Secrets: map[string]string{"api_key": upstreamAPIKey}}},
@@ -258,10 +304,11 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 			t.Fatalf("save %s: %v", name, err)
 		}
 	}
-	mkUpstream("g1-direct-nofilter", "m-direct", "", false)
-	mkUpstream("g2-proxy-nofilter", "m-proxy", "px", false)
-	mkUpstream("g3-direct-filter", "mf-direct", "", true)
-	mkUpstream("g4-proxy-filter", "mf-proxy", "px", true)
+	mkUpstream("g1-direct-nofilter", "m-direct", "js-openai", "", false)
+	mkUpstream("g2-proxy-nofilter", "m-proxy", "js-openai", "px", false)
+	mkUpstream("g3-direct-filter", "mf-direct", "js-openai", "", true)
+	mkUpstream("g4-proxy-filter", "mf-proxy", "js-openai", "px", true)
+	mkUpstream("g5-anthropic", "m-anthropic", "js-anthropic", "", false)
 	gateway := httptest.NewServer(app.Mux)
 	t.Cleanup(gateway.Close)
 	return &fourGroupsFixture{
@@ -302,28 +349,24 @@ type scenario struct {
 	filter bool // 断言请求被改写
 }
 
-// fourGroupScenarios 4 组 × chat/message × 流/非流
+// fourGroupScenarios 4 组 × chat/message × 流/非流 + anthropic 声明组 × message 流/非流
 func fourGroupScenarios() []scenario {
 	return []scenario{
 		{group: "m-direct", entry: "chat", stream: false, proxy: false, filter: false},
 		{group: "m-direct", entry: "chat", stream: true, proxy: false, filter: false},
-		{group: "m-direct", entry: "message", stream: false, proxy: false, filter: false},
-		{group: "m-direct", entry: "message", stream: true, proxy: false, filter: false},
 
 		{group: "m-proxy", entry: "chat", stream: false, proxy: true, filter: false},
 		{group: "m-proxy", entry: "chat", stream: true, proxy: true, filter: false},
-		{group: "m-proxy", entry: "message", stream: false, proxy: true, filter: false},
-		{group: "m-proxy", entry: "message", stream: true, proxy: true, filter: false},
 
 		{group: "mf-direct", entry: "chat", stream: false, proxy: false, filter: true},
 		{group: "mf-direct", entry: "chat", stream: true, proxy: false, filter: true},
-		{group: "mf-direct", entry: "message", stream: false, proxy: false, filter: true},
-		{group: "mf-direct", entry: "message", stream: true, proxy: false, filter: true},
 
 		{group: "mf-proxy", entry: "chat", stream: false, proxy: true, filter: true},
 		{group: "mf-proxy", entry: "chat", stream: true, proxy: true, filter: true},
-		{group: "mf-proxy", entry: "message", stream: false, proxy: true, filter: true},
-		{group: "mf-proxy", entry: "message", stream: true, proxy: true, filter: true},
+
+		// anthropic 声明组:入口 anthropic 与上游声明同协议(声明式单协议)
+		{group: "m-anthropic", entry: "message", stream: false, proxy: false, filter: false},
+		{group: "m-anthropic", entry: "message", stream: true, proxy: false, filter: false},
 	}
 }
 
@@ -384,8 +427,12 @@ func runScenariosTable(t *testing.T, base string, proxyHits func() int64, spy *u
 			if auth != "Bearer "+upstreamAPIKey {
 				t.Fatalf("upstream auth: %q", auth)
 			}
-			if path != "/v1/chat/completions" {
-				t.Fatalf("upstream path: %q", path)
+			wantPath := "/v1/chat/completions"
+			if sc.entry == "message" {
+				wantPath = "/v1/messages"
+			}
+			if path != wantPath {
+				t.Fatalf("upstream path: %q want %q", path, wantPath)
 			}
 			wantModel := sc.group
 			if sc.filter {

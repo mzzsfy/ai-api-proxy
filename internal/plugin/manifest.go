@@ -9,9 +9,28 @@ import (
 // ManifestVersion 当前支持的 manifest 版本
 const ManifestVersion = 1
 
-// ProtocolPart protocol 部件声明
+// EntryProtocol 入口协议全名(插件协议槽与入口共用的枚举)
+type EntryProtocol string
+
+// 协议全名枚举
+const (
+	ProtocolOpenAICompletions EntryProtocol = "openai-completions"
+	ProtocolAnthropicMessages EntryProtocol = "anthropic-messages"
+)
+
+// Form 请求形态(流式/非流式;协议槽声明的可处理形态枚举)
+type Form string
+
+// 形态枚举(与 SDK Form 一字不差)
+const (
+	FormStreaming    Form = "streaming"
+	FormNonStreaming Form = "non_streaming"
+)
+
+// ProtocolPart protocol 部件声明(声明式单协议:一个包恰服务一种协议)
 type ProtocolPart struct {
 	Entry      string   `json:"entry"`
+	Protocol   string   `json:"protocol"`
 	Form       []string `json:"form"`
 	Features   []string `json:"features"`
 	SecretRefs []string `json:"secretRefs"`
@@ -68,13 +87,17 @@ func (p *Package) Validate() error {
 	if proto == nil && len(filters) == 0 {
 		return fmt.Errorf("package has no parts: need protocol or filters")
 	}
-	// protocol 声明绑定:form 必填至少一
+	// protocol 声明绑定:协议全名 + form 必填至少一
 	if proto != nil {
+		if proto.Protocol != string(ProtocolOpenAICompletions) && proto.Protocol != string(ProtocolAnthropicMessages) {
+			return fmt.Errorf("protocol: unknown protocol %q (want %s | %s)",
+				proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
+		}
 		if len(proto.Form) == 0 {
 			return fmt.Errorf("protocol: form required (at least one of streaming/non_streaming)")
 		}
 		for _, f := range proto.Form {
-			if f != "streaming" && f != "non_streaming" {
+			if f != string(FormStreaming) && f != string(FormNonStreaming) {
 				return fmt.Errorf("protocol: unknown form %q", f)
 			}
 		}

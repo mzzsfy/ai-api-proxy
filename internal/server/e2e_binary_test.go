@@ -144,14 +144,19 @@ transports:
 		t.Fatalf("install js-openai %d: %s", status, body)
 	}
 	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
+		aapZip(t, jsProtoAnthropicManifest, map[string]string{"p.js": jsProtoSrc}))
+	if status != http.StatusOK {
+		t.Fatalf("install js-anthropic %d: %s", status, body)
+	}
+	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
 		aapZip(t, rewriteManifest, map[string]string{"f.js": rewriteSrc}))
 	if status != http.StatusOK {
 		t.Fatalf("install rewrite-model %d: %s", status, body)
 	}
-	mkUpstream := func(name, model, transport string, withFilter bool) {
+	mkUpstream := func(name, model, basePkg, transport string, withFilter bool) {
 		u := &upstream.Upstream{
 			Name: name, Enabled: true,
-			Base:   upstream.PackageRef{Package: "js-openai"},
+			Base:   upstream.PackageRef{Package: basePkg},
 			Models: []string{model},
 			Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: transport, Enabled: true,
 				Secrets: map[string]string{"api_key": upstreamAPIKey}}},
@@ -169,12 +174,13 @@ transports:
 			t.Fatalf("save %s %d: %s", name, st, bd)
 		}
 	}
-	mkUpstream("g1-direct-nofilter", "m-direct", "", false)
-	mkUpstream("g2-proxy-nofilter", "m-proxy", "px", false)
-	mkUpstream("g3-direct-filter", "mf-direct", "", true)
-	mkUpstream("g4-proxy-filter", "mf-proxy", "px", true)
+	mkUpstream("g1-direct-nofilter", "m-direct", "js-openai", "", false)
+	mkUpstream("g2-proxy-nofilter", "m-proxy", "js-openai", "px", false)
+	mkUpstream("g3-direct-filter", "mf-direct", "js-openai", "", true)
+	mkUpstream("g4-proxy-filter", "mf-proxy", "js-openai", "px", true)
+	mkUpstream("g5-anthropic", "m-anthropic", "js-anthropic", "", false)
 
-	// When 4 组 × chat/message × 流/非流 全部真实 HTTP 请求
+	// When 5 组 × 入口/流形态 全部真实 HTTP 请求
 	// Then 全部场景断言通过
 	runScenarios(t, base, func() int64 { return proxyHits.Load() }, spy)
 }

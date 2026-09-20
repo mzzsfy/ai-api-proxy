@@ -31,17 +31,21 @@ type Executor struct {
 	OnTargetExit func(upstream, target string, failed bool)
 }
 
-// Run 执行模型:①修改链 ②单目标直发 ③响应映射
-func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, pivotReq []byte) (*Response, error) {
+// Run 执行模型:①修改链 ②单目标直发 ③响应映射。entryReq = 入口协议请求体(声明协议与之恒等)
+func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, entryReq []byte) (*Response, error) {
+	// 入口形态把关:声明未覆盖 → 拒绝,不调用部件(不做任何转换)
+	if err := guardForm(u.Protocol, pctx.Vars.EntryStream); err != nil {
+		return nil, err
+	}
 	// ① 修改链:extras(引用序)→ base(包内序)已由 Resolve 排好
-	pivot := pivotReq
+	entry := entryReq
 	for _, f := range u.Filters {
-		out, err := f.MapRequest(pctx, pivot)
+		out, err := f.MapRequest(pctx, entry)
 		if err != nil {
 			return nil, &BuildError{Err: &MapRequestError{Part: f.Name(), Err: err}}
 		}
 		if out != nil {
-			pivot = out
+			entry = out
 		}
 	}
 	// ② 单目标:首个目标(Routing 多目标次序留给未来策略;失败不切换)
@@ -50,7 +54,7 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, p
 	}
 	target := u.Targets[0]
 	pctx.Target = target
-	resp, req, failed, err := e.tryTarget(ctx, pctx, u, target, pivot)
+	resp, req, failed, err := e.tryTarget(ctx, pctx, u, target, entry)
 	if e.OnTargetExit != nil {
 		e.OnTargetExit(pctx.Upstream.Name, target.Name, failed)
 	}
@@ -65,8 +69,8 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, p
 }
 
 // tryTarget 单次请求:BuildRequest → RoundTrip;无重试语义
-func (e *Executor) tryTarget(ctx context.Context, pctx *PipelineContext, u Resolved, target Target, pivot []byte) (tresp *TransportResponse, req Request, failed bool, err error) {
-	req, err = u.Protocol.BuildRequest(pctx, pivot)
+func (e *Executor) tryTarget(ctx context.Context, pctx *PipelineContext, u Resolved, target Target, entry []byte) (tresp *TransportResponse, req Request, failed bool, err error) {
+	req, err = u.Protocol.BuildRequest(pctx, entry)
 	if err != nil {
 		if errors.Is(err, ErrPoolBusy) {
 			return nil, req, true, err // 池耗尽:原样上抛(503)
@@ -169,12 +173,32 @@ func (e *Executor) mapResponse(pctx *PipelineContext, u Resolved, intentStream b
 	return &Response{Stream: true, Chunks: out, Status: tresp.Status}, nil
 }
 
-// decideStream 分发:单声明按 form 固定;双声明按请求 stream 意图(BuildRequest 标志),
+// CapabilityError 入口请求与上游声明不符(协议/形态/features);host 出 400,不做转换
+type CapabilityError struct {
+	Reason string
+}
+
+func (e *CapabilityError) Error() string { return e.Reason }
+
+// guardForm 形态把关:入口形态须被声明,否则拒绝(不调用部件、不转换)
+func guardForm(p Protocol, entryStream bool) error {
+	s := p.Supports()
+	want := FormNonStreaming
+	if entryStream {
+		want = FormStreaming
+	}
+	if !s.HasForm(want) {
+		return &CapabilityError{Reason: fmt.Sprintf("upstream declares no %s form for entry %s", want, p.Declared())}
+	}
+	return nil
+}
+
+// decideStream 响应形态:单声明按声明固定;双声明按请求 stream 意图(BuildRequest 标志);
 // 实际响应 Content-Type 兜底校验,不符按实际处理并告警
 func decideStream(p Protocol, intentStream bool, tresp *TransportResponse) (stream, warn bool) {
 	s := p.Supports()
-	streaming := s.HasForm("streaming")
-	nonStreaming := s.HasForm("non_streaming")
+	streaming := s.HasForm(FormStreaming)
+	nonStreaming := s.HasForm(FormNonStreaming)
 	if streaming && !nonStreaming {
 		return true, false
 	}

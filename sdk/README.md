@@ -4,9 +4,17 @@ JS 部件开发工具集。部件契约与宿主面以 `ai-api-proxy.d.ts` 为�
 
 ## 部件形态
 
-- protocol(主包恰一):`buildRequest` 必实现;`mapEvent`(声明 streaming)/`mapResponse`(声明 non_streaming)/`mapError` 可选
+- protocol(主包恰一):**声明式单协议**。manifest 用 `parts.protocol.protocol` 声明唯一协议槽
+  (`"openai-completions"` | `"anthropic-messages"`),`forms` 声明形态子集(`streaming` | `non_streaming`)。
+  入口协议与槽位不符时**主体直接 400 拒绝**,不做任何转换;`forms` 缺少入口形态时同样 400。
+- 钩子与声明的对称性在包校验期强制:`streaming` 必须实现 `mapEvent`,`non_streaming` 必须实现 `mapResponse`;
+  实现了某钩子却未声明对应形态同样拒绝。
+- `buildRequest(ctx, entry)` 必实现;入参是**入口原文字节**(与声明协议同格式),返回 `stream` 承载双声明分发意图。
+- `mapEvent(ctx, event)` 返回**声明协议事件对象数组的 JSON 字符串**;`null`/`"[]"`/`""` 跳帧。
+  host 按声明协议收尾(openai 补 `data: [DONE]`,anthropic 无收尾帧)。
+- factory 形态 `(config) => hooks` 可读 `config.protocol` 拿到本部件声明的协议槽;
+  不要在 `configSchema` 中声明 `protocol` 键——key 剥离会把 host 注入值删掉。
 - filter(附加包 0..n):`mapRequest`/`mapChunk`/`mapResponse` 按需
-- 导出:hooks 对象(无参)或 factory `(config) => hooks`
 - 全同步,禁 Promise/require/npm;宿主执行网络(恰一次,失败即终局,无重试)
 
 ## 本地测试

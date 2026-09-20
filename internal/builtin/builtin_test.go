@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,7 +10,7 @@ import (
 func TestSupports(t *testing.T) {
 	// Given 内置协议 When Supports Then 双形态 + tools/vision
 	s := New().Supports()
-	if !s.HasForm("streaming") || !s.HasForm("non_streaming") {
+	if !s.HasForm(pipeline.FormStreaming) || !s.HasForm(pipeline.FormNonStreaming) {
 		t.Fatalf("forms: %+v", s)
 	}
 	if !s.HasFeature("tools") || !s.HasFeature("vision") {
@@ -56,7 +55,7 @@ func TestBuildRequest_MissingSecretRejected(t *testing.T) {
 }
 
 func TestPassthroughHooks(t *testing.T) {
-	// Given 信封帧 When MapEvent Then 返回 data 字段(pivot chunk);MapResponse 原样
+	// Given 信封帧 When MapEvent Then 返回声明协议事件对象数组;MapResponse 原样
 	p := New()
 	b := []byte(`{"x":1}`)
 	out, err := p.MapResponse(nil, b)
@@ -64,7 +63,7 @@ func TestPassthroughHooks(t *testing.T) {
 		t.Fatalf("mapResponse: %v", err)
 	}
 	out, err = p.MapEvent(nil, []byte(`{"event":"","data":"{\"x\":1}"}`))
-	if err != nil || string(out) != string(b) {
+	if err != nil || string(out) != `[{"x":1}]` {
 		t.Fatalf("mapEvent: %v %s", err, out)
 	}
 	// [DONE] 帧 → 跳帧
@@ -74,34 +73,17 @@ func TestPassthroughHooks(t *testing.T) {
 	}
 }
 
-func TestSanitizePivot(t *testing.T) {
-	// Given anthropic 残留字段(system/stop_sequences/x_*)When sanitize Then 转 openai 等价形态
-	pivot := `{"model":"m","system":"be nice","stop_sequences":["a"],"x_top_k":3,"x_metadata":{"u":1},"messages":[]}`
-	out, err := sanitizePivot([]byte(pivot))
+func TestPassthroughBody(t *testing.T) {
+	// Given 入口原文字节 When BuildRequest Then body 逐字节不变(声明式单协议,不做任何清洗)
+	in := []byte(`{"model":"m","messages":[],"top_k":3}`)
+	p := &Protocol{TargetSecrets: func(target, key string) (string, bool) { return "k", true }}
+	req, err := p.BuildRequest(&pipeline.PipelineContext{
+		Target: pipeline.Target{Name: "t", BaseURL: "https://up.example"},
+	}, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(out, &m); err != nil {
-		t.Fatal(err)
-	}
-	if _, has := m["system"]; has {
-		t.Fatal("system not converted")
-	}
-	msgs, _ := m["messages"].([]any)
-	if len(msgs) != 1 {
-		t.Fatalf("system msg missing: %v", m["messages"])
-	}
-	stops, ok := m["stop"].([]any)
-	if !ok || len(stops) != 1 || stops[0] != "a" {
-		t.Fatalf("stop_sequences not mapped: %v", m)
-	}
-	if m["top_k"] != float64(3) {
-		t.Fatalf("x_top_k not mapped: %v", m)
-	}
-	for k := range m {
-		if len(k) > 1 && k[0] == 'x' && k[1] == '_' {
-			t.Fatalf("x_ field leaked: %s", k)
-		}
+	if string(req.Body) != string(in) {
+		t.Fatalf("body mutated:\n in=%s\nout=%s", in, req.Body)
 	}
 }

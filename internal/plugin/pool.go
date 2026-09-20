@@ -11,9 +11,6 @@ import (
 // QueueTimeout 借用排队预算(超时=池耗尽)
 const QueueTimeout = 5 * time.Second
 
-// RefreshPoolSize refresh 专用池大小(长持不占主池)
-const RefreshPoolSize = 2
-
 // errPoolClosed 池已关闭(Reload 销毁后借用)
 var errPoolClosed = errors.New("runtime pool closed")
 
@@ -51,7 +48,7 @@ func newRuntimePool(size int, queue time.Duration, factory func() (*hookInstance
 	return p, nil
 }
 
-// Borrow 取实例(排队 QueueTimeout;关闭后拒绝)
+// Borrow 取实例(排队 p.queue;关闭后拒绝)
 func (p *runtimePool) Borrow() (*hookInstance, error) {
 	p.mu.Lock()
 	if p.closed {

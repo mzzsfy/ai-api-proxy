@@ -28,14 +28,19 @@ type TransportCfg struct {
 
 // Config 服务配置
 type Config struct {
-	Listen          string         `yaml:"listen"`
-	DataDir         string         `yaml:"data_dir"`
-	APIKeys         []string       `yaml:"api_keys"`
-	AdminUser       string         `yaml:"admin_user"`
-	AdminPassBcrypt string         `yaml:"admin_pass_bcrypt"`
-	LogLevel        string         `yaml:"log_level"`
-	PluginsDir      string         `yaml:"plugins_dir"`
-	Transports      []TransportCfg `yaml:"transports"`
+	Listen          string   `yaml:"listen"`
+	DataDir         string   `yaml:"data_dir"`
+	APIKeys         []string `yaml:"api_keys"`
+	AdminUser       string   `yaml:"admin_user"`
+	AdminPassBcrypt string   `yaml:"admin_pass_bcrypt"`
+	LogLevel        string   `yaml:"log_level"`
+	// PluginsDir 普通插件目录(裸 .aap 或含 manifest.json 的包目录;同名后者胜)
+	PluginsDir string `yaml:"plugins_dir"`
+	// BuiltinDir 内置插件目录(不入库的分发资产;与普通目录同形,同名唯一)
+	BuiltinDir string `yaml:"builtin_dir"`
+	// PackDir 打包输出目录(非空则打包两级目录内的包到该目录后退出;唯一 .aap 产出路径)
+	PackDir    string         `yaml:"pack_dir"`
+	Transports []TransportCfg `yaml:"transports"`
 	// 传输健康探测周期(秒;0=关闭周期探测,仅保留手动测试)
 	TransportProbeIntervalSec int `yaml:"transport_probe_interval_sec"`
 }
@@ -80,6 +85,12 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("API_PROXY_PLUGINS_DIR"); v != "" {
 		cfg.PluginsDir = v
 	}
+	if v := os.Getenv("API_PROXY_BUILTIN_DIR"); v != "" {
+		cfg.BuiltinDir = v
+	}
+	if v := os.Getenv("API_PROXY_PACK_DIR"); v != "" {
+		cfg.PackDir = v
+	}
 }
 
 func applyDefaults(cfg *Config) {
@@ -95,13 +106,32 @@ func applyDefaults(cfg *Config) {
 	if cfg.PluginsDir == "" {
 		cfg.PluginsDir = "./plugins"
 	}
+	if cfg.BuiltinDir == "" {
+		cfg.BuiltinDir = "./builtin-plugins"
+	}
 	if cfg.AdminUser == "" {
 		cfg.AdminUser = "admin"
 	}
 }
 
-// Validate 启动期校验;无 key 拒绝启动
+// EnsureDirs 建齐数据/插件/打包目录
+func (c *Config) EnsureDirs() error {
+	for _, d := range []string{c.DataDir, c.PluginsDir, c.BuiltinDir, c.PackDir} {
+		if d == "" {
+			continue
+		}
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("mkdir %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
+// Validate 启动期校验;无 key 拒绝启动;PackDir 非空 = 打包模式(只打包不服务)
 func (c *Config) Validate() error {
+	if c.PackDir != "" {
+		return nil
+	}
 	if len(c.APIKeys) == 0 {
 		return fmt.Errorf("api_keys is empty: refuse to start")
 	}

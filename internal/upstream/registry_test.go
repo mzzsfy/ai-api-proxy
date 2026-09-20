@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -92,19 +93,31 @@ func (s *memSecrets) DeleteTargetSecrets(upstream, target string) {
 
 func installBuiltinLikePkg(t *testing.T, pkgs *plugin.Registry, name string) {
 	t.Helper()
+	installBuiltinLikePkgForm(t, pkgs, name, `["streaming","non_streaming"]`, `["tools"]`)
+}
+
+// installBuiltinLikePkgForm 按给定 form/features 声明装包(形态把关用例)
+// features 逐项生成实现,保证声明↔实现对称
+func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, features string) {
+	t.Helper()
+	var impl string
+	if strings.Contains(features, `"streaming"`) || strings.Contains(form, `"streaming"`) {
+		impl += `mapEvent: function (ctx, e) { return e; },`
+	}
+	if strings.Contains(form, `"non_streaming"`) {
+		impl += `mapResponse: function (ctx, b) { return b; },`
+	}
 	manifest := `{"manifestVersion":1,"name":"` + name + `","version":"1.0.0","parts":{
-		"protocol":{"entry":"p.js","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]}}}`
-	src := `module.exports = function (config) {
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":` + form + `,"features":` + features + `,"secretRefs":["api_key"]}}}`
+	src := fmt.Sprintf(`module.exports = function (config) {
 		return {
-			buildRequest: function (ctx, pivot) {
+			buildRequest: function (ctx, entry) {
 				var key = util.secret("api_key");
 				return { url: (ctx.target.baseUrl || "https://d") + "/v1/chat/completions", method: "POST",
-					headers: {"Authorization": "Bearer " + key}, body: pivot, stream: false };
-			},
-			mapEvent: function (ctx, e) { return e; },
-			mapResponse: function (ctx, b) { return b; }
+					headers: {"Authorization": "Bearer " + key}, body: entry, stream: false };
+			},%s
 		};
-	};`
+	};`, impl)
 	// 经 zip 装包走 Install 全流程
 	data := buildZip(t, manifest, map[string]string{"p.js": src})
 	if err := pkgs.Install(context.Background(), data); err != nil {
@@ -164,17 +177,50 @@ func TestPick_ThreeWayClassification(t *testing.T) {
 	if err := reg.Save(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
-	_, pe, _ := reg.Pick("nope", nil)
+	_, pe, _ := reg.Pick("nope", nil, "openai-completions", false)
 	if pe != PickNoModel {
 		t.Fatalf("want NoModel, got %v", pe)
 	}
-	_, pe, _ = reg.Pick("m", []Feature{"vision"})
+	_, pe, _ = reg.Pick("m", []Feature{"vision"}, "openai-completions", false)
 	if pe != PickCapability {
 		t.Fatalf("want Capability, got %v", pe)
 	}
-	cands, _, err := reg.Pick("m", []Feature{"tools"})
+	cands, _, err := reg.Pick("m", []Feature{"tools"}, "openai-completions", false)
 	if err != nil || len(cands) != 1 {
 		t.Fatalf("hit: %v %d", err, len(cands))
+	}
+}
+
+func TestPick_ProtocolMismatchIsCapability(t *testing.T) {
+	// Given 上游仅声明 openai-completions When anthropic 入口 Pick Then PickCapability
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	u := &Upstream{Name: "u", Enabled: true, Base: PackageRef{Package: "demo"}, Models: []string{"m"},
+		Targets: []Target{{Name: "t", Enabled: true, Secrets: map[string]string{"api_key": "k"}}}}
+	if err := reg.Save(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+	_, pe, _ := reg.Pick("m", nil, "anthropic-messages", false)
+	if pe != PickCapability {
+		t.Fatalf("want Capability, got %v", pe)
+	}
+}
+
+func TestPick_FormMismatchIsCapability(t *testing.T) {
+	// Given 上游声明不含 streaming When stream=true Pick Then PickCapability
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkgForm(t, pkgs, "demo", `["non_streaming"]`, `["tools"]`)
+	u := &Upstream{Name: "u", Enabled: true, Base: PackageRef{Package: "demo"}, Models: []string{"m"},
+		Targets: []Target{{Name: "t", Enabled: true, Secrets: map[string]string{"api_key": "k"}}}}
+	if err := reg.Save(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+	_, pe, _ := reg.Pick("m", nil, "openai-completions", true)
+	if pe != PickCapability {
+		t.Fatalf("want Capability, got %v", pe)
+	}
+	if _, _, err := reg.Pick("m", nil, "openai-completions", false); err != nil {
+		t.Fatalf("non-stream should hit: %v", err)
 	}
 }
 
@@ -187,7 +233,7 @@ func TestPick_UnhealthyWhenNoEnabledTarget(t *testing.T) {
 	if err := reg.Save(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
-	_, pe, _ := reg.Pick("m", nil)
+	_, pe, _ := reg.Pick("m", nil, "openai-completions", false)
 	if pe != PickUnhealthy {
 		t.Fatalf("want Unhealthy, got %v", pe)
 	}

@@ -1,4 +1,4 @@
-// gemini 协议包:Google Gemini GenerateContent 上游适配(AI Studio key;openai chat pivot ↔ gemini 双向翻译)
+// gemini 协议包:Google Gemini GenerateContent 上游适配(声明槽 openai-completions;entry ↔ gemini 双向翻译)
 // 协议来源:GenerateContent REST(POST {base}/{v}/models/{model}:generateContent | :streamGenerateContent?alt=sse)
 // 恰一次直发,无重试(归下游);纯文本面(features:[] 由能力协商挡 tools/vision)
 "use strict";
@@ -102,12 +102,12 @@ module.exports = function (config) {
     /**
      * 构造上游请求:x-goog-api-key 头(key 不进 URL);system 消息提为 systemInstruction
      * @param {import("../../ai-api-proxy.d.ts").Context} ctx
-     * @param {string} pivot
+     * @param {string} entry
      * @returns {import("../../ai-api-proxy.d.ts").UpstreamRequest}
      */
-    buildRequest: function (ctx, pivot) {
+    buildRequest: function (ctx, entry) {
       if (!ctx.target.baseUrl) throw new Error("target base url empty");
-      const req = JSON.parse(pivot); // 非法 pivot 抛错 → host 502 注明部件原因
+      const req = JSON.parse(entry); // 入口非法原文抛错 → host 502 注明部件原因
       /** @type {{ role: string, parts: { text: string }[]}[]} */
       const contents = [];
       /** @type {string[]} */
@@ -154,22 +154,13 @@ module.exports = function (config) {
     },
 
     /**
-     * SSE 帧 → pivot chunk:GenerateContentResponse 增量解包;无文本/终止/用量则跳帧
+     * SSE 帧 → 声明协议事件对象数组:GenerateContentResponse 增量解包;无文本/终止/用量则跳帧
      * @param {import("../../ai-api-proxy.d.ts").Context} ctx
      * @param {string} event
      * @returns {string | null}
      */
     mapEvent: function (ctx, event) {
       const g = JSON.parse(JSON.parse(event).data);
-      // 流内错误帧(200 启动后失败):x_error 终止,host 转入口错误格式;跳帧会让错误伪装成正常收尾
-      if (g.error) {
-        return JSON.stringify({
-          x_error: {
-            type: String(g.error.status || "upstream_error"),
-            message: String(g.error.message || "")
-          }
-        });
-      }
       const cand = firstCandidate(g);
       const text = partsText(cand);
       // prompt 级拦截:200 + 空 candidates + promptFeedback.blockReason;拦截信号是存在性,与取值无关
@@ -177,7 +168,7 @@ module.exports = function (config) {
       const fr = block ? "content_filter" : cand && cand.finishReason ? finishReason(cand.finishReason) : null;
       const usage = usageOf(g);
       if (!text && !fr && !usage) return null;
-      // pivot chunk 契约 = openai chunk 语义(openai 入口原样透传;anthropic 入口 choices 提升双兼容)
+      // 声明协议(openai-completions)chunk 语义
       /** @type {Record<string, any>} */
       const chunk = {
         id: respId(g, ctx.requestId),
@@ -187,11 +178,11 @@ module.exports = function (config) {
         choices: [{ index: 0, delta: text ? { content: text } : {}, finish_reason: fr }]
       };
       if (usage) chunk.usage = usage;
-      return JSON.stringify(chunk);
+      return JSON.stringify([chunk]);
     },
 
     /**
-     * 非流式响应 → chat.completion 信封(pivot 形态)
+     * 非流式响应 → 声明协议 chat.completion 信封
      * @param {import("../../ai-api-proxy.d.ts").Context} ctx
      * @param {string} body
      * @returns {string}
@@ -221,7 +212,7 @@ module.exports = function (config) {
     },
 
     /**
-     * 错误终局映射:{error:{code,message,status}} → x_error 形态 {error:{type,message,status}};
+     * 错误终局映射:声明协议(openai-completions)错误信封形态;
      * 上游错误原样反映:type/message 取上游 status 与 message,status 取上游 code 或 HTTP 状态,
      * details 原样搬运(不重命名、不挑选、不做语义翻译)
      * @param {import("../../ai-api-proxy.d.ts").Context} ctx

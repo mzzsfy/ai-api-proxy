@@ -16,14 +16,14 @@ import (
 type recordingFilter struct {
 	name   string
 	log    *[]string
-	mutate func(pivot []byte) []byte
+	mutate func(entry []byte) []byte
 }
 
 func (f *recordingFilter) Name() string { return f.name }
-func (f *recordingFilter) MapRequest(ctx *PipelineContext, pivot []byte) ([]byte, error) {
+func (f *recordingFilter) MapRequest(ctx *PipelineContext, entry []byte) ([]byte, error) {
 	*f.log = append(*f.log, "req:"+f.name)
 	if f.mutate != nil {
-		return f.mutate(pivot), nil
+		return f.mutate(entry), nil
 	}
 	return nil, nil
 }
@@ -40,7 +40,7 @@ func (f *recordingFilter) MapResponse(ctx *PipelineContext, resp []byte) ([]byte
 type failFilter struct{ name string }
 
 func (f *failFilter) Name() string { return f.name }
-func (f *failFilter) MapRequest(ctx *PipelineContext, pivot []byte) ([]byte, error) {
+func (f *failFilter) MapRequest(ctx *PipelineContext, entry []byte) ([]byte, error) {
 	return nil, fmt.Errorf("boom")
 }
 func (f *failFilter) MapChunk(ctx *PipelineContext, c []byte) ([]byte, error)    { return nil, nil }
@@ -57,13 +57,16 @@ type fakeProtocol struct {
 }
 
 func (p *fakeProtocol) Name() string { return "fake" }
+func (p *fakeProtocol) Declared() string {
+	return "openai-completions"
+}
 func (p *fakeProtocol) Supports() Supports {
 	if len(p.forms) > 0 {
 		return Supports{Forms: p.forms}
 	}
-	return Supports{Forms: []string{"non_streaming", "streaming"}}
+	return Supports{Forms: []string{FormNonStreaming, FormStreaming}}
 }
-func (p *fakeProtocol) BuildRequest(ctx *PipelineContext, pivot []byte) (Request, error) {
+func (p *fakeProtocol) BuildRequest(ctx *PipelineContext, entry []byte) (Request, error) {
 	p.mu.Lock()
 	p.builds = append(p.builds, ctx.Target.Name)
 	p.roundtrip++
@@ -302,15 +305,16 @@ func TestRun_MapErrorHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != 400 || !strings.Contains(string(resp.Body), "x_error") {
+	if resp.Status != 400 || !strings.Contains(string(resp.Body), "api_error") {
 		t.Fatalf("mapError product: %d %s", resp.Status, resp.Body)
 	}
 }
 
-// mapErrorProto 包装:MapError 产 x_error 体
+// mapErrorProto 包装:MapError 产声明协议错误信封
 type mapErrorProto struct{ inner Protocol }
 
 func (m *mapErrorProto) Name() string       { return m.inner.Name() }
+func (m *mapErrorProto) Declared() string   { return m.inner.Declared() }
 func (m *mapErrorProto) Supports() Supports { return m.inner.Supports() }
 func (m *mapErrorProto) BuildRequest(ctx *PipelineContext, p []byte) (Request, error) {
 	return m.inner.BuildRequest(ctx, p)
@@ -322,7 +326,7 @@ func (m *mapErrorProto) MapResponse(ctx *PipelineContext, b []byte) ([]byte, err
 	return m.inner.MapResponse(ctx, b)
 }
 func (m *mapErrorProto) MapError(ctx *PipelineContext, status int, body []byte) ([]byte, error) {
-	return []byte(`{"x_error":{"type":"api_error","status":400}}`), nil
+	return []byte(`{"error":{"type":"api_error","status":400}}`), nil
 }
 
 func TestRun_ZeroTargets(t *testing.T) {
@@ -345,12 +349,12 @@ func TestDecideStream_DeclarationRules(t *testing.T) {
 		want   bool
 		wanted bool
 	}{
-		{"streaming only", []string{"streaming"}, "application/json", false, true, false},
-		{"non-streaming only", []string{"non_streaming"}, "text/event-stream", true, false, false},
-		{"dual flag sse actual json", []string{"streaming", "non_streaming"}, "application/json", true, false, true},
-		{"dual flag json actual sse", []string{"streaming", "non_streaming"}, "text/event-stream", false, true, true},
-		{"dual flag sse actual sse", []string{"streaming", "non_streaming"}, "text/event-stream; charset=utf-8", true, true, false},
-		{"dual flag json no ct", []string{"streaming", "non_streaming"}, "", false, false, false},
+		{"streaming only", []string{FormStreaming}, "application/json", false, true, false},
+		{"non-streaming only", []string{FormNonStreaming}, "text/event-stream", true, false, false},
+		{"dual flag sse actual json", []string{FormStreaming, FormNonStreaming}, "application/json", true, false, true},
+		{"dual flag json actual sse", []string{FormStreaming, FormNonStreaming}, "text/event-stream", false, true, true},
+		{"dual flag sse actual sse", []string{FormStreaming, FormNonStreaming}, "text/event-stream; charset=utf-8", true, true, false},
+		{"dual flag json no ct", []string{FormStreaming, FormNonStreaming}, "", false, false, false},
 	}
 	for _, tc := range cases {
 		p := stubProto{forms: tc.forms}
@@ -365,6 +369,7 @@ func TestDecideStream_DeclarationRules(t *testing.T) {
 type stubProto struct{ forms []string }
 
 func (s stubProto) Name() string       { return "stub" }
+func (s stubProto) Declared() string   { return "openai-completions" }
 func (s stubProto) Supports() Supports { return Supports{Forms: s.forms} }
 func (s stubProto) BuildRequest(ctx *PipelineContext, p []byte) (Request, error) {
 	return Request{}, nil

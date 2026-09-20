@@ -58,22 +58,22 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 const goodManifest = `{"manifestVersion":1,"name":"demo","version":"1.0.0","parts":{
-	"protocol":{"entry":"protocol.js","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]},
+	"protocol":{"entry":"protocol.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]},
 	"filters":[{"name":"identity","entry":"filters/identity.js","configSchema":{"type":"object"}}]}}`
 
 const protoSrc = `module.exports = {
-	buildRequest: function (ctx, pivot) {
+	buildRequest: function (ctx, entry) {
 		return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
 			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.secret("api_key") },
-			body: pivot, stream: ctx.vars.entryStream };
+			body: entry, stream: ctx.vars.entryStream };
 	},
-	mapEvent: function (ctx, e) { return e; },
+	mapEvent: function (ctx, e) { return JSON.stringify([{ chunk: e }]); },
 	mapResponse: function (ctx, b) { return b; }
 };`
 
 const filterSrc = `module.exports = function (config) {
 	return {
-		mapRequest: function (ctx, pivot) { return pivot; },
+		mapRequest: function (ctx, entry) { return entry; },
 		mapChunk: function (ctx, c) { return c; },
 		mapResponse: function (ctx, r) { return r; }
 	};
@@ -126,7 +126,7 @@ func TestParseAndInstantiate_FullFlow(t *testing.T) {
 func TestValidate_MissingFormRejected(t *testing.T) {
 	// Given protocol 无 form When Install Then 拒绝
 	m := `{"manifestVersion":1,"name":"nfm","version":"1","parts":{
-		"protocol":{"entry":"p.js","features":["tools"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","features":["tools"]}}}`
 	r := NewRegistry(testDB(t))
 	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"p.js": protoSrc})); err == nil {
 		t.Fatal("missing form accepted")
@@ -136,7 +136,7 @@ func TestValidate_MissingFormRejected(t *testing.T) {
 func TestValidate_MissingImplementationRejected(t *testing.T) {
 	// Given 声明 streaming 但缺 mapEvent When Install Then 安装期拒绝(双向绑定校验)
 	m := `{"manifestVersion":1,"name":"noimpl","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["streaming"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
 	src := `module.exports = { buildRequest: function(){return {url:"u"}} };`
 	r := NewRegistry(testDB(t))
 	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"p.js": src}))
@@ -148,7 +148,7 @@ func TestValidate_MissingImplementationRejected(t *testing.T) {
 func TestValidate_ExtraImplRejected(t *testing.T) {
 	// Given 实现 mapResponse 但未声明 non_streaming(多实现)When Install Then 拒绝
 	m := `{"manifestVersion":1,"name":"extraimpl","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["streaming"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
 	src := `module.exports = { buildRequest: function(){return {url:"u"}},
 		mapEvent: function(ctx,e){ return e; },
 		mapResponse: function(ctx,b){ return b; } };`
@@ -319,7 +319,7 @@ func TestUpdatePart_CompileValidation(t *testing.T) {
 func TestRuntime_SyncViolationDetected(t *testing.T) {
 	// Given mapEvent 返回 Promise When MapEvent Then 同步违规错误
 	m := `{"manifestVersion":1,"name":"async","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["streaming"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
 	asyncSrc := `module.exports = { buildRequest: function(){return {url:"u"}}, mapEvent: function(ctx, e){ return Promise.resolve(e); } };`
 	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"p.js": asyncSrc}))
 	if err != nil {
@@ -337,8 +337,8 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 func TestRuntime_FilterFactoryConfig(t *testing.T) {
 	// Given factory 形式 filter+config When NewFilter Then config 闭包生效
 	cfgSrc := `module.exports = function (config) {
-		return { mapRequest: function (ctx, pivot) {
-			var o = JSON.parse(pivot); o.tag = config.tag; return JSON.stringify(o);
+		return { mapRequest: function (ctx, entry) {
+			var o = JSON.parse(entry); o.tag = config.tag; return JSON.stringify(o);
 		} };
 	};`
 	m := `{"manifestVersion":1,"name":"cfg","version":"1","parts":{
@@ -363,10 +363,10 @@ func TestRuntime_FilterFactoryConfig(t *testing.T) {
 func TestUtil_TemplateAndPath(t *testing.T) {
 	// Given util 注入 When template/get/set Then 点路径含数组索引可用
 	m := `{"manifestVersion":1,"name":"ut","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["non_streaming"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["non_streaming"]}}}`
 	src := `module.exports = {
-		buildRequest: function (ctx, pivot) {
-			var o = util.set(JSON.parse(pivot), "messages[0].role", "system");
+		buildRequest: function (ctx, entry) {
+			var o = util.set(JSON.parse(entry), "messages[0].role", "system");
 			var role = util.get(o, "messages[0].role");
 			return { url: util.template("https://x/{model}", { model: "m1" }) + "?" + role, method: "POST", headers: {}, body: "{}" };
 		},
@@ -392,9 +392,9 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 func TestInspect_MasksSecrets(t *testing.T) {
 	// Given 部件 inspect 含凭据值 When 输出 Then 凭据替换 ***
 	m := `{"manifestVersion":1,"name":"mask","version":"1","parts":{
-		"protocol":{"entry":"p.js","form":["non_streaming"],"secretRefs":["api_key"]}}}`
+		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["non_streaming"],"secretRefs":["api_key"]}}}`
 	src := `module.exports = {
-		buildRequest: function (ctx, pivot) {
+		buildRequest: function (ctx, entry) {
 			var k = util.secret("api_key");
 			return { url: "https://x", method: "POST", headers: {}, body: util.inspect({ key: k }) };
 		},

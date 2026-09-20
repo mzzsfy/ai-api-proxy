@@ -3,9 +3,10 @@
   "name": "gemini",
   "version": "0.1.0",
   "compat": { "host": ">=0.1.0" },
-  "description": "Google Gemini GenerateContent 上游适配:openai chat ↔ generateContent/streamGenerateContent 双向翻译(x-goog-api-key 鉴权 + systemInstruction 提升 + finishReason/usage 映射;纯文本面)",
+  "description": "Google Gemini GenerateContent 上游适配:openai-completions 槽位部件(entry ↔ generateContent/streamGenerateContent 双向翻译;x-goog-api-key 鉴权 + systemInstruction 提升 + finishReason/usage 映射;纯文本面)",
   "parts": {
     "protocol": {
+      "protocol": "openai-completions",
       "entry": "protocol.js",
       "form": ["streaming", "non_streaming"],
       "features": [],

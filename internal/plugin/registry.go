@@ -175,6 +175,17 @@ func (r *Registry) IsEnabled(name string) bool {
 	return !r.disabled[name]
 }
 
+// DeclaredProtocol 包主包声明的协议全名(无 protocol 部件或包缺失 = 空)
+func (r *Registry) DeclaredProtocol(name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.pkgs[name]
+	if !ok || p.Manifest.Parts.Protocol == nil {
+		return ""
+	}
+	return p.Manifest.Parts.Protocol.Protocol
+}
+
 // Export 导出 .aap 字节(manifest+parts 重打包;secrets 在 upstream 层,包内天然无凭据)
 func (r *Registry) Export(name string) ([]byte, error) {
 	r.mu.RLock()

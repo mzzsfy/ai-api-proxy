@@ -30,6 +30,94 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
+// pluginSrc 插件来源(裸 .aap 或含 manifest.json 的包目录)
+type pluginSrc struct {
+	path    string
+	builtin bool
+}
+
+// packAll 打包两级目录内的包并打印产出路径
+func packAll(cfg *Config) error {
+	out, err := packPluginsDir(cfg)
+	if err != nil {
+		return err
+	}
+	for _, p := range out {
+		log.Printf("packed %s", p)
+	}
+	return nil
+}
+
+// searchPluginDirs 两级目录搜索:plugins_dir(普通,多候选)→ builtin_dir(内置,唯一);
+// 内置目录只补缺,不覆盖用户已装的同名包(内置 = 预置默认值,去中心化覆盖语义)
+func searchPluginDirs(cfg *Config) ([]pluginSrc, error) {
+	paths := []struct {
+		dir     string
+		builtin bool
+	}{{cfg.PluginsDir, false}, {cfg.BuiltinDir, true}}
+	var out []pluginSrc
+	for _, p := range paths {
+		if p.dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(p.dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("read %s: %w", p.dir, err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			full := filepath.Join(p.dir, name)
+			fi, err := os.Stat(full)
+			if err != nil {
+				return nil, fmt.Errorf("stat %s: %w", full, err)
+			}
+			switch {
+			// 裸 .aap:直接安装
+			case fi.Mode().IsRegular() && strings.EqualFold(filepath.Ext(name), ".aap"):
+				out = append(out, pluginSrc{path: full, builtin: p.builtin})
+			// 目录:含 manifest.json 即视为包目录
+			case fi.IsDir():
+				if _, err := os.Stat(filepath.Join(full, "manifest.json")); err != nil {
+					continue
+				}
+				out = append(out, pluginSrc{path: full, builtin: p.builtin})
+			}
+		}
+	}
+	return out, nil
+}
+
+// packPluginsDir 打包两级目录内的所有包到 cfg.PackDir(唯一 .aap 产出路径;供分发与部署)
+func packPluginsDir(cfg *Config) ([]string, error) {
+	srcs, err := searchPluginDirs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(cfg.PackDir, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", cfg.PackDir, err)
+	}
+	written := make([]string, 0, len(srcs))
+	for _, s := range srcs {
+		data, err := plugin.PackDir(s.path)
+		if err != nil {
+			return nil, fmt.Errorf("pack %s: %w", s.path, err)
+		}
+		dst := filepath.Join(cfg.PackDir, filepath.Base(s.path)+".aap")
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return nil, fmt.Errorf("write %s: %w", dst, err)
+		}
+		written = append(written, dst)
+	}
+	return written, nil
+}
+
 // App 装配后的应用(server 是唯一知具体类型的装配根)
 type App struct {
 	Cfg       *Config
@@ -52,8 +140,11 @@ func (a *App) TransportTest(name, probeURL string, timeout time.Duration) (int64
 	return a.trMgr.Test(name, probeURL, timeout)
 }
 
-// Build 装配全部模块
+// Build 装配全部模块(仅运行态;打包路径见 Run)
 func Build(cfg *Config) (*App, error) {
+	if err := cfg.EnsureDirs(); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
@@ -94,8 +185,8 @@ func Build(cfg *Config) (*App, error) {
 		_ = st.Close()
 		return nil, fmt.Errorf("builtin package: %w", err)
 	}
-	// 目录热载:plugins_dir 内 .aap 自动导入(同内容幂等;坏包警告跳过不阻塞启动)
-	if err := importPluginsDir(ctx, pkgs, cfg.PluginsDir); err != nil {
+	// 目录热载:插件目录自动导入(同内容幂等;坏包警告跳过不阻塞启动)
+	if err := importPluginDirs(ctx, pkgs, cfg); err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("import plugins dir: %w", err)
 	}
@@ -107,8 +198,18 @@ func Build(cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("load upstreams: %w", err)
 	}
 	gw := &gateway.Gateway{
-		OpenAI:    convert.NewOpenAICodec(),
-		Anthropic: convert.NewAnthropicCodec(),
+		OpenAI: gateway.Entry{
+			EntryInspector: convert.NewOpenAICodec(),
+			ErrorRenderer:  convert.NewOpenAICodec(),
+			FramerFactory:  convert.NewOpenAICodec(),
+			Protocol:       string(plugin.ProtocolOpenAICompletions),
+		},
+		Anthropic: gateway.Entry{
+			EntryInspector: convert.NewAnthropicCodec(),
+			ErrorRenderer:  convert.NewAnthropicCodec(),
+			FramerFactory:  convert.NewAnthropicCodec(),
+			Protocol:       string(plugin.ProtocolAnthropicMessages),
+		},
 		Executor: &pipeline.Executor{
 			Transports: trMgr.Get,
 			OnTargetExit: func(up, tg string, failed bool) {
@@ -350,8 +451,14 @@ func (s *storeSecrets) DeleteTargetSecrets(upstream, target string) {
 	_ = s.st.KVDelete(context.Background(), "upstream:"+upstream, secretsKey(upstream, target))
 }
 
-// Run 启动 HTTP 服务,阻塞至退出信号;优雅排空(30s 上限)
+// Run 启动 HTTP 服务,阻塞至退出信号;优雅排空(30s 上限);PackDir 非空时只打包
 func Run(cfg *Config) error {
+	if err := cfg.EnsureDirs(); err != nil {
+		return err
+	}
+	if cfg.PackDir != "" {
+		return packAll(cfg)
+	}
 	app, err := Build(cfg)
 	if err != nil {
 		return err
@@ -423,7 +530,9 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 		return nil
 	}
 	manifest := `{"manifestVersion":1,"name":"` + builtin.Name + `","version":"1.0.0","parts":{
-		"protocol":{"entry":"builtin.go","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+		"protocol":{"entry":"builtin.go","protocol":"` + builtin.DeclaredProtocol + `","form":["` +
+		string(plugin.FormStreaming) + `","` + string(plugin.FormNonStreaming) +
+		`"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	mf, err := zw.Create("manifest.json")
@@ -447,50 +556,58 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 	return pkgs.Install(ctx, buf.Bytes())
 }
 
-// importPluginsDir 目录内 .aap 顺序导入(文件名稳定序);README plugins_dir 契约:
-// 同名同内容幂等跳过(revision 不空转、禁用状态保留),内容变化升级 revision+1;
-// 坏包警告跳过(可选目录语义,不阻塞网关启动)
-func importPluginsDir(ctx context.Context, pkgs *plugin.Registry, dir string) error {
-	entries, err := os.ReadDir(dir)
+// importPluginDirs 装配期导入:普通目录按文件序全量导入(同名后者胜),内置目录只补缺(不覆盖用户包)
+func importPluginDirs(ctx context.Context, pkgs *plugin.Registry, cfg *Config) error {
+	srcs, err := searchPluginDirs(cfg)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read plugins dir: %w", err)
+		return err
 	}
-	names := make([]string, 0, len(entries))
-	seen := map[string]string{} // 包名 → 源文件(同轮同名冲突告警)
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".aap") {
-			continue
+	seen := map[string]string{} // 包名 → 源路径(同轮同名冲突告警)
+	for _, s := range srcs {
+		if s.builtin {
+			if data, err := loadSource(s.path); err == nil {
+				if pkg, err := plugin.ParseAAP(data); err == nil {
+					if _, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil {
+						continue // 用户已有同名包:内置不覆盖
+					}
+				}
+			}
 		}
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			log.Printf("plugins dir: read %s: %v (skipped)", name, err)
-			continue
-		}
-		if err := installIfChanged(ctx, pkgs, data, name, seen); err != nil {
-			log.Printf("plugins dir: install %s: %v (skipped)", name, err)
+		if err := installSource(ctx, pkgs, s.path, seen); err != nil {
+			// 可选目录语义:坏包/冲突告警跳过,不阻塞网关启动
+			log.Printf("plugins dir: install %s: %v (skipped)", s.path, err)
 		}
 	}
 	return nil
 }
 
-// installIfChanged 同内容跳过;变化才 Install(升级 revision 并重新启用)。
-// 同轮两个文件声明同名包:按文件序后者胜,并告警提示去重
-func installIfChanged(ctx context.Context, pkgs *plugin.Registry, data []byte, source string, seen map[string]string) error {
+// loadSource 读来源为 .aap 字节(目录现打包,单 .aap 直接读)
+func loadSource(src string) ([]byte, error) {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir() {
+		return plugin.PackDir(src)
+	}
+	return os.ReadFile(src)
+}
+
+// installSource 同内容跳过;变化才 Install(升级 revision 并重新启用)。
+// 同轮两个来源声明同名包:按来源序后者胜,并告警提示去重
+func installSource(ctx context.Context, pkgs *plugin.Registry, src string, seen map[string]string) error {
+	data, err := loadSource(src)
+	if err != nil {
+		return err
+	}
 	pkg, err := plugin.ParseAAP(data)
 	if err != nil {
 		return err
 	}
 	if prev, dup := seen[pkg.Manifest.Name]; dup {
-		log.Printf("plugins dir: duplicate package name %q in %s and %s (later file wins)", pkg.Manifest.Name, prev, source)
+		log.Printf("plugins dir: duplicate package name %q in %s and %s (later source wins)", pkg.Manifest.Name, prev, src)
 	}
-	seen[pkg.Manifest.Name] = source
+	seen[pkg.Manifest.Name] = src
 	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil {
 		if reflect.DeepEqual(existing.Manifest, pkg.Manifest) && reflect.DeepEqual(existing.Files, pkg.Files) {
 			return nil
@@ -500,7 +617,7 @@ func installIfChanged(ctx context.Context, pkgs *plugin.Registry, data []byte, s
 		return err
 	}
 	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil && existing.Revision > 1 {
-		log.Printf("plugins dir: upgraded %s from %s to revision %d", pkg.Manifest.Name, source, existing.Revision)
+		log.Printf("plugins dir: upgraded %s from %s to revision %d", pkg.Manifest.Name, src, existing.Revision)
 	}
 	return nil
 }

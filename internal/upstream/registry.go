@@ -101,8 +101,10 @@ type resolvedParts struct {
 	fingerprint string
 	Filters     []pipeline.Filter
 	Protocol    pipeline.Protocol
-	refs        atomic.Int64
-	dead        atomic.Bool
+	// Declared 主包协议全名(路由把关用;实例缓存命中时免查包注册表)
+	Declared string
+	refs     atomic.Int64
+	dead     atomic.Bool
 }
 
 // acquire 请求持有(死亡后拒绝)
@@ -409,13 +411,31 @@ func (r *Registry) List() []*Upstream {
 	return out
 }
 
-// Pick 模型+能力路由:有序候选(ID 序);禁用/不健康/能力不符过滤
-func (r *Registry) Pick(model string, features []Feature) ([]Candidate, PickError, error) {
+// DeclaredProtocol 上游主包声明的协议全名(实例缓存命中即免查包表;缓存未命中回退包表)
+func (r *Registry) DeclaredProtocol(u *Upstream) string {
+	r.mu.RLock()
+	if c := r.instCache[u.Name]; c != nil {
+		d := c.Declared
+		r.mu.RUnlock()
+		return d
+	}
+	r.mu.RUnlock()
+	return r.pkgs.DeclaredProtocol(u.Base.Package)
+}
+
+// Pick 路由:模型声明发现 → 协议/能力/形态过滤 → 目标可用性。
+// 载体(对象方法/具体协议)同一替换(Registry/Protocol),但因载体不同无法逐行机械替换——见
+// 分类优先级:① 无任何上游声明该模型 → PickNoModel;② 有声明但因协议/能力/形态被滤 → PickCapability;
+// ③ 能力一致但零可用目标 → PickUnhealthy。禁用上游仍参与 ①(避免 404 与真实声明矛盾)。
+func (r *Registry) Pick(model string, features []Feature, entry string, stream bool) ([]Candidate, PickError, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var withModel []*Upstream
 	for _, u := range r.byID {
-		if !u.Enabled || !containsString(u.Models, model) {
+		if !containsString(u.Models, model) {
+			continue
+		}
+		if !u.Enabled {
 			continue
 		}
 		withModel = append(withModel, u)
@@ -428,7 +448,7 @@ func (r *Registry) Pick(model string, features []Feature) ([]Candidate, PickErro
 	var candidates []Candidate
 	capMissing := false
 	for _, u := range withModel {
-		if !r.supportsAll(u, features) {
+		if !r.matches(u, features, entry, stream) {
 			capMissing = true
 			continue
 		}
@@ -446,8 +466,8 @@ func (r *Registry) Pick(model string, features []Feature) ([]Candidate, PickErro
 	return candidates, 0, nil
 }
 
-// supportsAll 主包 protocol.features 协商(禁用包不协商)
-func (r *Registry) supportsAll(u *Upstream, features []Feature) bool {
+// matches 主包声明是否可服务该入口请求(协议全名 + 形态 + features;禁用包不协商)
+func (r *Registry) matches(u *Upstream, features []Feature, entry string, stream bool) bool {
 	if !r.pkgs.IsEnabled(u.Base.Package) {
 		return false
 	}
@@ -455,12 +475,33 @@ func (r *Registry) supportsAll(u *Upstream, features []Feature) bool {
 	if err != nil || pkg.Manifest.Parts.Protocol == nil {
 		return false
 	}
+	d := pkg.Manifest.Parts.Protocol
+	if d.Protocol != entry {
+		return false
+	}
+	if !hasForm(d.Form, stream) {
+		return false
+	}
 	for _, f := range features {
-		if !containsString(pkg.Manifest.Parts.Protocol.Features, f) {
+		if !containsString(d.Features, f) {
 			return false
 		}
 	}
 	return true
+}
+
+// hasForm 入口形态是否被声明
+func hasForm(forms []string, stream bool) bool {
+	want := pipeline.FormNonStreaming
+	if stream {
+		want = pipeline.FormStreaming
+	}
+	for _, f := range forms {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }
 
 // hasEnabledTarget 存在 enabled 目标(MVP:目标恒视为 healthy)
@@ -592,6 +633,9 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 	}
 	parts.Filters = filters
 	// Protocol:同名内置工厂优先(server 装配注册),否则编译主包 JS 部件
+	if base.Manifest.Parts.Protocol != nil {
+		parts.Declared = base.Manifest.Parts.Protocol.Protocol
+	}
 	var proto pipeline.Protocol
 	if factory, ok := r.pkgs.BuiltinFactory(u.Base.Package); ok {
 		proto, err = factory(plugin.BuiltinDeps{TargetSecrets: r.secretReader(u)})
