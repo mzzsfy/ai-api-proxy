@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -145,11 +146,34 @@ func geminiMessagePayload(model string, stream bool) string {
 		model, stream, geminiEchoPrompt)
 }
 
+// geminiTransient 上游瞬时状态判定:免费层日配额耗尽、模型过载、连接被掐
+// 这些与包无关,判 skip 而非 fail——否则 E2E 变成在测 Google 的服务可用性
+func geminiTransient(t *testing.T, status int, body string) {
+	t.Helper()
+	transient := status == http.StatusTooManyRequests ||
+		status == http.StatusServiceUnavailable ||
+		(strings.Contains(body, "UNAVAILABLE") && status >= 500)
+	if !transient {
+		return
+	}
+	t.Skipf("upstream transient failure (status %d): %.200s", status, body)
+}
+
+// geminiPost 真实请求;非 2xx 先过瞬时判定,再交回调用方断言
+func geminiPost(t *testing.T, f *fourGroupsFixture, path string, headers map[string]string, payload string) (int, string) {
+	t.Helper()
+	got, body := f.post(t, path, headers, payload)
+	if got != http.StatusOK {
+		geminiTransient(t, got, body)
+	}
+	return got, body
+}
+
 func TestRealGemini_ChatNonStream(t *testing.T) {
 	// Given gemini 包 + 真实 Gemini 上游 When chat 非流式 Then 200 且 openai 信封与 content/usage 齐备
 	key, model := geminiTestEnv(t)
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
-	got, body := f.post(t, "/v1/chat/completions", map[string]string{
+	got, body := geminiPost(t, f, "/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer sk-test", "Content-Type": "application/json",
 	}, geminiChatPayload(model, false))
 	if got != http.StatusOK {
@@ -166,7 +190,7 @@ func TestRealGemini_ChatStream(t *testing.T) {
 	// When chat 流式 Then SSE 为 openai chunk 形态(choices 装载)且以 [DONE] 收尾
 	key, model := geminiTestEnv(t)
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
-	got, body := f.post(t, "/v1/chat/completions", map[string]string{
+	got, body := geminiPost(t, f, "/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer sk-test", "Content-Type": "application/json",
 	}, geminiChatPayload(model, true))
 	if got != http.StatusOK {
@@ -189,7 +213,7 @@ func TestRealGemini_MessageNonStream(t *testing.T) {
 	// When anthropic 入口(上游 chat 形态,态适配聚合)Then message 信封 + 文本块含 pong
 	key, model := geminiTestEnv(t)
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
-	got, body := f.post(t, "/v1/messages", map[string]string{
+	got, body := geminiPost(t, f, "/v1/messages", map[string]string{
 		"x-api-key": "sk-test", "anthropic-version": "2023-06-01", "Content-Type": "application/json",
 	}, geminiMessagePayload(model, false))
 	if got != http.StatusOK {
@@ -206,7 +230,7 @@ func TestRealGemini_MessageStream(t *testing.T) {
 	// When anthropic 入口流式 Then 事件序列完整且不出现 openai 的 [DONE]
 	key, model := geminiTestEnv(t)
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
-	got, body := f.post(t, "/v1/messages", map[string]string{
+	got, body := geminiPost(t, f, "/v1/messages", map[string]string{
 		"x-api-key": "sk-test", "anthropic-version": "2023-06-01", "Content-Type": "application/json",
 	}, geminiMessagePayload(model, true))
 	if got != http.StatusOK {
@@ -237,25 +261,37 @@ func TestRealGemini_AdminTestEndpoint(t *testing.T) {
 	}
 	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", id), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
+		geminiTransient(t, http.StatusTooManyRequests, body)
+		geminiTransient(t, http.StatusServiceUnavailable, body)
 		t.Fatalf("admin test: %d %s", status, body)
 	}
 }
 
-func TestRealGemini_UpstreamErrorPassthrough(t *testing.T) {
-	// Given 上游不存在的模型 When 真实请求 Then 4xx 且错误体为入口信封(无重试,恰一次)
+func TestRealGemini_ErrorEnvelopePassthrough(t *testing.T) {
+	// Given 上游不存在的模型 When 真实请求 Then 入口错误信封且 type 为上游真实枚举(未经翻译)
+	// 上游对未知模型应回 404 NOT_FOUND;若配额耗尽可能掐连接(502),此时走瞬时判定
 	key, _ := geminiTestEnv(t)
 	badModel := "gemini-model-does-not-exist-xyz"
 	f := newGeminiFixture(t, key, badModel, geminiEgressFromEnv(t))
-	got, body := f.post(t, "/v1/chat/completions", map[string]string{
+	got, body := geminiPost(t, f, "/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer sk-test", "Content-Type": "application/json",
 	}, geminiChatPayload(badModel, false))
-	if got == http.StatusOK {
+	if got >= 200 && got < 300 {
 		t.Fatalf("bad model must fail: %s", body)
 	}
-	if got < 400 || got >= 500 {
-		t.Fatalf("upstream status must pass through as 4xx: %d %s", got, body)
+	var envelope struct {
+		Error struct {
+			Type   string `json:"type"`
+			Status int    `json:"status"`
+		} `json:"error"`
 	}
-	if !strings.Contains(body, `"error"`) {
-		t.Fatalf("entry error envelope: %d %s", got, body)
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("entry error envelope (invalid json): %d %s", got, body)
+	}
+	if envelope.Error.Type != "NOT_FOUND" {
+		t.Fatalf("type must carry upstream enum verbatim: %d %s", got, body)
+	}
+	if envelope.Error.Status != got {
+		t.Fatalf("error.status should mirror entry status: got=%d body=%s", got, body)
 	}
 }
