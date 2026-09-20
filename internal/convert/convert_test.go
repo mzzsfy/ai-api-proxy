@@ -416,6 +416,197 @@ func TestAnthropicChunker_OpenAIFormChunk(t *testing.T) {
 	}
 }
 
+func TestAnthropicParse_ThinkingExtension(t *testing.T) {
+	// Given thinking 配置 When Parse Then x_thinking 原样入 pivot(插件经此恢复预算)
+	body := `{"model":"glm-4.6","max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":2048},
+	  "messages":[{"role":"user","content":"q"}]}`
+	p, feats, err := NewAnthropicCodec().Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	th, ok := p.Raw["x_thinking"].(map[string]any)
+	if !ok || th["type"] != "enabled" || th["budget_tokens"] != float64(2048) {
+		t.Fatalf("x_thinking: %v", p.Raw["x_thinking"])
+	}
+	hasThinking := false
+	for _, f := range feats {
+		if f == FeatureThinking {
+			hasThinking = true
+		}
+	}
+	if !hasThinking {
+		t.Fatalf("thinking feature missing: %v", feats)
+	}
+}
+
+func TestAnthropicResponse_ThinkingBlock(t *testing.T) {
+	// Given pivot 响应含 reasoning_content When FromPivotResponse Then thinking 块先于文本块
+	pivot := mustJSON(t, map[string]any{
+		"id": "c1", "model": "m",
+		"choices": []any{map[string]any{
+			"message": map[string]any{"role": "assistant", "content": "答", "reasoning_content": "想"},
+			"finish_reason": "stop",
+		}},
+	})
+	out, err := NewAnthropicCodec().FromPivotResponse(&PivotResponse{JSON: pivot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	_ = json.Unmarshal(out, &m)
+	content := m["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content blocks: %v", content)
+	}
+	th := content[0].(map[string]any)
+	if th["type"] != "thinking" || th["thinking"] != "想" {
+		t.Fatalf("thinking block: %v", th)
+	}
+	tx := content[1].(map[string]any)
+	if tx["type"] != "text" || tx["text"] != "答" {
+		t.Fatalf("text block: %v", tx)
+	}
+}
+
+func TestAnthropicStream_ReasoningContentBlocks(t *testing.T) {
+	// Given reasoning_content 增量流(thinking→text 交替)When Next×n+Flush Then thinking 块事件序列正确
+	c := NewAnthropicCodec().NewFromPivotChunker()
+	step := func(chunk string) []map[string]any {
+		evs, err := c.Next([]byte(chunk))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]map[string]any, 0, len(evs))
+		for _, e := range evs {
+			var m map[string]any
+			_ = json.Unmarshal([]byte(e.Data), &m)
+			out = append(out, m)
+		}
+		return out
+	}
+	var all []map[string]any
+	all = append(all, step(`{"id":"m","model":"glm-4.6"}`)...)
+	all = append(all, step(`{"delta":{"reasoning_content":"想1"}}`)...)
+	all = append(all, step(`{"delta":{"reasoning_content":"想2"}}`)...)
+	all = append(all, step(`{"delta":{"content":"答"}}`)...)
+	all = append(all, step(`{"usage":{"completion_tokens":5},"finish_reason":"stop"}`)...)
+	all = append(all, func() []map[string]any {
+		evs, err := c.Flush()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]map[string]any, 0, len(evs))
+		for _, e := range evs {
+			var m map[string]any
+			_ = json.Unmarshal([]byte(e.Data), &m)
+			out = append(out, m)
+		}
+		return out
+	}()...)
+
+	// 事件序列:message_start, thinking 建块, thinking_delta×2, thinking 块停, text 建块, text_delta, message_delta, message_stop
+	if all[0]["type"] != "message_start" {
+		t.Fatalf("first: %v", all[0])
+	}
+	if all[1]["type"] != "content_block_start" {
+		t.Fatalf("block start: %v", all[1])
+	}
+	if blk := all[1]["content_block"].(map[string]any); blk["type"] != "thinking" {
+		t.Fatalf("block type: %v", blk)
+	}
+	for _, i := range []int{2, 3} {
+		if all[i]["type"] != "content_block_delta" {
+			t.Fatalf("delta event: %v", all[i])
+		}
+		d := all[i]["delta"].(map[string]any)
+		if d["type"] != "thinking_delta" {
+			t.Fatalf("delta type: %v", d)
+		}
+	}
+	if all[4]["type"] != "content_block_stop" {
+		t.Fatalf("thinking stop: %v", all[4])
+	}
+	if all[5]["type"] != "content_block_start" {
+		t.Fatalf("text block start: %v", all[5])
+	}
+	if blk := all[5]["content_block"].(map[string]any); blk["type"] != "text" {
+		t.Fatalf("text block type: %v", blk)
+	}
+	if all[6]["type"] != "content_block_delta" {
+		t.Fatalf("text delta: %v", all[6])
+	}
+	if d := all[6]["delta"].(map[string]any); d["text"] != "答" {
+		t.Fatalf("text delta payload: %v", d)
+	}
+	// 块索引:thinking=0,text=1
+	if all[1]["index"] != float64(0) || all[4]["index"] != float64(0) || all[5]["index"] != float64(1) || all[6]["index"] != float64(1) {
+		t.Fatalf("block indexes: %v %v %v %v", all[1]["index"], all[4]["index"], all[5]["index"], all[6]["index"])
+	}
+	// Flush 收尾:text 块 stop + message_stop
+	last := all[len(all)-2:]
+	if last[0]["type"] != "content_block_stop" || last[1]["type"] != "message_stop" {
+		t.Fatalf("flush tail: %v %v", last[0], last[1])
+	}
+}
+
+func TestAnthropicStream_TextThinkingTextRoundTrip(t *testing.T) {
+	// Given text 开块后切 thinking 再切回 text When Next Then 三块索引 0/1/2 连续推进
+	c := NewAnthropicCodec().NewFromPivotChunker()
+	step := func(chunk string) []map[string]any {
+		evs, err := c.Next([]byte(chunk))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]map[string]any, 0, len(evs))
+		for _, e := range evs {
+			var m map[string]any
+			_ = json.Unmarshal([]byte(e.Data), &m)
+			out = append(out, m)
+		}
+		return out
+	}
+	var all []map[string]any
+	all = append(all, step(`{"id":"m"}`)...)                              // message_start
+	all = append(all, step(`{"delta":{"content":"前"}}`)...)               // text 块(index 0)start+delta
+	all = append(all, step(`{"delta":{"reasoning_content":"想"}}`)...)     // 闭 text 开 thinking(index 1)start+delta
+	all = append(all, step(`{"delta":{"content":"后"}}`)...)               // 闭 thinking 开 text(index 2)start+delta
+	all = append(all, func() []map[string]any {
+		evs, err := c.Flush()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]map[string]any, 0, len(evs))
+		for _, e := range evs {
+			var m map[string]any
+			_ = json.Unmarshal([]byte(e.Data), &m)
+			out = append(out, m)
+		}
+		return out
+	}()...)
+
+	var seq []string
+	for _, m := range all {
+		seq = append(seq, m["type"].(string))
+	}
+	want := []string{
+		"message_start",
+		"content_block_start", "content_block_delta", // text 0
+		"content_block_stop",                         // text 0 闭
+		"content_block_start", "content_block_delta", // thinking 1
+		"content_block_stop",                         // thinking 1 闭
+		"content_block_start", "content_block_delta", // text 2
+		"content_block_stop",     // text 2 闭(flush)
+		"message_delta",          // flush 补默认收尾
+		"message_stop",
+	}
+	if !reflect.DeepEqual(seq, want) {
+		t.Fatalf("sequence:\n got %v\nwant %v", seq, want)
+	}
+	if all[1]["index"] != float64(0) || all[4]["index"] != float64(1) || all[7]["index"] != float64(2) {
+		t.Fatalf("indexes: %v %v %v", all[1]["index"], all[4]["index"], all[7]["index"])
+	}
+}
+
 func TestParseChunk_ChoicesFormLift(t *testing.T) {
 	// Given openai chat chunk When ParseChunk Then choices[0].delta/finish_reason 提升为顶层
 	ch, err := ParseChunk([]byte(`{"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`))

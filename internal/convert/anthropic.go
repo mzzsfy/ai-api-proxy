@@ -88,6 +88,9 @@ func anthropicToPivot(m map[string]any) *PivotRequest {
 	if v, ok := m["metadata"]; ok {
 		pivot["x_metadata"] = v
 	}
+	if v, ok := m["thinking"]; ok {
+		pivot["x_thinking"] = v
+	}
 	pivot["messages"] = normalizeAnthropicMessages(m)
 	if sys, ok := m["system"]; ok {
 		pivot["system"] = anthropicSystemToString(sys)
@@ -192,7 +195,11 @@ func pivotToAnthropic(body []byte) ([]byte, error) {
 		resp["model"] = model
 	}
 	text, stopReason, toolCalls := extractAssistant(m)
-	content := make([]any, 0, 2)
+	reasoning := extractReasoning(m)
+	content := make([]any, 0, 3)
+	if reasoning != "" {
+		content = append(content, map[string]any{"type": "thinking", "thinking": reasoning})
+	}
 	if text != "" {
 		content = append(content, map[string]any{"type": "text", "text": text})
 	}
@@ -234,6 +241,21 @@ func extractAssistant(m map[string]any) (string, string, []any) {
 		}
 	}
 	return text, stop, tools
+}
+
+// extractReasoning 从 openai 形态抽取推理文本(deepseek 形态 reasoning_content)
+func extractReasoning(m map[string]any) string {
+	choices, ok := m["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return ""
+	}
+	cm, _ := choices[0].(map[string]any)
+	msg, _ := cm["message"].(map[string]any)
+	if msg == nil {
+		return ""
+	}
+	s, _ := msg["reasoning_content"].(string)
+	return s
 }
 
 // toAnthropicToolUse openai tool_calls → anthropic tool_use 块

@@ -11,12 +11,11 @@ import (
 //	→ content_block_delta(增量)→ content_block_stop(x_block.stop)
 //	→ ... → message_delta(usage/finish)→ Flush 补未闭合块 stop + message_stop
 type anthropicChunker struct {
-	started      bool // message_start 已发
-	blockOpen    bool // 当前有未闭合 content block
-	blockIndex   int  // 当前块索引
-	blockType    string
-	textStarted  bool // 已开启过文本块
-	messageDelta bool // message_delta 已发
+	started      bool   // message_start 已发
+	blockOpen    bool   // 当前有未闭合 content block
+	blockIndex   int    // 当前块索引
+	blockType    string // 当前开块类型(text/thinking)
+	messageDelta bool   // message_delta 已发
 }
 
 // NewFromPivotChunker 构造 per-request 状态机
@@ -117,16 +116,12 @@ func (a *anthropicChunker) blockEvents(ch *Chunk) []sseEvent {
 	if a.blockType == "" {
 		a.blockType = "text"
 	}
-	cbs := map[string]any{
-		"type":  "content_block_start",
-		"index": a.blockIndex,
-		"content_block": map[string]any{
-			"type": a.blockType, "text": "",
-		},
-	}
-	out = append(out, ev(cbs))
+	out = append(out, ev(map[string]any{
+		"type":          "content_block_start",
+		"index":         a.blockIndex,
+		"content_block": blockShell(a.blockType),
+	}))
 	a.blockOpen = true
-	a.textStarted = true
 	// 建块可能同时带首增量
 	if len(ch.Delta) > 0 {
 		out = append(out, a.deltaEvents(ch)...)
@@ -134,8 +129,17 @@ func (a *anthropicChunker) blockEvents(ch *Chunk) []sseEvent {
 	return out
 }
 
-// deltaEvents 文本增量事件;首个非空增量隐式开文本块(纯 openai 语义上游无 x_block);
-// 无文本增量帧(role/reasoning)不发事件不开空块
+// blockShell content_block_start 的块载体;仅支持 text/thinking 两类,
+// 其余 x_block 声明类型降级为 text shell(残缺 tool_use/redacted 块比合法文本块更糟)
+func blockShell(blockType string) map[string]any {
+	if blockType == "thinking" {
+		return map[string]any{"type": "thinking", "thinking": ""}
+	}
+	return map[string]any{"type": "text", "text": ""}
+}
+
+// deltaEvents 文本/推理增量事件;隐式开块与跨类型自动闭块:
+// reasoning_content → thinking 块(thinking_delta),content → 文本块(text_delta)
 func (a *anthropicChunker) deltaEvents(ch *Chunk) []sseEvent {
 	if ch.Delta == nil {
 		return nil
@@ -145,25 +149,47 @@ func (a *anthropicChunker) deltaEvents(ch *Chunk) []sseEvent {
 		return nil
 	}
 	s, _ := d["content"].(string)
-	if s == "" {
+	r, _ := d["reasoning_content"].(string)
+	if s == "" && r == "" {
 		return nil
 	}
 	var out []sseEvent
-	if !a.textStarted && !a.blockOpen {
+	if r != "" {
+		out = append(out, a.switchBlock("thinking")...)
+		out = append(out, ev(map[string]any{
+			"type":  "content_block_delta",
+			"index": a.blockIndex,
+			"delta": map[string]any{"type": "thinking_delta", "thinking": r},
+		}))
+	}
+	if s != "" {
+		out = append(out, a.switchBlock("text")...)
+		out = append(out, ev(map[string]any{
+			"type":  "content_block_delta",
+			"index": a.blockIndex,
+			"delta": map[string]any{"type": "text_delta", "text": s},
+		}))
+	}
+	return out
+}
+
+// switchBlock 确保当前开块为 want 类型:异型先闭,未开则建
+func (a *anthropicChunker) switchBlock(want string) []sseEvent {
+	var out []sseEvent
+	if a.blockOpen && a.blockType != want {
+		out = append(out, ev(map[string]any{"type": "content_block_stop", "index": a.blockIndex}))
+		a.blockIndex++
+		a.blockOpen = false
+	}
+	if !a.blockOpen {
 		out = append(out, ev(map[string]any{
 			"type":          "content_block_start",
 			"index":         a.blockIndex,
-			"content_block": map[string]any{"type": "text", "text": ""},
+			"content_block": blockShell(want),
 		}))
 		a.blockOpen = true
-		a.textStarted = true
-		a.blockType = "text"
+		a.blockType = want
 	}
-	out = append(out, ev(map[string]any{
-		"type":  "content_block_delta",
-		"index": a.blockIndex,
-		"delta": map[string]any{"type": "text_delta", "text": s},
-	}))
 	return out
 }
 

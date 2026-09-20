@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -90,6 +93,11 @@ func Build(cfg *Config) (*App, error) {
 	if err := ensureBuiltinPackage(ctx, pkgs); err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("builtin package: %w", err)
+	}
+	// 目录热载:plugins_dir 内 .aap 自动导入(同内容幂等;坏包警告跳过不阻塞启动)
+	if err := importPluginsDir(ctx, pkgs, cfg.PluginsDir); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("import plugins dir: %w", err)
 	}
 	recorder := metrics.NewRecorder()
 	secrets := &storeSecrets{st: st}
@@ -437,6 +445,64 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 		return err
 	}
 	return pkgs.Install(ctx, buf.Bytes())
+}
+
+// importPluginsDir 目录内 .aap 顺序导入(文件名稳定序);README plugins_dir 契约:
+// 同名同内容幂等跳过(revision 不空转、禁用状态保留),内容变化升级 revision+1;
+// 坏包警告跳过(可选目录语义,不阻塞网关启动)
+func importPluginsDir(ctx context.Context, pkgs *plugin.Registry, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read plugins dir: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	seen := map[string]string{} // 包名 → 源文件(同轮同名冲突告警)
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".aap") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			log.Printf("plugins dir: read %s: %v (skipped)", name, err)
+			continue
+		}
+		if err := installIfChanged(ctx, pkgs, data, name, seen); err != nil {
+			log.Printf("plugins dir: install %s: %v (skipped)", name, err)
+		}
+	}
+	return nil
+}
+
+// installIfChanged 同内容跳过;变化才 Install(升级 revision 并重新启用)。
+// 同轮两个文件声明同名包:按文件序后者胜,并告警提示去重
+func installIfChanged(ctx context.Context, pkgs *plugin.Registry, data []byte, source string, seen map[string]string) error {
+	pkg, err := plugin.ParseAAP(data)
+	if err != nil {
+		return err
+	}
+	if prev, dup := seen[pkg.Manifest.Name]; dup {
+		log.Printf("plugins dir: duplicate package name %q in %s and %s (later file wins)", pkg.Manifest.Name, prev, source)
+	}
+	seen[pkg.Manifest.Name] = source
+	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil {
+		if reflect.DeepEqual(existing.Manifest, pkg.Manifest) && reflect.DeepEqual(existing.Files, pkg.Files) {
+			return nil
+		}
+	}
+	if err := pkgs.Install(ctx, data); err != nil {
+		return err
+	}
+	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil && existing.Revision > 1 {
+		log.Printf("plugins dir: upgraded %s from %s to revision %d", pkg.Manifest.Name, source, existing.Revision)
+	}
+	return nil
 }
 
 // persistSnapshot 计数快照落 metrics_minutely
