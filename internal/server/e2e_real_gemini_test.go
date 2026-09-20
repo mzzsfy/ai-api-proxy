@@ -194,6 +194,27 @@ func TestRealGemini_ChatStream(t *testing.T) {
 			t.Fatalf("missing %s: %s", want, body)
 		}
 	}
+	if strings.Contains(body, "data: [{") {
+		t.Fatalf("chunk must not be array-wrapped: %s", body)
+	}
+	// 结构断言:逐条 data 行必须是单 JSON 对象且含 choices(形损坏类回归的鉴别力)
+	sawChunk := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+			t.Fatalf("data line is not a single json object: %q", line)
+		}
+		if _, ok := chunk["choices"]; ok {
+			sawChunk = true
+		}
+	}
+	if !sawChunk {
+		t.Fatalf("no choices chunk in stream: %s", body)
+	}
 	if !strings.Contains(body, `"finish_reason":"stop"`) {
 		t.Fatalf("missing stop finish_reason: %s", body)
 	}
