@@ -86,19 +86,15 @@ func (c *OpenAICodec) ErrorBody(status int, msg string, models []string) []byte 
 // openAIFramer openai-completions 流式帧格式化器(mapEvent 产物为事件对象数组,逐元素一 data 行;收尾 [DONE])
 type openAIFramer struct{}
 
-// Frame 事件对象数组 → SSE 事件序列;openai chunk 无 event 行;非数组载荷降级原样单事件
+// Frame 事件对象数组 → SSE 事件序列;元素字节原样直出(零重序列化);非数组载荷降级原样单事件
 func (f *openAIFramer) Frame(payload []byte) []Event {
-	var items []map[string]any
+	var items []json.RawMessage
 	if err := json.Unmarshal(payload, &items); err != nil {
 		return []Event{{Data: string(payload)}}
 	}
 	out := make([]Event, 0, len(items))
 	for _, it := range items {
-		b, err := json.Marshal(it)
-		if err != nil {
-			continue
-		}
-		out = append(out, Event{Data: string(b)})
+		out = append(out, Event{Data: string(it)})
 	}
 	return out
 }

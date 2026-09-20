@@ -69,6 +69,9 @@ func TestOpenAICodec_Framer(t *testing.T) {
 	if !strings.HasPrefix(evs[0].Data, `{`) || !strings.HasSuffix(evs[0].Data, `}`) {
 		t.Fatalf("element must be a bare object, got: %s", evs[0].Data)
 	}
+	if !strings.Contains(evs[0].Data, `"role":"assistant"`) {
+		t.Fatalf("element content lost, got: %s", evs[0].Data)
+	}
 	if !strings.Contains(evs[1].Data, `"content":"a"`) {
 		t.Fatalf("second chunk: %s", evs[1].Data)
 	}
@@ -81,6 +84,14 @@ func TestOpenAICodec_Framer(t *testing.T) {
 // TestOpenAICodec_Framer_EmptyArray 空数组 → 零事件(契约:[] 跳帧)
 func TestOpenAICodec_Framer_EmptyArray(t *testing.T) {
 	if evs := NewOpenAICodec().Framer().Frame([]byte(`[]`)); len(evs) != 0 {
+		t.Fatalf("events: %+v", evs)
+	}
+}
+
+// TestOpenAICodec_Framer_NullElement null 元素原样直出(插件违约退化输入,不静默改形)
+func TestOpenAICodec_Framer_NullElement(t *testing.T) {
+	evs := NewOpenAICodec().Framer().Frame([]byte(`[null]`))
+	if len(evs) != 1 || evs[0].Data != "null" {
 		t.Fatalf("events: %+v", evs)
 	}
 }
