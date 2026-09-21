@@ -195,12 +195,12 @@ func (r *Registry) validateParts(pkg *Package) error {
 		return nil
 	}
 	if p := pkg.Manifest.Parts.Protocol; p != nil {
-		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
 	for _, fp := range pkg.Manifest.Parts.Filters {
-		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}

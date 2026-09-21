@@ -42,8 +42,10 @@ type HostDeps struct {
 	TargetSecretValues func(target string) map[string]string
 	// PackageKey 包级 key 只读(实时;hooks 任务写入;可空=util.key 报错)
 	PackageKey func(name string) (any, bool)
-	Storage    StorageKV
-	Log        func(level, msg string)
+	// TransportEvict 主动失效上报(管理命令转发;仅失效,不触发重试;可空=util.evict 报错)
+	TransportEvict func(transport, scope, value string) error
+	Storage        StorageKV
+	Log            func(level, msg string)
 }
 
 // currentTarget 当前 target 名
@@ -198,6 +200,16 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 			return nil, nil
 		}
 		return v, nil
+	})
+	// evict:主动失效上报出口(管理命令转发;仅失效当前绑定,不改当前请求重试行为)
+	_ = util.Set("evict", func(transport, scope, value string) (bool, error) {
+		if deps.TransportEvict == nil {
+			return false, fmt.Errorf("evict %q: no transport context (package %s)", transport, deps.PackageName)
+		}
+		if err := deps.TransportEvict(transport, scope, value); err != nil {
+			return false, err
+		}
+		return true, nil
 	})
 	_ = vm.Set("util", util)
 	// log(输出经 secrets 掩码)

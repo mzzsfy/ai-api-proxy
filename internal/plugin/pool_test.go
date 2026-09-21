@@ -32,7 +32,7 @@ func mustProto(t *testing.T, name, src, poolSize string) *gojaProtocol {
 	if poolSize != "" {
 		t.Setenv(PoolEnvVar, poolSize)
 	}
-	p, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
+	p, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

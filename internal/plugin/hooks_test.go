@@ -291,7 +291,7 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Entry: "p.js", Protocol: "openai-completions", Form: []string{"streaming"}}
 	ks := NewKeysStore(testKeysDB(t))
 	_ = ks.Set("kp", map[string]any{"endpoint": "https://a"})
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) })
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

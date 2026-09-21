@@ -108,6 +108,12 @@ export interface Util {
   secret(ref: string): string;
   /** 读包级 key 当前值;无值 undefined(protocol/filter 侧只读;hooks 任务写入) */
   key(name: string): unknown;
+  /**
+   * 主动失效上报:aap 传输失效命令转发(仅失效当前绑定,不触发重试)
+   * scope: "lease"(value=lease_id 32 字符 hex)| "egress"(value=IP 字符串)
+   * 成功 true;非法 scope/非 aap 传输/节点失败抛错
+   */
+  evict(transport: string, scope: "lease" | "egress", value: string): boolean;
 }
 
 export interface Log {

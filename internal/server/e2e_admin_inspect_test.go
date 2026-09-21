@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 )
 
@@ -41,6 +43,17 @@ func TestAdmin_InspectBytesReturnsSummaryNotInstall(t *testing.T) {
 
 func TestAdmin_InspectURL(t *testing.T) {
 	// Given inspect JSON {"url"} 指向测试服务器 .aap When POST Then 拉取解析返回摘要且不安装
+	// (httptest 源站在回环,覆写拉取实现绕过公网校验;SSRF 拦截由 TestAdmin_InspectURLPrivateBlocked 覆盖)
+	origFetch := admin.FetchPackageFromURL
+	admin.FetchPackageFromURL = func(r *http.Request, url string) ([]byte, error) {
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	}
+	t.Cleanup(func() { admin.FetchPackageFromURL = origFetch })
 	pkgs, _ := testRegistry(t)
 	deps := newAdminDeps(pkgs)
 	mux := deps.Mux()

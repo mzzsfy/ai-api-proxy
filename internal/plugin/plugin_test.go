@@ -110,7 +110,7 @@ func TestParseAndInstantiate_FullFlow(t *testing.T) {
 			return "sk-live", true
 		}
 		return "", false
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,12 +183,12 @@ func TestDrift_RequiredMissingRejectedAtInstantiate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 实例缺 required(安装期不阻塞——validateParts 不查 schema;实例化期拒绝)
-	_, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], nil, nil, nil, nil, nil)
+	_, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], nil, nil, nil, nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "model") || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("required missing must name field: %v", err)
 	}
 	// 补齐后成功
-	if _, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"model": "m1"}, nil, nil, nil, nil); err != nil {
+	if _, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"model": "m1"}, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
 }
@@ -205,7 +205,7 @@ func TestDrift_UnknownKeysStripped(t *testing.T) {
 		t.Fatal(err)
 	}
 	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0],
-		map[string]any{"keep": "v", "legacyGone": "x"}, nil, nil, nil, nil)
+		map[string]any{"keep": "v", "legacyGone": "x"}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestValidate_SecretMissingThrowsWithPartName(t *testing.T) {
 	// Given secret 缺键 When BuildRequest Then 错误含包名与键名
 	pkg := mustInstall(t, NewRegistry(testDB(t)))
 	proto, err := NewProtocol(pkg, nil,
-		func(target, key string) (string, bool) { return "", false }, nil, nil, nil)
+		func(target, key string) (string, bool) { return "", false }, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestRuntime_FilterFactoryConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil, nil)
+	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestInspect_MasksSecrets(t *testing.T) {
 	proto, err := NewProtocol(pkg, nil,
 		func(target, key string) (string, bool) { return "sk-secret-value", true },
 		func(target string) map[string]string { return map[string]string{"api_key": "sk-secret-value"} },
-		nil, nil)
+		nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

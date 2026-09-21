@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +95,9 @@ func protocolName(p *plugin.Package) string {
 	return p.Manifest.Parts.Protocol.Protocol
 }
 
+// FetchPackageFromURL 服务端拉取实现(变量供测试覆写:httptest 源站在回环,生产路径强制公网校验)
+var FetchPackageFromURL = fetchPackage
+
 // inspectPackage 解析包摘要但不安装(octet-stream=字节;application/json {"url"}=服务端拉取)
 func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 	var data []byte
@@ -105,7 +110,7 @@ func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, "url required")
 			return
 		}
-		fetched, err := fetchPackage(r, req.URL)
+		fetched, err := FetchPackageFromURL(r, req.URL)
 		if err != nil {
 			httpError(w, http.StatusBadGateway, err.Error())
 			return
@@ -127,12 +132,21 @@ func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, summary)
 }
 
-// fetchPackage 从 http(s) URL 拉取 .aap 字节(仅 http(s),限 8MB)
+// fetchPackage 从 http(s) URL 拉取 .aap 字节(仅 http(s);限 8MB;拒绝私网/环回/链路本地目标防 SSRF)
 func fetchPackage(r *http.Request, url string) ([]byte, error) {
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+	u, err := neturl.Parse(url)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("only http(s) url allowed")
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	if err := assertPublicHost(u.Hostname()); err != nil {
+		return nil, err
+	}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return assertPublicHost(req.URL.Hostname())
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("fetch: %w", err)
@@ -142,6 +156,20 @@ func fetchPackage(r *http.Request, url string) ([]byte, error) {
 		return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+}
+
+// assertPublicHost 目标主机须解析为公网地址(防 SSRF 内网探测)
+func assertPublicHost(host string) error {
+	addrs, err := net.LookupIP(host)
+	if err != nil || len(addrs) == 0 {
+		return fmt.Errorf("resolve host: %v", err)
+	}
+	for _, ip := range addrs {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("address %s is not allowed", ip)
+		}
+	}
+	return nil
 }
 
 func (d *Deps) installPackage(w http.ResponseWriter, r *http.Request) {

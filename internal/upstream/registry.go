@@ -91,6 +91,13 @@ type Registry struct {
 	byID    map[int64]*Upstream
 	// instCache 部件实例缓存(键=上游名;包 revision 变化或 Save 时失效)
 	instCache map[string]*resolvedParts
+	// transportEvict 插件 util.evict 出口(宿主注入;nil=插件上报报错)
+	transportEvict func(transport, scope, value string) error
+}
+
+// SetTransportEvict 注入插件 util.evict 出口(装配根调用)
+func (r *Registry) SetTransportEvict(f func(transport, scope, value string) error) {
+	r.transportEvict = f
 }
 
 // resolvedParts 可缓存的部件实例(JS runtime 池实例化成本高)
@@ -627,7 +634,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 				continue
 			}
-			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package), r.pkgs.KeyReader(ex.Package))
+			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package), r.pkgs.KeyReader(ex.Package), r.transportEvict)
 			if err != nil {
 				return nil, err
 			}
@@ -639,7 +646,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 		if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 			continue
 		}
-		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package))
+		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), r.transportEvict)
 		if err != nil {
 			return nil, err
 		}
@@ -657,7 +664,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			return nil, err
 		}
 	} else {
-		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package))
+		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), r.transportEvict)
 		if err != nil {
 			return nil, err
 		}

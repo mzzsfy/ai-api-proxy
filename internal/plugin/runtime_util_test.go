@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -194,5 +195,58 @@ func TestUtil_InspectMasksAndTruncates(t *testing.T) {
 	}
 	if len(s) > 2048 {
 		t.Fatalf("not truncated: %d", len(s))
+	}
+}
+
+// Given host 注入 evict 回调 When util.evict(name,scope,value) Then 回调收到原样参数且返回 true(不触发重试,纯失效命令)
+func TestUtil_Evict上报(t *testing.T) {
+	var gotName, gotScope, gotValue string
+	called := false
+	vm := goja.New()
+	bindUtil(vm, HostDeps{
+		PackageName: "p",
+		TransportEvict: func(name, scope, value string) error {
+			called = true
+			gotName, gotScope, gotValue = name, scope, value
+			return nil
+		},
+	})
+	ok, err := vm.RunString(`util.evict("aap-out","egress","1.2.3.4")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("evict 回调未被调用")
+	}
+	if gotName != "aap-out" || gotScope != "egress" || gotValue != "1.2.3.4" {
+		t.Fatalf("args = %s/%s/%s", gotName, gotScope, gotValue)
+	}
+	if ok.String() != "true" {
+		t.Fatalf("evict = %s", ok.String())
+	}
+}
+
+// Given host 未注入 evict 回调 When util.evict Then 抛错且错误含 no transport context
+func TestUtil_Evict未装配抛错(t *testing.T) {
+	vm := goja.New()
+	bindUtil(vm, HostDeps{PackageName: "p"})
+	_, err := vm.RunString(`util.evict("aap-out","egress","1.2.3.4")`)
+	if err == nil || !strings.Contains(err.Error(), "no transport context") {
+		t.Fatalf("want no transport context, got %v", err)
+	}
+}
+
+// Given evict 回调返回 ErrBadScope When util.evict Then 抛错且错误含 scope
+func TestUtil_EvictScope非法抛错(t *testing.T) {
+	vm := goja.New()
+	bindUtil(vm, HostDeps{
+		PackageName: "p",
+		TransportEvict: func(string, string, string) error {
+			return fmt.Errorf("scope/value 非法")
+		},
+	})
+	_, err := vm.RunString(`util.evict("aap-out","session","x")`)
+	if err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("want scope error, got %v", err)
 	}
 }

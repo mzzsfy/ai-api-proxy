@@ -304,39 +304,13 @@ func Build(cfg *Config) (*App, error) {
 		}
 		return latency, ""
 	}
-	adminDeps.TransportEvictFunc = func(ctx context.Context, name, scope, value string) error {
-		var scopeID uint8
-		var payload []byte
-		switch scope {
-		case "lease": // lease_id 32 字符 hex → 16B 原始字节;全零拒绝
-			id, err := hex.DecodeString(value)
-			if err != nil || len(id) != aapLeaseIDHexLen {
-				return admin.ErrBadScope
-			}
-			if bytes.Equal(id, make([]byte, aapLeaseIDHexLen)) {
-				return admin.ErrBadScope
-			}
-			scopeID, payload = transport.EvictScopeLease, id
-		case "egress": // IP 字符串 → SOCKS5 地址编码
-			ip := net.ParseIP(value)
-			if ip == nil {
-				return admin.ErrBadScope
-			}
-			scopeID = transport.EvictScopeEgress
-			if v4 := ip.To4(); v4 != nil {
-				payload = append([]byte{1}, v4...)
-			} else {
-				payload = append([]byte{4}, ip.To16()...)
-			}
-		default:
-			return admin.ErrBadScope
-		}
-		found, err := trMgr.Evict(ctx, name, scopeID, payload)
-		if !found {
-			return admin.ErrBadScope // 非 aap 传输
-		}
-		return err
-	}
+	adminDeps.TransportEvictFunc = evictForwarder(trMgr)
+	// 插件 util.evict 出口:同一失效命令转发(仅失效,不触发重试;独立超时不随请求)
+	reg.SetTransportEvict(func(transport, scope, value string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), pluginEvictTimeout)
+		defer cancel()
+		return evictForwarder(trMgr)(ctx, transport, scope, value)
+	})
 	// 健康检查
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -421,6 +395,46 @@ var (
 
 // aapLeaseIDHexLen aap lease_id hex 形态长度(128bit → 32 字符)
 const aapLeaseIDHexLen = 16
+
+// pluginEvictTimeout 插件 util.evict 命令超时(独立于请求生命周期)
+const pluginEvictTimeout = 10 * time.Second
+
+// evictForwarder scope/value 文本 → aap EVICT 命令转发(admin API 与插件 util.evict 共用)
+func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, scope, value string) error {
+	return func(ctx context.Context, name, scope, value string) error {
+		var scopeID uint8
+		var payload []byte
+		switch scope {
+		case "lease": // lease_id 32 字符 hex → 16B 原始字节;全零拒绝
+			id, err := hex.DecodeString(value)
+			if err != nil || len(id) != aapLeaseIDHexLen {
+				return admin.ErrBadScope
+			}
+			if bytes.Equal(id, make([]byte, aapLeaseIDHexLen)) {
+				return admin.ErrBadScope
+			}
+			scopeID, payload = transport.EvictScopeLease, id
+		case "egress": // IP 字符串 → SOCKS5 地址编码
+			ip := net.ParseIP(value)
+			if ip == nil {
+				return admin.ErrBadScope
+			}
+			scopeID = transport.EvictScopeEgress
+			if v4 := ip.To4(); v4 != nil {
+				payload = append([]byte{1}, v4...)
+			} else {
+				payload = append([]byte{4}, ip.To16()...)
+			}
+		default:
+			return admin.ErrBadScope
+		}
+		found, err := trMgr.Evict(ctx, name, scopeID, payload)
+		if !found {
+			return admin.ErrBadScope // 非 aap 传输
+		}
+		return err
+	}
+}
 
 // utilNowRFC3339 当前时间(测试确定性无关,直接格式化)
 func utilNowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }

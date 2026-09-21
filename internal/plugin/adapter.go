@@ -49,12 +49,12 @@ func (g *gojaProtocol) ClosePools() {
 }
 
 // NewProtocol 从包实例化 protocol 部件(池预热;绑定校验用首实例)
-func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool)) (pipeline.Protocol, error) {
-	return buildProtocol(pkg, params, targetSecrets, targetSecretValues, storage, packageKey, true)
+func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error) (pipeline.Protocol, error) {
+	return buildProtocol(pkg, params, targetSecrets, targetSecretValues, storage, packageKey, transportEvict, true)
 }
 
 // buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(实例配置归上游,不阻塞安装)
-func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), enforceSchema bool) (pipeline.Protocol, error) {
+func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Protocol, error) {
 	part := pkg.Manifest.Parts.Protocol
 	src := pkg.Files[part.Entry]
 	prog, err := Compile(src, part.Entry)
@@ -72,6 +72,7 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 		return HostDeps{
 			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
 			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
+			TransportEvict: transportEvict,
 		}
 	}
 	// 声明的协议全名并入实例配置:部件按协议名渲染请求/事件(config.protocol)
@@ -366,12 +367,12 @@ type gojaFilter struct {
 func (g *gojaFilter) ClosePools() { g.pool.Close() }
 
 // NewFilter 从包实例化 filter 部件
-func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool)) (pipeline.Filter, error) {
-	return buildFilter(pkg, part, params, targetSecrets, targetSecretValues, storage, packageKey, true)
+func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error) (pipeline.Filter, error) {
+	return buildFilter(pkg, part, params, targetSecrets, targetSecretValues, storage, packageKey, transportEvict, true)
 }
 
 // buildFilter 实例化主体;enforceSchema=false 供安装期结构校验
-func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), enforceSchema bool) (pipeline.Filter, error) {
+func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Filter, error) {
 	src := pkg.Files[part.Entry]
 	prog, err := Compile(src, part.Entry)
 	if err != nil {
@@ -388,6 +389,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSec
 		return HostDeps{
 			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
 			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
+			TransportEvict: transportEvict,
 		}
 	}
 	factory := func() (*hookInstance, error) {

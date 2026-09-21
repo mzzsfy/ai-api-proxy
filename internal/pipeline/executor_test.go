@@ -241,7 +241,8 @@ func TestRun_SingleShot_5xxPassthroughNoFailover(t *testing.T) {
 	// Given 首目标 503 When Run Then 透传 503 且不试第二目标
 	trA := &fakeTransport{name: "a", fixed: TransportResponse{Status: 503, Body: []byte(`overloaded`)}}
 	trB := &fakeTransport{name: "b", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
-	ex := &Executor{Transports: func(name string) (Transport, bool) {
+	// 注入固定随机源(seed=2 首个 Intn(2)=0 先命中 a):全局 rand 自动播种下 50% 先选 b,透传断言须确定命中 a
+	ex := &Executor{Rand: rand.New(rand.NewSource(2)), Transports: func(name string) (Transport, bool) {
 		if name == "a" {
 			return trA, true
 		}

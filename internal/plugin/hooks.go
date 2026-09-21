@@ -58,6 +58,8 @@ type HooksDeps struct {
 	Storage     StorageKV
 	Log         func(level, msg string)
 	Now         func() time.Time // 时钟注入(测试);nil = time.Now
+	// TransportEvict 主动失效上报(util.evict;nil = 调用抛错)
+	TransportEvict func(transport, scope, value string) error
 }
 
 // HooksRuntime 包 hooks 部件实例(非池化:每任务运行新实例,编译缓存归调用方)
@@ -85,7 +87,7 @@ func LoadHooks(pkg *Package, deps HooksDeps) (*HooksRuntime, error) {
 		return nil, err
 	}
 	vm := goja.New()
-	bindUtil(vm, HostDeps{PackageName: pkg.Manifest.Name, Storage: deps.Storage, Log: deps.Log})
+	bindUtil(vm, HostDeps{PackageName: pkg.Manifest.Name, Storage: deps.Storage, Log: deps.Log, TransportEvict: deps.TransportEvict})
 	exports := vm.NewObject()
 	module := vm.NewObject()
 	_ = module.Set("exports", exports)
