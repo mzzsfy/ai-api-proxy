@@ -59,6 +59,12 @@ func (h *httpExecutor) Do(req plugin.HttpRequest) (*plugin.HttpResponse, error) 
 func wireHooks(app *App) *scheduler.Scheduler {
 	exec := &httpExecutor{trMgr: app.trMgr}
 	pkgs := app.AdminDeps.Packages
+	// 闸门在装配期定档(Build 注入;测试装配路径惰性兜底为进程级单例,避免"每次新 gate 恒满桶"限流失效)
+	gate := app.pluginEvictGate
+	if gate == nil {
+		gate = sharedEvictGate()
+	}
+	evict := gatedEvict(gate, evictForwarder(app.trMgr))
 	deps := func(pkgName string) plugin.HooksDeps {
 		return plugin.HooksDeps{
 			PackageName: pkgName,
@@ -67,13 +73,7 @@ func wireHooks(app *App) *scheduler.Scheduler {
 			Storage:     &kvStorage{db: app.St.DB(), ns: pkgName},
 			Log:         hooksLog(pkgName),
 			// 插件定时任务主动失效上报:同一命令转发(限流闸门;仅失效不触发重试)
-			TransportEvict: func(transport, scope, value string) error {
-				gate := app.pluginEvictGate
-				if gate == nil {
-					gate = newEvictGate() // 测试装配路径(Build 未跑)兜底
-				}
-				return gatedEvict(gate, evictForwarder(app.trMgr))(transport, scope, value)
-			},
+			TransportEvict: evict,
 		}
 	}
 	// onLoad 回调(安装/升级/启用;异步,失败不阻断加载)

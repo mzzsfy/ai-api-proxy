@@ -26,8 +26,10 @@ func TestEvictGate_限流(t *testing.T) {
 	if err := evict("t", "egress", "1.2.3.4"); err == nil {
 		t.Fatal("want rate limited")
 	}
-	// 补一个令牌的时长后恢复
-	time.Sleep(time.Duration(pluginEvictRefillSec*int(time.Second)) + 10*time.Millisecond)
+	// 手动回拨时间窗模拟补令牌(不依赖真实 sleep,免慢 CI 计时边界)
+	gate.mu.Lock()
+	gate.last = gate.last.Add(-time.Duration(pluginEvictRefillSec) * time.Second)
+	gate.mu.Unlock()
 	if err := evict("t", "egress", "1.2.3.4"); err != nil {
 		t.Fatalf("after refill: %v", err)
 	}

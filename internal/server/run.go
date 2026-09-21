@@ -457,6 +457,17 @@ func gatedEvict(gate *evictGate, forward func(ctx context.Context, transport, sc
 	}
 }
 
+// hooks 测试装配路径(Build 未跑)的进程级兜底闸门(sync.Once 惰性初始化,限流不因新 gate 失效)
+var (
+	sharedGateOnce sync.Once
+	sharedGate     *evictGate
+)
+
+func sharedEvictGate() *evictGate {
+	sharedGateOnce.Do(func() { sharedGate = newEvictGate() })
+	return sharedGate
+}
+
 // evictForwarder scope/value 文本 → aap EVICT 命令转发(admin API 与插件 util.evict 共用)
 func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, scope, value string) error {
 	return func(ctx context.Context, name, scope, value string) error {

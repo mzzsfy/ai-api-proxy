@@ -46,12 +46,6 @@ func (d *Deps) fetch(r *http.Request, url string) ([]byte, error) {
 	}
 	return fetchPackage(r, url)
 }
-func (d *Deps) fetchPackageFunc() func(r *http.Request, url string) ([]byte, error) {
-	if d.FetchPackage != nil {
-		return d.FetchPackage
-	}
-	return fetchPackage
-}
 
 // Mux 构建管理 API 路由(挂在 /admin/api 前缀,已过会话中间件)
 func (d *Deps) Mux() *http.ServeMux {
@@ -124,6 +118,10 @@ func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fetched, err := d.fetch(r, req.URL)
+		if errors.Is(err, errTooLarge) {
+			httpError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
 		if err != nil {
 			httpError(w, http.StatusBadGateway, err.Error())
 			return
@@ -192,29 +190,22 @@ func publicDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		if forbiddenIP(ip) {
 			return nil, fmt.Errorf("address %s is not allowed", ip)
 		}
+		// 地址族与拨号网络对齐(tcp4 不选 v6,反之亦然);默认 tcp 双栈均可
+		if network == "tcp4" && ip.To4() == nil {
+			continue
+		}
+		if network == "tcp6" && ip.To4() != nil {
+			continue
+		}
 		if dialIP == nil {
 			dialIP = ip
 		}
 	}
+	if dialIP == nil {
+		return nil, fmt.Errorf("no eligible %s address for host %q", network, host)
+	}
 	d := net.Dialer{}
 	return d.DialContext(ctx, network, net.JoinHostPort(dialIP.String(), port))
-}
-
-// assertPublicHost 主机名解析结果须全为公网地址(SSRF 预检;拨号级校验为权威防线)
-func assertPublicHost(host string) error {
-	addrs, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("resolve host: %w", err)
-	}
-	if len(addrs) == 0 {
-		return errors.New("resolve host: no addresses")
-	}
-	for _, ip := range addrs {
-		if forbiddenIP(ip) {
-			return fmt.Errorf("address %s is not allowed", ip)
-		}
-	}
-	return nil
 }
 
 // forbiddenIP 非公网地址判定(环回/私网/链路本地/组播/未指定/CGNAT/基准测试/保留段/IPv6 文档段)
@@ -290,6 +281,10 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, err := d.fetch(r, req.URL)
+	if errors.Is(err, errTooLarge) {
+		httpError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
 	if err != nil {
 		httpError(w, http.StatusBadGateway, err.Error())
 		return
