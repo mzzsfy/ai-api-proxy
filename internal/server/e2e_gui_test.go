@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -26,6 +27,29 @@ func TestGUI_AdminPageServed(t *testing.T) {
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		t.Fatalf("content type: %s", ct)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(bodyBytes)
+	// 监控页指标标记元素(RPM 三项 + 错误率 + 并发 + 页签)
+	for _, mark := range []string{`id="rpm-now"`, `id="rpm-avg"`, `id="rpm-peak"`, `id="err-rate"`, `id="conc"`, `data-p="mon"`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing %s", mark)
+		}
+	}
+	// 零外部依赖守卫:内嵌页不得引用外链资源(架构约束:离线可用、无构建链)
+	for _, bad := range []string{"http://", "https://"} {
+		for _, line := range strings.Split(body, "\n") {
+			trim := strings.TrimSpace(line)
+			lower := strings.ToLower(trim)
+			if strings.Contains(lower, bad) &&
+				(strings.Contains(lower, "<script") || strings.Contains(lower, "<link") || strings.Contains(lower, "<img") ||
+					strings.Contains(lower, "<iframe") || strings.Contains(lower, "@import")) {
+				t.Fatalf("admin page references external resource: %s", trim)
+			}
+		}
 	}
 }
 
