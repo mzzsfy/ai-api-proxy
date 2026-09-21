@@ -41,8 +41,6 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 
 ## 插件开发
 
-插件包已拆分独立仓库:[mzzsfy/ai-api-proxy-plugin](https://github.com/mzzsfy/ai-api-proxy-plugin)(含 `sdk/`、样例包与测试)。
-
 - 类型与宿主面:`sdk/ai-api-proxy.d.ts`;本地测试宿主:`sdk/test.js`(与 Go host 语义一致)
 - 起步模板:管理 GUI → 包 → 下载模板包;或 `GET /packages/template`
 - 示例包:`sdk/examples/gemini`(四 hook 全实现 + 编写说明)
