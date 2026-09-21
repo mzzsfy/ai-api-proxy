@@ -19,7 +19,7 @@ jobs:
         # 默认构建不 import 这些模块(标签隔离),直接剥掉即可,无需任何网络拉取。
         run: |
           go mod edit -dropreplace=github.com/mzzsfy/warp-pool -droprequire=github.com/mzzsfy/warp-pool
-          go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go mod edit -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider
       - name: Go test (race)
         run: go test -race ./...
       - name: Vet
@@ -37,8 +37,8 @@ jobs:
           go-version-file: go.mod
       - name: Resolve warp-pool
         run: |
-          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy
-          go mod edit -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy
+          go mod edit -dropreplace=github.com/mzzsfy/warp-pool -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider
+          go mod edit -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider
           go get github.com/mzzsfy/warp-pool@v0.1.0
       - name: Build withwarp
         run: go build -tags withwarp ./...
