@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
 	github.com/google/uuid v1.6.0
-	github.com/mzzsfy/ai-api-proxy-plugin-proxy v0.0.0-00010101000000-000000000000
+	github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider v0.0.0-00010101000000-000000000000
 	github.com/mzzsfy/warp-pool v0.1.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
@@ -20,7 +20,7 @@ require (
 // 需解析模块图的操作(go mod download/tidy)须先 droprequire 它。mihomo 依赖树默认构建不加载。
 replace github.com/mzzsfy/warp-pool => ../warp-pool
 
-replace github.com/mzzsfy/ai-api-proxy-plugin-proxy => ../ai-api-proxy-plugin-proxy
+replace github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider => ../ai-api-proxy-plugin-proxy/mihomoprovider
 
 require (
 	github.com/RyuaNerin/go-krypto v1.3.0 // indirect
