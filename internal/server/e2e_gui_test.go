@@ -120,7 +120,7 @@ func TestGUI_TransportsListAndTest(t *testing.T) {
 	t.Cleanup(func() { transportProbeURL = origProbe })
 
 	status, body := f.adminGetRaw(t, "/admin/api/transports")
-	if status != http.StatusOK || !strings.Contains(body, `"name":"px"`) || !strings.Contains(body, `"type":"http_proxy"`) {
+	if status != http.StatusOK || !strings.Contains(body, `"name":"px"`) || !strings.Contains(body, `"url":"http://`) {
 		t.Fatalf("transports list: %d %s", status, body)
 	}
 	// 代理实例探测:经 forward 代理打 mock 上游(HEAD 非流式路径返回 200/405 均视为链路通)

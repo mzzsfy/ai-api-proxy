@@ -7,7 +7,7 @@ import (
 )
 
 // clashProvider 单出口适配(设计 §4.2):连接既有 clash/mihomo 混合端口,
-// 无池无轮换,Report 仅记录健康标记。出口 IP 不可见(单出口无探测,本期接受)。
+// 无池无轮换。出口 IP 不可见(单出口无探测,本期接受)。
 func init() {
 	Register("ipp_clash", newClashProvider)
 }
@@ -32,13 +32,11 @@ func newClashProvider(cfg ProviderCfg) (Provider, error) {
 		return nil, fmt.Errorf("ipp_clash %s: url required", cfg.Name)
 	}
 	d := ProxyDialer{Type: o.Type, URL: o.URL}
-	marks := newMarkStore()
-	return &clashProvider{dialer: d, marks: marks}, nil
+	return &clashProvider{dialer: d}, nil
 }
 
 type clashProvider struct {
 	dialer ProxyDialer
-	marks  *markStore
 }
 
 func (p *clashProvider) Capabilities() Capabilities {
@@ -50,11 +48,7 @@ func (p *clashProvider) Acquire(ctx context.Context, hint Hint) (Lease, error) {
 }
 
 func (p *clashProvider) Stats() Stats {
-	s := Stats{EgressIPs: []string{}}
-	if mark, ok := p.marks.get(p.dialer.URL); ok {
-		_ = mark
-	}
-	return s
+	return Stats{EgressIPs: []string{}}
 }
 
 func (p *clashProvider) Close() error { return nil }
@@ -62,7 +56,6 @@ func (p *clashProvider) Close() error { return nil }
 // clashLease 单出口租约:Dial 经代达拨号(裸 conn,对端即上游)
 type clashLease struct {
 	p        *clashProvider
-	dialed   bool
 	released bool
 }
 
@@ -70,22 +63,10 @@ func (l *clashLease) Dial(ctx context.Context, network, addr string) (net.Conn, 
 	if l.released {
 		return nil, ErrLeaseReleased
 	}
-	conn, err := l.p.dialer.Dial(ctx, network, addr)
-	if err == nil {
-		l.dialed = true
-	}
-	return conn, err
+	return l.p.dialer.Dial(ctx, network, addr)
 }
 
 func (l *clashLease) EgressIP() string { return "" } // 单出口不可见(设计定案)
-
-// Report Bad 记健康标记(出口不变;Dial 从未成功则 no-op——契约 §2);Ok 清标记
-func (l *clashLease) Report(result ReportResult, reason string) {
-	if result == ReportBad && !l.dialed {
-		return // 无可用连接语义可标记
-	}
-	l.p.marks.set(l.p.dialer.URL, leaseMark{Reason: reason, At: timeNow(), OK: result == ReportOk})
-}
 
 func (l *clashLease) Release() { l.released = true }
 

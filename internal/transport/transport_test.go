@@ -83,7 +83,7 @@ func TestManager_DirectDefault(t *testing.T) {
 
 func TestManager_HTTPProxyInvalidURL(t *testing.T) {
 	// Given 非法代理 URL When NewManager Then 报错含实例名
-	_, err := NewManager([]TransportDef{{Name: "bad", Type: "http_proxy", URL: "://x"}})
+	_, err := NewManager([]TransportDef{{Name: "bad", URL: "http://[::1"}})
 	if err == nil || !strings.Contains(err.Error(), "bad") {
 		t.Fatalf("proxy url: %v", err)
 	}

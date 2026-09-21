@@ -77,7 +77,7 @@ func newRealTransportFixture(t *testing.T, apiKey, model, transportType, proxyUR
 	cfg := &Config{
 		Listen: ":0", DataDir: t.TempDir(),
 		APIKeys: []string{"sk-test"}, AdminUser: adminTestUser, AdminPassBcrypt: adminHash,
-		Transports: []TransportCfg{{Name: "real-" + transportType, Type: transportType, URL: proxyURL}},
+		Transports: []TransportCfg{{Name: "real-" + transportType, URL: proxyURL}},
 	}
 	app, err := Build(cfg)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -260,11 +261,11 @@ func TestRun_SingleShot_5xxPassthroughNoFailover(t *testing.T) {
 	}
 }
 
-func TestRun_FirstEnabledTargetOnly(t *testing.T) {
-	// Given 多目标 When Run Then 恰用首目标
+func TestRun_EnabledTargetsOnly(t *testing.T) {
+	// Given 多目标(disabled 已在 Resolve 过滤)When Run Then 恰调用一个目标,失败不切换
 	tr := &fakeTransport{name: "first", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
 	calls := map[string]int{}
-	ex := &Executor{Transports: func(name string) (Transport, bool) {
+	ex := &Executor{Rand: rand.New(rand.NewSource(1)), Transports: func(name string) (Transport, bool) {
 		calls[name]++
 		if name == "first" {
 			return tr, true
@@ -278,8 +279,72 @@ func TestRun_FirstEnabledTargetOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls["second"] != 0 {
-		t.Fatal("second target must not be called")
+	sum := calls["first"] + calls["second"]
+	if sum != 1 {
+		t.Fatalf("exactly one target call expected: %v", calls)
+	}
+}
+
+func TestWeightedPick_Distribution(t *testing.T) {
+	// Given 权重 1/1/2 When 按脚本随机值选择 Then 命中区间与权重边界一致
+	targets := []Target{mkTarget("a"), mkTarget("b"), mkTarget("c")}
+	targets[2].Weight = 2
+	seq := []int{0, 1, 2, 3}
+	i := 0
+	rnd := func(total int) int {
+		if total != 4 {
+			t.Fatalf("total weight: %d", total)
+		}
+		v := seq[i%len(seq)]
+		i++
+		return v
+	}
+	got := []string{}
+	for range seq {
+		got = append(got, weightedPick(targets, rnd).Name)
+	}
+	want := []string{"a", "b", "c", "c"}
+	for j := range want {
+		if got[j] != want[j] {
+			t.Fatalf("pick %d: got %v want %v", j, got, want)
+		}
+	}
+}
+
+func TestWeightedPick_NonPositiveWeightAsOne(t *testing.T) {
+	// Given weight ≤0 与缺省混合 When 选择 Then 全部按 weight=1 参与且总数=3
+	targets := []Target{mkTarget("a"), mkTarget("b"), mkTarget("c")}
+	targets[0].Weight = -5
+	total := 0
+	weightedPick(targets, func(n int) int { total = n; return 0 })
+	if total != 3 {
+		t.Fatalf("total: %d", total)
+	}
+}
+
+func TestRun_WeightedSelectionCallsExactlyOne(t *testing.T) {
+	// Given 多候选目标 When Run Then 恰一个目标被调用且传输按选中名分流
+	tr := &fakeTransport{name: "small", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
+	calls := map[string]int{}
+	ex := &Executor{Rand: rand.New(rand.NewSource(1)), Transports: func(name string) (Transport, bool) {
+		calls[name]++
+		if name == "small" {
+			return tr, true
+		}
+		return &fakeTransport{name: name}, true
+	}}
+	pctx := NewContext("r", UpstreamInfo{}, Vars{})
+	big := mkTarget("disabled-big")
+	big.Weight = 1000
+	small := mkTarget("small")
+	small.Weight = 1
+	u := testUpstream(&fakeProtocol{respBody: `ok`}, nil, []Target{big, small})
+	if _, err := ex.Run(context.Background(), pctx, u, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	sum := calls["disabled-big"] + calls["small"]
+	if sum != 1 {
+		t.Fatalf("exactly one target must be called: %v", calls)
 	}
 }
 

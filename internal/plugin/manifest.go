@@ -46,6 +46,19 @@ type FilterPart struct {
 	SecretRefs   []string        `json:"secretRefs,omitempty"`
 }
 
+// HooksTask 定时任务声明
+type HooksTask struct {
+	Name      string `json:"name"`
+	Cron      string `json:"cron"`
+	TimeoutMs int64  `json:"timeoutMs,omitempty"` // ≤0 按缺省;上限钳制在运行时
+}
+
+// HooksPart hooks 部件声明(加载钩子 + 定时任务;计入合法插槽)
+type HooksPart struct {
+	Entry string      `json:"entry"`
+	Tasks []HooksTask `json:"tasks,omitempty"`
+}
+
 // Manifest 包元数据与模板载体
 type Manifest struct {
 	ManifestVersion int               `json:"manifestVersion"`
@@ -55,9 +68,11 @@ type Manifest struct {
 	Parts           struct {
 		Protocol *ProtocolPart `json:"protocol,omitempty"`
 		Filters  []FilterPart  `json:"filters,omitempty"`
+		Hooks    *HooksPart    `json:"hooks,omitempty"`
 	} `json:"parts"`
 	UpstreamTemplate json.RawMessage            `json:"upstreamTemplate,omitempty"`
 	ConfigSchema     json.RawMessage            `json:"configSchema,omitempty"`
+	KeySchema        json.RawMessage            `json:"keySchema,omitempty"` // 包级 key 键声明(仅 GUI 提示,不校验)
 	Extra            map[string]json.RawMessage `json:"-"`
 }
 
@@ -85,9 +100,9 @@ func (p *Package) Validate() error {
 	}
 	proto := m.Parts.Protocol
 	filters := m.Parts.Filters
-	// 至少含一层插槽
-	if proto == nil && len(filters) == 0 {
-		return fmt.Errorf("package has no parts: need protocol or filters")
+	// 至少含一层插槽(hooks 计入)
+	if proto == nil && len(filters) == 0 && m.Parts.Hooks == nil {
+		return fmt.Errorf("package has no parts: need protocol, filters or hooks")
 	}
 	// protocol 声明绑定:协议全名 + form 必填至少一
 	if proto != nil {
@@ -125,6 +140,28 @@ func (p *Package) Validate() error {
 		}
 		if _, ok := p.Files[fp.Entry]; !ok {
 			return fmt.Errorf("filter %s: entry %q missing in package", fp.Name, fp.Entry)
+		}
+	}
+	// hooks 声明绑定:entry 存在(安装期) + task 名唯一 + cron 语法(5 字段)
+	if h := m.Parts.Hooks; h != nil {
+		if h.Entry == "" {
+			return fmt.Errorf("hooks: entry required")
+		}
+		if _, ok := p.Files[h.Entry]; !ok {
+			return fmt.Errorf("hooks: entry %q missing in package", h.Entry)
+		}
+		seenTask := map[string]bool{}
+		for _, tk := range h.Tasks {
+			if tk.Name == "" {
+				return fmt.Errorf("hooks task: name required")
+			}
+			if seenTask[tk.Name] {
+				return fmt.Errorf("hooks task %q duplicated", tk.Name)
+			}
+			seenTask[tk.Name] = true
+			if _, err := CronSchedule(tk.Cron); err != nil {
+				return fmt.Errorf("hooks task %s: %w", tk.Name, err)
+			}
 		}
 	}
 	return nil

@@ -99,7 +99,7 @@ func geminiEgressFromEnv(t *testing.T) geminiEgress {
 	t.Logf("gemini egress via %s -> %s", name, proxyURL)
 	return geminiEgress{
 		transport:  name,
-		transports: []TransportCfg{{Name: name, Type: "http_proxy", URL: proxyURL}},
+		transports: []TransportCfg{{Name: name, URL: proxyURL}},
 	}
 }
 

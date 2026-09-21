@@ -41,9 +41,12 @@
 "use strict";
 const $ = s => document.querySelector(s);
 const api = {
-  async call(method, path, body, raw) {
+  async call(method, path, body, raw, rawBytes) {
     const opt = { method, headers: {} };
-    if (body !== undefined) {
+    if (rawBytes !== undefined) {
+      opt.body = rawBytes;
+      opt.headers["Content-Type"] = "application/octet-stream";
+    } else if (body !== undefined) {
       opt.body = typeof body === "string" ? body : JSON.stringify(body);
       opt.headers["Content-Type"] = "application/json";
     }
@@ -130,7 +133,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   const main = $("#editor");
   const filterPkgs = allPkgs.filter(p => !p.hasProtocol && (p.filters || []).length > 0);
   const trOpts = ['<option value="">direct</option>']
-    .concat((transports || []).map(t => `<option value="${esc(t.name)}">${esc(t.name)}(${esc(t.type)})</option>`)).join("");
+    .concat((transports || []).map(t => `<option value="${esc(t.name)}">${esc(t.name)}</option>`)).join("");
   // 现有附加包的 filter 启停行(键=包/filter)
   const filterRows = [];
   for (const ex of u.extras || []) {
@@ -148,7 +151,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
       启用 <input id="ue" type="checkbox" ${u.enabled ? "checked" : ""}></div>
     <div class="row">模型(逗号分隔) <input id="um" value="${esc((u.models || []).join(","))}" style="width:360px"></div>
     <h4>目标</h4>
-    <table id="ut"><tr><th>名称</th><th>BaseURL</th><th>传输</th><th>api_key</th><th>启用</th></tr></table>
+    <table id="ut"><tr><th>名称</th><th>BaseURL</th><th>传输</th><th>api_key</th><th>权重</th><th>启用</th></tr></table>
     <button id="addt">+ 目标</button>
     <h4>附加包(filters)</h4>
     <div class="row">添加 <select id="exsel">${filterPkgs.map(p => `<option>${esc(p.name)}</option>`).join("") || "<option value=''>无可选 filters 包</option>"}</select>
@@ -163,6 +166,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
       <td><input class="tb" value="${esc(t.baseURL || "")}" style="width:280px"></td>
       <td><select class="tt">${trOpts}</select></td>
       <td><input class="ts" value="${(t.secrets && t.secrets.api_key) || ""}" placeholder="***保留旧值"></td>
+      <td><input class="tw" type="number" min="1" value="${t.weight > 0 ? t.weight : 1}" style="width:64px" title="加权随机权重"></td>
       <td><input class="te" type="checkbox" ${t.enabled !== false ? "checked" : ""}></td>`;
     tr.querySelector(".tt").value = t.transport || "";
     tb.appendChild(tr);
@@ -201,6 +205,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
       baseURL: tr.querySelector(".tb").value,
       transport: tr.querySelector(".tt").value,
       enabled: tr.querySelector(".te").checked,
+      weight: Math.max(1, parseInt(tr.querySelector(".tw").value, 10) || 1),
       secrets: { api_key: tr.querySelector(".ts").value },
     }));
     const extras = [], filtersEnabled = {}, filterParams = {};
@@ -240,12 +245,15 @@ async function showPackages() {
     <div class="row"><input type="file" id="fp" accept=".aap,.zip" style="display:none"></div>
     <table><tr><th>包</th><th>版本</th><th>revision</th><th>协议</th><th>filters</th><th></th></tr>
     ${pkgs.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.version)}</td><td>${p.revision}</td>
-      <td>${p.hasProtocol ? "✓" : ""}</td><td>${p.filters}</td>
+      <td>${esc(p.protocol || "")}</td><td>${p.filters}</td>
       <td>
         <a href="/admin/api/packages/${esc(p.name)}/export"><button>导出</button></a>
+        <button data-keys="${esc(p.name)}">keys</button>
         <button class="danger" data-del="${esc(p.name)}">卸载</button>
       </td></tr>`).join("")}</table>
     <div id="pmsg" class="muted"></div>
+    <div id="keysbox" style="display:none"><h3>包级 keys <span id="keyspkg" class="muted"></span></h3>
+      <pre class="log" id="keyspre"></pre></div>
     <h3>在线编辑</h3>
     <div class="row">包 <select id="ep">${pkgs.map(p => `<option>${esc(p.name)}</option>`).join("")}</select>
       类型 <select id="ek"><option value="protocol">protocol</option><option value="filter">filter</option></select>
@@ -269,25 +277,48 @@ async function showPackages() {
     } catch (err) { msg(false, err.message); }
   };
   $("#ip").onclick = () => $("#fp").click();
+  // 摘要弹窗:确认后执行 install(两步导入)
+  const confirmSummary = async s => {
+    const lines = [
+      `包名: ${s.name}`, `版本: ${s.installedVersion ? s.version + " (已装 " + s.installedVersion + ",将升级)" : s.version}`,
+      `协议: ${s.protocol || "-"}`, `形态: ${(s.form || []).join(",") || "-"}`,
+      `能力: ${(s.features || []).join(",") || "-"}`,
+      `filters: ${(s.filters || []).join(",") || "无"}`,
+      `secretRefs: ${(s.secretRefs || []).join(",") || "无"}`,
+      `hooks 任务: ${s.hooks ? (s.hooks.tasks || []).join(",") || "无任务" : "无"}`,
+    ];
+    return confirm("导入确认\n" + lines.join("\n") + "\n\n确认安装?");
+  };
   $("#fp").onchange = async e => {
     const f = e.target.files[0];
     if (!f) return;
-    const b64 = btoa(String.fromCharCode(...new Uint8Array(await f.arrayBuffer())));
+    const bytes = new Uint8Array(await f.arrayBuffer());
     try {
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const s = await api.call("POST", "/packages/inspect", undefined, false, bytes);      if (!(await confirmSummary(s))) return;
       const r = await fetch("/admin/api/packages", { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: bytes });
       if (!r.ok) throw new Error((await r.json()).error || "HTTP " + r.status);
       msg(true, "已安装"); showPackages();
     } catch (err) { msg(false, err.message); }
+    e.target.value = "";
   };
   $("#iu").onclick = async () => {
     const url = prompt("包 URL (.aap):");
     if (!url) return;
-    try { await api.post("/packages/import-url", { url }); msg(true, "已安装"); showPackages(); }
-    catch (err) { msg(false, err.message); }
+    try {
+      const s = await api.post("/packages/inspect", { url });
+      if (!(await confirmSummary(s))) return;
+      await api.post("/packages/import-url", { url });
+      msg(true, "已安装"); showPackages();
+    } catch (err) { msg(false, err.message); }
   };
+  document.querySelectorAll("[data-keys]").forEach(b => b.onclick = async () => {
+    try {
+      const kv = await api.get(`/packages/${b.dataset.keys}/keys`);
+      $("#keyspkg").textContent = b.dataset.keys;
+      $("#keyspre").textContent = JSON.stringify(kv, null, 2);
+      $("#keysbox").style.display = "block";
+    } catch (err) { msg(false, err.message); }
+  });
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
     if (!confirm(`卸载包 ${b.dataset.del}?`)) return;
     try { await api.del(`/packages/${b.dataset.del}`); msg(true, "已卸载"); showPackages(); }
@@ -310,9 +341,9 @@ async function showMonitor() {
     <canvas id="chart" width="960" height="220" style="border:1px solid var(--bd);max-width:100%"></canvas>
     <div class="muted row">蓝=请求数 红=错误数 <span id="cmin"></span></div>
     <h3>传输实例</h3>
-    <table><tr><th>名称</th><th>类型</th><th>地址</th><th></th></tr>
+    <table><tr><th>名称</th><th>地址</th><th></th></tr>
     ${(transports || []).map(t => {
-      return `<tr><td>${esc(t.name)}</td><td>${esc(t.type)}</td>
+      return `<tr><td>${esc(t.name)}</td>
       <td class="muted">${esc(t.url || "direct")}</td>
       <td><button data-tt="${esc(t.name)}">测试连通</button> <span id="tr-${esc(t.name)}" class="muted"></span></td></tr>`;
     }).join("")}</table>

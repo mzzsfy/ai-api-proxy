@@ -65,6 +65,8 @@ func (p *Protocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pi
 		},
 		Body:   body,
 		Stream: ctx.Vars.EntryStream,
+		Model:  ctx.Vars.Model,
+		APIKey: key, // 会话亲和素材
 	}, nil
 }
 

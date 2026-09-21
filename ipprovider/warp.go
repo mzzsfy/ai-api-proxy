@@ -12,7 +12,7 @@ import (
 )
 
 // warpProvider warp-pool 胶水(设计 §4.1):进程内 WARP 实例池,
-// Dial 失败自动顺延候选(库内建),Report(Bad) 触发实例 Draining 重播换出口。
+// Dial 失败自动顺延候选(库内建)。
 // 构建约束:withwarp 标签——warp-pool 为可公开的独立库,默认构建不引入
 // (与 ipp_mihomo 的 withproxy 同构);未启用时 ipp_warp 未注册,配置校验拒绝。
 func init() {
@@ -104,14 +104,11 @@ func (p *warpProvider) Close() error {
 	return p.pool.Close()
 }
 
-// warpLease 单请求作用域;Dial 后缓存实际选中实例(Report 落点)
+// warpLease 单请求作用域;Dial 后缓存实际选中实例
 type warpLease struct {
 	p          *warpProvider
 	sessionKey string
 	egress     string
-	instanceID warppool.ID
-	dialed     bool
-	reported   bool
 	released   bool
 	mu         sync.Mutex
 }
@@ -130,12 +127,7 @@ func (l *warpLease) Dial(ctx context.Context, network, addr string) (net.Conn, e
 	if err != nil {
 		return nil, err // 顺延耗尽返回最后错误(库内建)
 	}
-	ic, ok := conn.(warppool.InstanceConn)
-	if ok {
-		l.mu.Lock()
-		l.instanceID = ic.Instance().ID
-		l.dialed = true
-		l.mu.Unlock()
+	if ic, ok := conn.(warppool.InstanceConn); ok {
 		if e := ic.Instance().Egress; e.V4.IsValid() {
 			l.mu.Lock()
 			l.egress = e.V4.String()
@@ -153,29 +145,6 @@ func (l *warpLease) EgressIP() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.egress
-}
-
-// Report 幂等(首次生效):Bad 触发最近成功实例 Draining(重播换出口身份);
-// connect_fail no-op(顺延内建);Ok no-op(池自管);Dial 从未成功 no-op。
-// SetStatus 错误仅记日志丢弃,不影响透传。
-func (l *warpLease) Report(result ReportResult, reason string) {
-	l.mu.Lock()
-	if l.reported {
-		l.mu.Unlock()
-		return
-	}
-	l.reported = true
-	id, dialed := l.instanceID, l.dialed
-	l.mu.Unlock()
-	if result != ReportBad || reason == ReasonConnectFail {
-		return
-	}
-	if !dialed {
-		return
-	}
-	if err := l.p.pool.SetStatus(id, warppool.StatusDraining); err != nil {
-		logf("ipp_warp: SetStatus(%s, Draining): %v", id, err)
-	}
 }
 
 func (l *warpLease) Release() {

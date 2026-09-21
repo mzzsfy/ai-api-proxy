@@ -16,6 +16,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/convert"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
@@ -212,6 +213,7 @@ func pluginPath(upstreamName string, resolved pipeline.Resolved) string {
 	}
 	return strings.Join(parts, "->")
 }
+
 // firstTarget 首个启用目标名(无目标时为 -)
 func firstTarget(resolved pipeline.Resolved) string {
 	if len(resolved.Targets) == 0 {
@@ -310,21 +312,16 @@ func writeRaw(w http.ResponseWriter, status int, body []byte) {
 
 // fastPath 透传:body 原样,目标 secrets 注入 Authorization,不切换不刷新
 func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string) {
-	var target *upstream.Target
-	for i := range u.Targets {
-		if u.Targets[i].Enabled {
-			target = &u.Targets[i]
-			break
-		}
-	}
-	if target == nil {
+	// 目标选择与引擎同源:enabled 候选内加权随机(resolved.Targets 已滤 disabled)
+	if len(resolved.Targets) == 0 {
 		writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no enabled target")
 		return
 	}
-	exitTarget := g.Metrics.EnterTarget(u.Name, target.Name)
+	picked := g.Executor.PickTarget(resolved.Targets)
+	exitTarget := g.Metrics.EnterTarget(u.Name, picked.Name)
 	failed := false
 	defer func() { exitTarget(failed) }()
-	secrets, _ := g.Secrets.GetTargetSecrets(u.Name, target.Name)
+	secrets, _ := g.Secrets.GetTargetSecrets(u.Name, picked.Name)
 	key := secrets["api_key"]
 	if key == "" {
 		failed = true
@@ -333,7 +330,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 		writeError(w, g.OpenAI, http.StatusBadGateway, "target api_key missing")
 		return
 	}
-	trName := target.Transport
+	trName := picked.Transport
 	if trName == "" {
 		trName = pipeline.TransportRef
 	}
@@ -345,7 +342,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 		writeError(w, g.OpenAI, http.StatusBadGateway, "transport missing")
 		return
 	}
-	url := strings.TrimSuffix(target.BaseURL, "/") + "/v1/chat/completions"
+	url := strings.TrimSuffix(picked.BaseURL, "/") + "/v1/chat/completions"
 	preq := pipeline.Request{
 		URL:    url,
 		Method: "POST",
@@ -353,8 +350,9 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 			"Content-Type":  "application/json",
 			"Authorization": builtin.BearerPrefix + key,
 		},
-		Body:  body,  // 原样透传,不重序列化
-		Model: model, // ipp 供给方会话亲和素材(非 ipp 传输忽略)
+		Body:   body,  // 原样透传,不重序列化
+		Model:  model, // ipp 供给方会话亲和素材(非 ipp 传输忽略)
+		APIKey: key,   // 会话亲和素材之二
 	}
 	tresp, err := tr.RoundTrip(r.Context(), preq)
 	if err != nil {
@@ -362,8 +360,8 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 		g.Metrics.IncUpstream(u.Name, true)
 		if r.Context().Err() == nil {
 			g.Metrics.IncError()
-			// 供给方无可用出口:503(临时性,调用方可换 upstream 重试);其余上游不可达:502
-			if errors.Is(err, ipprovider.ErrNoExits) {
+			// 供给方无可用出口/节点并发上限(rep=1/2):503(临时性,调用方可换 upstream 重试);其余上游不可达:502
+			if errors.Is(err, ipprovider.ErrNoExits) || errors.Is(err, transport.ErrNoEgress503) {
 				writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no available egress")
 				return
 			}

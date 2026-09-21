@@ -3,7 +3,10 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoad_FileOverridesDefaults(t *testing.T) {
@@ -19,7 +22,6 @@ log_level: "debug"
 plugins_dir: "./p"
 transports:
   - name: relay
-    type: http_proxy
     url: "http://a:b@h:1"
 `
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
@@ -32,7 +34,7 @@ transports:
 	if cfg.Listen != ":9999" || cfg.DataDir != "/tmp/d" || len(cfg.APIKeys) != 2 {
 		t.Fatalf("scalar fields mismatch: %+v", cfg)
 	}
-	if len(cfg.Transports) != 1 || cfg.Transports[0].Name != "relay" || cfg.Transports[0].Type != "http_proxy" {
+	if len(cfg.Transports) != 1 || cfg.Transports[0].Name != "relay" || cfg.Transports[0].URL != "http://a:b@h:1" {
 		t.Fatalf("transports mismatch: %+v", cfg.Transports)
 	}
 }
@@ -87,12 +89,14 @@ func TestValidate_EmptyAPIKeysRefused(t *testing.T) {
 }
 
 func TestValidate_TransportRules(t *testing.T) {
-	// Given 传输实例缺名或缺 URL When Validate Then 拒绝
+	// Given 传输实例缺名或非法 URL/字段 When Validate Then 拒绝
 	base := &Config{APIKeys: []string{"k"}}
 	bad := []TransportCfg{
-		{Name: "", Type: "direct"},
-		{Name: "p", Type: "http_proxy", URL: ""},
-		{Name: "x", Type: "grpc", URL: "u"},
+		{Name: "", URL: "direct"},
+		{Name: "p", URL: ""},
+		{Name: "x", URL: "grpc://u"},                                    // 未知 scheme
+		{Name: "y", URL: "aap://h:1"},                                   // 缺 token
+		{Name: "z", URL: "aap://h:1?token=" + strings.Repeat("t", 256)}, // token 超长
 	}
 	for i, tc := range bad {
 		cfg := *base
@@ -101,4 +105,45 @@ func TestValidate_TransportRules(t *testing.T) {
 			t.Fatalf("case %d should fail: %+v", i, tc)
 		}
 	}
+}
+
+func TestValidate_TransportOptionsWhitelist(t *testing.T) {
+	// Given options 白名单规则 When Validate Then 仅 aap 允许 affinity_ttl
+	base := &Config{APIKeys: []string{"k"}}
+	good := []TransportCfg{
+		{Name: "a", URL: "aap://h:1?token=t", Options: yamlNode(t, map[string]any{"affinity_ttl": 3600})},
+		{Name: "b", URL: "direct"},
+	}
+	for i, tc := range good {
+		cfg := *base
+		cfg.Transports = []TransportCfg{tc}
+		if err := (&cfg).Validate(); err != nil {
+			t.Fatalf("case %d should pass: %v", i, err)
+		}
+	}
+	bad := []TransportCfg{
+		{Name: "c", URL: "aap://h:1?token=t", Options: yamlNode(t, map[string]any{"unknown": 1})},
+		{Name: "d", URL: "direct", Options: yamlNode(t, map[string]any{"x": 1})}, // 非 aap 有 options
+	}
+	for i, tc := range bad {
+		cfg := *base
+		cfg.Transports = []TransportCfg{tc}
+		if err := (&cfg).Validate(); err == nil {
+			t.Fatalf("bad case %d should fail", i)
+		}
+	}
+}
+
+// yamlNode 测试辅助:map → yaml.Node
+func yamlNode(t *testing.T, m map[string]any) yaml.Node {
+	t.Helper()
+	b, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n yaml.Node
+	if err := yaml.Unmarshal(b, &n); err != nil {
+		t.Fatal(err)
+	}
+	return *n.Content[0]
 }

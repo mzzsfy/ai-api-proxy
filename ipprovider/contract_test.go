@@ -67,8 +67,6 @@ type mockLease struct {
 	p        *mockProvider
 	caps     Capabilities
 	egress   string
-	reports  []string
-	reported bool
 	released bool
 	dials    int
 }
@@ -82,14 +80,6 @@ func (l *mockLease) Dial(ctx context.Context, network, addr string) (net.Conn, e
 }
 
 func (l *mockLease) EgressIP() string { return l.egress }
-
-func (l *mockLease) Report(result ReportResult, reason string) {
-	if l.reported {
-		return // 幂等:首次生效
-	}
-	l.reported = true
-	l.reports = append(l.reports, reason)
-}
 
 func (l *mockLease) Release() {
 	if l.released {
@@ -130,19 +120,6 @@ func TestLease_Release语义(t *testing.T) {
 	l.Release() // 幂等
 	if _, err := l.Dial(context.Background(), "tcp", "example.com:80"); !errors.Is(err, ErrLeaseReleased) {
 		t.Fatalf("want ErrLeaseReleased, got %v", err)
-	}
-}
-
-// 场景:Report 幂等 —— 首次生效,不同 reason 的二次调用被忽略
-func TestLease_Report幂等(t *testing.T) {
-	p := &mockProvider{}
-	l, _ := p.Acquire(context.Background(), Hint{})
-	ml := l.(*mockLease)
-	l.Report(ReportBad, ReasonTargetBlacklist)
-	l.Report(ReportBad, ReasonRateLimited) // 忽略
-	l.Report(ReportOk, "")                 // 忽略
-	if len(ml.reports) != 1 || ml.reports[0] != ReasonTargetBlacklist {
-		t.Fatalf("want [target_blacklist], got %v", ml.reports)
 	}
 }
 

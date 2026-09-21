@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,10 +25,14 @@ type Deps struct {
 	TestFunc func(upstreamID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
 	SeriesFunc func(minutes int) ([]map[string]any, error)
-	// TransportsFunc 命名传输实例清单(只读;名称+类型+URL)
+	// TransportsFunc 命名传输实例清单(只读;名称+URL)
 	TransportsFunc func() []map[string]any
 	// TransportTestFunc 单传输实例连通测试(发一次真实 HEAD;返回延迟与错误)
 	TransportTestFunc func(name string) (int64, string)
+	// TransportEvictFunc 失效命令(scope:"lease"|"egress";非法 scope/value 返回 errBadScope 语义错误)
+	TransportEvictFunc func(ctx context.Context, name, scope, value string) error
+	// KeysFunc 包级 keys 明文视图(按包名隔离)
+	KeysFunc func(pkg string) map[string]any
 }
 
 // Mux 构建管理 API 路由(挂在 /admin/api 前缀,已过会话中间件)
@@ -35,10 +41,12 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /admin/api/me", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"ok": true}) })
 	mux.HandleFunc("GET /admin/api/packages", d.listPackages)
 	mux.HandleFunc("POST /admin/api/packages", d.installPackage)
+	mux.HandleFunc("POST /admin/api/packages/inspect", d.inspectPackage)
 	mux.HandleFunc("POST /admin/api/packages/import-url", d.installPackageFromURL)
 	mux.HandleFunc("GET /admin/api/packages/{name}/export", d.exportPackage)
 	mux.HandleFunc("DELETE /admin/api/packages/{name}", d.deletePackage)
 	mux.HandleFunc("POST /admin/api/packages/{name}/enable", d.enablePackage)
+	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/code", d.updateCode)
 	mux.HandleFunc("GET /admin/api/packages/{name}/code", d.getPartCode)
 	mux.HandleFunc("GET /admin/api/upstreams", d.listUpstreams)
@@ -51,6 +59,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/transports", d.listTransports)
 	mux.HandleFunc("POST /admin/api/transports/{name}/test", d.testTransport)
+	mux.HandleFunc("POST /admin/api/transports/{name}/evict", d.evictTransport)
 	return mux
 }
 
@@ -70,9 +79,69 @@ func (d *Deps) listPackages(w http.ResponseWriter, r *http.Request) {
 			"name": n, "version": p.Manifest.Version, "revision": p.Revision,
 			"hasProtocol": p.HasProtocol(), "filters": filterNames,
 			"secretRefs": p.SecretRefsUnion(),
+			"protocol":   protocolName(p),
 		})
 	}
 	writeJSON(w, out)
+}
+
+// protocolName 主包声明的协议全名(无 protocol 部件为空串)
+func protocolName(p *plugin.Package) string {
+	if p.Manifest.Parts.Protocol == nil {
+		return ""
+	}
+	return p.Manifest.Parts.Protocol.Protocol
+}
+
+// inspectPackage 解析包摘要但不安装(octet-stream=字节;application/json {"url"}=服务端拉取)
+func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
+	var data []byte
+	switch ct := r.Header.Get("Content-Type"); {
+	case strings.HasPrefix(ct, "application/json"):
+		var req struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil || req.URL == "" {
+			httpError(w, http.StatusBadRequest, "url required")
+			return
+		}
+		fetched, err := fetchPackage(r, req.URL)
+		if err != nil {
+			httpError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		data = fetched
+	default:
+		b, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "read body")
+			return
+		}
+		data = b
+	}
+	summary, err := d.Packages.Inspect(data)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, summary)
+}
+
+// fetchPackage 从 http(s) URL 拉取 .aap 字节(仅 http(s),限 8MB)
+func fetchPackage(r *http.Request, url string) ([]byte, error) {
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return nil, fmt.Errorf("only http(s) url allowed")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 }
 
 func (d *Deps) installPackage(w http.ResponseWriter, r *http.Request) {
@@ -289,6 +358,15 @@ func (d *Deps) getPartCode(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(src)
 }
 
+// packageKeys 包级 keys 视图(明文;按包名隔离,属包私有数据)
+func (d *Deps) packageKeys(w http.ResponseWriter, r *http.Request) {
+	if d.KeysFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys unavailable")
+		return
+	}
+	writeJSON(w, d.KeysFunc(r.PathValue("name")))
+}
+
 func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {
 	// List 返回深拷贝且 Secrets 剥离(输出即脱敏)
 	writeJSON(w, d.Upstream.List())
@@ -426,6 +504,35 @@ func (d *Deps) testTransport(w http.ResponseWriter, r *http.Request) {
 		out["error"] = errMsg
 	}
 	writeJSON(w, out)
+}
+
+// ErrBadScope evict scope/value 非法(调用方返回此值映射 400)
+var ErrBadScope = errors.New("scope/value 非法")
+
+// evictTransport 失效命令:body {scope,value};非法 400,节点失败 502
+func (d *Deps) evictTransport(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if d.TransportEvictFunc == nil {
+		httpError(w, http.StatusNotImplemented, "transport evict not configured")
+		return
+	}
+	var body struct {
+		Scope string `json:"scope"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, "decode body: "+err.Error())
+		return
+	}
+	if err := d.TransportEvictFunc(r.Context(), name, body.Scope, body.Value); err != nil {
+		if errors.Is(err, ErrBadScope) {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // secretMask 凭据回读掩码

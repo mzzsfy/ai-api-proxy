@@ -23,9 +23,8 @@ func yamlUnmarshal(node *yaml.Node, target any) error {
 // TransportCfg 命名传输实例定义(部署资产,仅 yaml 可表达嵌套)
 type TransportCfg struct {
 	Name string `yaml:"name"`
-	Type string `yaml:"type"` // direct | http_proxy | socks5 | ipp_warp | ipp_clash | ipp_remote
-	URL  string `yaml:"url"`
-	// Options ipp_* 供给方私有配置(原样展开传给供给方;其他类型忽略)
+	URL  string `yaml:"url"` // scheme 判型:direct(字面值)|socks5://|http://|https://|aap://|ipp+<kind>://
+	// Options 供给方私有配置(仅 aap:affinity_ttl;其余 scheme 必须为空)
 	Options yaml.Node `yaml:"options"`
 }
 
@@ -163,19 +162,71 @@ func (c *Config) Validate() error {
 		if t.Name == "" {
 			return fmt.Errorf("transports[%d]: name required", i)
 		}
-		switch t.Type {
-		case "direct":
-		case "http_proxy", "socks5":
-			if t.URL == "" {
-				return fmt.Errorf("transports[%s]: url required", t.Name)
+		if err := validateTransportURL(t.Name, t.URL); err != nil {
+			return err
+		}
+		if err := validateTransportOptions(t.Name, t.URL, t.Options); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTransportURL scheme 判型校验
+func validateTransportURL(name, raw string) error {
+	if raw == "direct" { // 精确字节匹配,大小写敏感
+		return nil
+	}
+	scheme, rest, found := strings.Cut(raw, "://")
+	if !found || rest == "" {
+		return fmt.Errorf("transports[%s]: url 须为 direct 或带 scheme 的完整地址, got %q", name, raw)
+	}
+	switch scheme {
+	case "http", "https", "socks5", "aap":
+		if scheme == "aap" {
+			if !strings.Contains(raw, "token=") {
+				return fmt.Errorf("transports[%s]: aap url 须含 token", name)
 			}
-		default:
-			if !strings.HasPrefix(t.Type, "ipp_") {
-				return fmt.Errorf("transports[%s]: unknown type %q", t.Name, t.Type)
+			if idx := strings.Index(raw, "token="); idx >= 0 {
+				token := raw[idx+len("token="):]
+				if end := strings.IndexByte(token, '&'); end >= 0 {
+					token = token[:end]
+				}
+				if token == "" || len(token) > 255 {
+					return fmt.Errorf("transports[%s]: aap token 长度须 1..255", name)
+				}
 			}
-			if !ipproviderKindRegistered(t.Type) {
-				return fmt.Errorf("transports[%s]: provider type %q not registered(缺构建标签或未注册)", t.Name, t.Type)
-			}
+		}
+		return nil
+	default:
+		if !strings.HasPrefix(scheme, "ipp+") || len(scheme) <= len("ipp+") {
+			return fmt.Errorf("transports[%s]: unknown url scheme %q", name, scheme)
+		}
+		if !ipproviderKindRegistered("ipp_" + scheme[len("ipp+"):]) {
+			return fmt.Errorf("transports[%s]: provider %q not registered(缺构建标签或未注册)", name, scheme)
+		}
+		return nil
+	}
+}
+
+// validateTransportOptions options 白名单:仅 aap 允许 affinity_ttl,其余必须为空
+func validateTransportOptions(name, raw string, node yaml.Node) error {
+	if node.Kind == 0 {
+		return nil
+	}
+	var opts map[string]any
+	if err := node.Decode(&opts); err != nil {
+		return fmt.Errorf("transports[%s].options: %w", name, err)
+	}
+	if !strings.HasPrefix(raw, "aap://") {
+		if len(opts) > 0 {
+			return fmt.Errorf("transports[%s]: 仅 aap 传输支持 options", name)
+		}
+		return nil
+	}
+	for k := range opts {
+		if k != "affinity_ttl" {
+			return fmt.Errorf("transports[%s]: unknown aap option %q", name, k)
 		}
 	}
 	return nil

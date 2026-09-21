@@ -28,6 +28,11 @@ type Registry struct {
 	disabled map[string]bool
 	revs     map[string]int64
 	builtins map[string]BuiltinFactory
+	keys     *KeysStore
+	// OnLoad 包加载完成回调(导入/升级/启用;宿主注入执行 hooks.onLoad;previous=升级前 keys)
+	OnLoad func(pkg *Package, previous map[string]any)
+	// OnChange 任务声明变化回调(安装/启停/删除;宿主注入刷新调度)
+	OnChange func()
 }
 
 // NewRegistry 构造
@@ -38,6 +43,7 @@ func NewRegistry(db *sql.DB) *Registry {
 		disabled: map[string]bool{},
 		revs:     map[string]int64{},
 		builtins: map[string]BuiltinFactory{},
+		keys:     NewKeysStore(db),
 	}
 }
 
@@ -103,6 +109,14 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	prevRev := int64(0)
 	if exists {
 		prevRev = old.Revision
+		// 升级快照:旧 current 移入 previous,current 原样保留(不丢弃用户既有 key)
+		if err := r.keys.UpgradeSnapshot(pkg.Manifest.Name); err != nil {
+			return fmt.Errorf("upgrade keys snapshot: %w", err)
+		}
+	}
+	var previous map[string]any
+	if exists {
+		previous, _ = r.keys.PreviousAll(pkg.Manifest.Name)
 	}
 	pkg.Revision = prevRev + 1
 	manifestRaw, _ := json.Marshal(pkg.Manifest)
@@ -118,7 +132,61 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	r.pkgs[pkg.Manifest.Name] = pkg
 	r.revs[pkg.Manifest.Name] = pkg.Revision
 	delete(r.disabled, pkg.Manifest.Name)
+	if r.OnLoad != nil {
+		go r.OnLoad(pkg, previous)
+	}
+	if r.OnChange != nil {
+		go r.OnChange()
+	}
 	return nil
+}
+
+// Inspect 解析并校验包字节但不安装(导入摘要确认;返回 manifest 摘要)
+func (r *Registry) Inspect(data []byte) (map[string]any, error) {
+	pkg, err := ParseAAP(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.validateParts(pkg); err != nil {
+		return nil, err
+	}
+	m := pkg.Manifest
+	out := map[string]any{
+		"name":       m.Name,
+		"version":    m.Version,
+		"filters":    filterNames(m),
+		"secretRefs": pkg.SecretRefsUnion(),
+	}
+	if p := m.Parts.Protocol; p != nil {
+		out["protocol"] = p.Protocol
+		out["form"] = p.Form
+		out["features"] = p.Features
+	}
+	if h := m.Parts.Hooks; h != nil {
+		tasks := make([]string, 0, len(h.Tasks))
+		for _, tk := range h.Tasks {
+			tasks = append(tasks, tk.Name)
+		}
+		out["hooks"] = map[string]any{"entry": h.Entry, "tasks": tasks}
+	}
+	r.mu.RLock()
+	if old, ok := r.pkgs[m.Name]; ok {
+		out["exists"] = true
+		out["installedVersion"] = old.Manifest.Version
+	} else {
+		out["exists"] = false
+	}
+	r.mu.RUnlock()
+	return out, nil
+}
+
+// filterNames 包内 filter 部件名列表
+func filterNames(m *Manifest) []string {
+	names := make([]string, 0, len(m.Parts.Filters))
+	for _, fp := range m.Parts.Filters {
+		names = append(names, fp.Name)
+	}
+	return names
 }
 
 // validateParts 逐部件实例化校验(结构/绑定;不查实例配置 schema——配置归上游,漂移按请求期 502)
@@ -127,12 +195,18 @@ func (r *Registry) validateParts(pkg *Package) error {
 		return nil
 	}
 	if p := pkg.Manifest.Parts.Protocol; p != nil {
-		if _, err := buildProtocol(pkg, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
 	for _, fp := range pkg.Manifest.Parts.Filters {
-		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, false); err != nil {
+			return err
+		}
+	}
+	// hooks 部件:安装期编译校验(entry 存在已在 Validate)
+	if h := pkg.Manifest.Parts.Hooks; h != nil {
+		if _, err := Compile(pkg.Files[h.Entry], h.Entry); err != nil {
 			return err
 		}
 	}
@@ -153,6 +227,13 @@ func (r *Registry) Enable(ctx context.Context, name string, on bool) error {
 		delete(r.disabled, name)
 	} else {
 		r.disabled[name] = true
+	}
+	if on && r.OnLoad != nil {
+		pkg := r.pkgs[name]
+		go r.OnLoad(pkg, nil)
+	}
+	if r.OnChange != nil {
+		go r.OnChange()
 	}
 	return nil
 }
@@ -232,7 +313,19 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	delete(r.pkgs, name)
 	delete(r.revs, name)
 	delete(r.disabled, name)
+	r.keys.Delete(name)
+	if r.OnChange != nil {
+		go r.OnChange()
+	}
 	return nil
+}
+
+// Keys 包级 key 存储(util.key 读取与升级快照共用)
+func (r *Registry) Keys() *KeysStore { return r.keys }
+
+// KeyReader util.key 读取闭包(实时读当前值)
+func (r *Registry) KeyReader(pkgName string) func(name string) (any, bool) {
+	return func(name string) (any, bool) { return r.keys.Get(pkgName, name) }
 }
 
 // partEntry 按 kind/名定位部件 entry

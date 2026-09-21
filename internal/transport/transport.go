@@ -3,16 +3,15 @@ package transport
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,36 +26,22 @@ import (
 type Manager struct {
 	instances map[string]pipeline.Transport
 	defs      []TransportDef
-	// providers ipp_* 类型实例(生命周期随 Manager;非 ipp 传输无条目)
+	// providers 供给方实例(生命周期随 Manager)
 	mu        sync.Mutex
 	providers map[string]ipprovider.Provider
-	// targetStatusCodes 状态码→裁决原因映射(空=默认 403/429)
-	targetStatusCodes map[int]string
-}
-
-// defaultTargetStatusCodes 裁决映射默认值(设计定案:403→blacklist,429→限速)
-func defaultTargetStatusCodes() map[int]string {
-	return map[int]string{
-		403: ipprovider.ReasonTargetBlacklist,
-		429: ipprovider.ReasonRateLimited,
-	}
 }
 
 // NewManager 按配置构建;每实例一个 http.Client(连接池实例内共享,禁 Client.Timeout)
 func NewManager(defs []TransportDef) (*Manager, error) {
-	return NewManagerWithCfg(defs, defaultTargetStatusCodes(), "")
+	return NewManagerWithCfg(defs, "")
 }
 
-// NewManagerWithCfg 完整装配:ipp 供给方注册表 + 裁决映射 + state 根目录
-func NewManagerWithCfg(defs []TransportDef, targetStatusCodes map[int]string, stateRoot string) (*Manager, error) {
-	if len(targetStatusCodes) == 0 {
-		targetStatusCodes = defaultTargetStatusCodes()
-	}
+// NewManagerWithCfg 完整装配:state 根目录
+func NewManagerWithCfg(defs []TransportDef, stateRoot string) (*Manager, error) {
 	m := &Manager{
-		instances:         map[string]pipeline.Transport{},
-		defs:              append([]TransportDef(nil), defs...),
-		providers:         map[string]ipprovider.Provider{},
-		targetStatusCodes: targetStatusCodes,
+		instances: map[string]pipeline.Transport{},
+		defs:      append([]TransportDef(nil), defs...),
+		providers: map[string]ipprovider.Provider{},
 	}
 	for _, d := range defs {
 		tr, prov, err := m.build(d, stateRoot)
@@ -76,12 +61,41 @@ func NewManagerWithCfg(defs []TransportDef, targetStatusCodes map[int]string, st
 	return m, nil
 }
 
-// Provider 传输实例对应的供给方(非 ipp 传输返回 nil)
+// Provider 传输实例对应的供给方(非供给方传输返回 nil)
 func (m *Manager) Provider(name string) (ipprovider.Provider, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.providers[name]
 	return p, ok
+}
+
+// SupplierKind 传输实例是否供给方类(ipp+/aap;true=亲和素材缺失会退化为恒定绑定)
+func (m *Manager) SupplierKind(name string) (string, bool) {
+	for _, d := range m.defs {
+		if d.Name == name {
+			return d.URL, isSupplierURL(d.URL)
+		}
+	}
+	return "", false
+}
+
+// EvictScope 管理面失效 scope(协议 §EVICT)
+const (
+	EvictScopeLease  = 1
+	EvictScopeEgress = 2
+)
+
+// Evict 对传输实例的供给方发失效命令;非供给方传输返回 false(映射 400)
+func (m *Manager) Evict(ctx context.Context, name string, scope uint8, value []byte) (bool, error) {
+	p, ok := m.Provider(name)
+	if !ok {
+		return false, nil
+	}
+	ev, ok := p.(ipprovider.Evictor)
+	if !ok {
+		return false, nil
+	}
+	return true, ev.Evict(ctx, scope, value)
 }
 
 // Close 级联关闭全部供给方(幂等;错误记日志不中断)
@@ -133,7 +147,8 @@ func (m *Manager) Test(name, probeURL string, timeout time.Duration) (int64, err
 	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 	start := time.Now()
-	tresp, err := tr.RoundTrip(ctx, pipeline.Request{URL: probeURL, Method: http.MethodHead})
+	// probe 会话亲和素材独立命名空间,不污染业务绑定
+	tresp, err := tr.RoundTrip(ctx, pipeline.Request{URL: probeURL, Method: http.MethodHead, APIKey: "aap-probe:" + name})
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return latency, err
@@ -146,18 +161,19 @@ func (m *Manager) Test(name, probeURL string, timeout time.Duration) (int64, err
 
 // TransportDef 实例定义(server.Config.Transports 展开形态)
 type TransportDef struct {
-	Name    string
-	Type    string
-	URL     string
-	Options map[string]any // ipp_* 私有配置(供给方自行解析)
+	Name string
+	// URL 判型:scheme 推导——direct(字面值)/socks5://http://https://aap://ipp+<kind>://
+	URL string
+	// Options 供给方私有配置(仅 aap:affinity_ttl;其余 scheme 必须为空)
+	Options map[string]any
 }
 
-// build 构造单实例;ipp_* 类型同时返回供给方
+// build 构造单实例;供给方类 scheme 同时返回 Provider
 func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, ipprovider.Provider, error) {
-	switch d.Type {
-	case "direct":
+	switch {
+	case d.URL == "direct":
 		return &httpTransport{name: d.Name, client: &http.Client{}}, nil, nil
-	case "http_proxy":
+	case strings.HasPrefix(d.URL, "http://"), strings.HasPrefix(d.URL, "https://"):
 		u, err := url.Parse(d.URL)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse proxy url: %w", err)
@@ -166,7 +182,7 @@ func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, i
 			Transport: &http.Transport{Proxy: http.ProxyURL(u)},
 		}
 		return &httpTransport{name: d.Name, client: client}, nil, nil
-	case "socks5":
+	case strings.HasPrefix(d.URL, "socks5://"):
 		base, err := url.Parse(d.URL)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse socks url: %w", err)
@@ -188,9 +204,8 @@ func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, i
 			Transport: &http.Transport{DialContext: cd.DialContext},
 		}
 		return &httpTransport{name: d.Name, client: client}, nil, nil
-	}
-	if isIPPType(d.Type) {
-		prov, err := ipprovider.Create(d.Type, ipprovider.ProviderCfg{
+	case strings.HasPrefix(d.URL, "aap://"):
+		prov, err := ipprovider.Create("aap", ipprovider.ProviderCfg{
 			Name:     d.Name,
 			URL:      d.URL,
 			Options:  d.Options,
@@ -199,16 +214,34 @@ func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, i
 		if err != nil {
 			return nil, nil, err
 		}
-		tr := &ipTransport{name: d.Name, provider: prov, codes: m.targetStatusCodes}
-		return tr, prov, nil
+		return &ipTransport{name: d.Name, provider: prov}, prov, nil
 	}
-	return nil, nil, fmt.Errorf("unknown transport type %q", d.Type)
+	if kind, ok := strings.CutPrefix(d.URL, "ipp+"); ok {
+		kindName, rest, found := strings.Cut(kind, "://")
+		if !found || kindName == "" || rest == "" {
+			return nil, nil, fmt.Errorf("ipp url 须为 ipp+<kind>://<参数>")
+		}
+		prov, err := ipprovider.Create("ipp_"+kindName, ipprovider.ProviderCfg{
+			Name:     d.Name,
+			URL:      rest,
+			Options:  d.Options,
+			StateDir: joinStateDir(stateRoot, d.Name),
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return &ipTransport{name: d.Name, provider: prov}, prov, nil
+	}
+	return nil, nil, fmt.Errorf("unknown transport url %q", d.URL)
 }
 
-// isIPPType 是否 IP 供给方类型(ipp_ 前缀)
-func isIPPType(t string) bool {
-	const prefix = "ipp_"
-	return len(t) > len(prefix) && t[:len(prefix)] == prefix
+// isSupplierURL 供给方类 url 判型(ipp+<kind>:// 或 aap://)
+func isSupplierURL(raw string) bool {
+	if strings.HasPrefix(raw, "aap://") {
+		return true
+	}
+	kind, ok := strings.CutPrefix(raw, "ipp+")
+	return ok && strings.Contains(kind, "://")
 }
 
 // joinStateDir 供给方状态目录(data 根下按传输名隔离)
@@ -219,10 +252,12 @@ func joinStateDir(root, name string) string {
 	return root + "/" + name
 }
 
-// sessionKey 会话亲和键:sha256hex(apiKey + NUL + model) 前 16 字符(设计定案,\x00 分隔防拼接碰撞)
+// sessionKey 会话亲和键:sha256(apiKey + NUL + model) 前 16 字节原始值(设计定案;\x00 分隔防拼接碰撞;model 为空退化为单素材形态);诊断渲染用 ipprovider.SessionHex
 func sessionKey(apiKey, model string) string {
-	h := sha256.Sum256([]byte(apiKey + "\x00" + model))
-	return hex.EncodeToString(h[:])[:16]
+	if model == "" {
+		return ipprovider.SessionKey(apiKey)
+	}
+	return ipprovider.SessionKey(apiKey, model)
 }
 
 // httpTransport 标准库实现变体
@@ -253,50 +288,70 @@ func (t *httpTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pi
 	return consumeResponse(hresp), nil
 }
 
-// ipTransport IP 供给方传输(设计 §5):每请求 Acquire → lease 拨号 → 裁决;
-// 恰一次边界:连接建立失败(零字节触达)换出口重试预算 1;请求已发出后终局透传
+// ipTransport IP 供给方传输:每请求 Acquire → lease 拨号;失效无错误驱动
+// (403/429 直接透传);恰一次边界:连接建立失败(零字节触达)换出口重试预算 1,
+// 请求已发出后终局透传
 type ipTransport struct {
 	name     string
 	provider ipprovider.Provider
-	codes    map[int]string
 }
 
 func (t *ipTransport) Name() string { return t.name }
 
 // RoundTrip 供给方路径
-// 恰一次边界(设计 §1):仅"连接未建立(零字节触达)"的失败可换出口重试,预算 1;
+// 恰一次边界:仅"连接未建立(零字节触达)"的失败可换出口重试,预算 1;
 // 请求已写出(TLS 握手启动/请求写出)后任何错误终局透传。
+// aap rep=1 走 exclude 换出口(RepError 驱动);ipp_* 走 CanRotateIP 判定;
+// rep 终局映射:rep=1/2 → errNoEgress503,rep=3 → 502(gateway 转译)。
 func (t *ipTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pipeline.TransportResponse, error) {
-	key, model := req.Headers["X-IPP-Session"], req.Model
-	delete(req.Headers, "X-IPP-Session") // gateway 旧注入路径清退;素材以 req.Model 为准
+	hint := ipprovider.Hint{SessionKey: sessionKey(req.APIKey, req.Model)}
 	retryBudget := 1
+	var excludes []string
 	for {
-		lease, err := t.provider.Acquire(ctx, ipprovider.Hint{SessionKey: sessionKey(key, model)})
+		lease, err := t.provider.Acquire(ctx, hint)
 		if err != nil {
 			if ctx.Err() != nil {
 				return pipeline.TransportResponse{}, fmt.Errorf("acquire lease: %w", ctx.Err())
 			}
 			return pipeline.TransportResponse{}, fmt.Errorf("acquire lease: %w", err)
 		}
+		if ex, ok := lease.(ipprovider.Excluder); ok && len(excludes) > 0 {
+			lease = ex.WithExclude(excludes...)
+		}
 		// 契约:Release 幂等;defer 保证 panic/早退路径租约必归还
 		defer lease.Release()
 		resp, dialErr, unwritten := t.via(ctx, lease, req)
 		if dialErr != nil {
-			lease.Report(ipprovider.ReportBad, ipprovider.ReasonConnectFail)
+			var repErr *ipprovider.RepError
+			if errors.As(dialErr, &repErr) && unwritten && retryBudget > 0 && repErr.Rep == ipprovider.AapRepRetry {
+				retryBudget--
+				if id := repErr.LeaseID; !ipprovider.IsZeroLeaseID(id) {
+					excludes = append(excludes, id)
+				}
+				continue // rep=1:请求未写出,换出口重试
+			}
+			if errors.As(dialErr, &repErr) {
+				return pipeline.TransportResponse{}, translateRep(repErr) // aap 非 rep=1 终局
+			}
 			if unwritten && retryBudget > 0 && lease.Capabilities().CanRotateIP {
 				retryBudget--
-				continue // 零字节触达,换出口重试
+				continue // ipp_* 零字节触达,换出口重试
 			}
 			return pipeline.TransportResponse{}, dialErr
 		}
-		// 请求已发出:终局透传;状态码命中映射裁决出口;2xx 清供给方既有 Bad 标记
-		if reason, hit := t.codes[resp.Status]; hit {
-			lease.Report(ipprovider.ReportBad, reason)
-		} else if resp.Status >= 200 && resp.Status < 300 {
-			lease.Report(ipprovider.ReportOk, "")
-		}
 		return resp, nil
 	}
+}
+
+// ErrNoEgress503 rep=1/2 终局(出口不可用/节点并发上限;临时性,gateway 映射 503)
+var ErrNoEgress503 = errors.New("no available egress")
+
+// translateRep RepError → host 状态映射(rep=1/2→503 通道;rep=3→502)
+func translateRep(repErr *ipprovider.RepError) error {
+	if repErr.Rep == ipprovider.AapRepRetry || repErr.Rep == ipprovider.AapRepBusy {
+		return fmt.Errorf("%w: aap rep=%d", ErrNoEgress503, repErr.Rep)
+	}
+	return fmt.Errorf("aap node rep=%d", repErr.Rep)
 }
 
 // via 经 lease 建连执行请求(Transport 不设 Proxy 字段——隧道语义在 Lease.Dial 内,设计 R1 定案)。
@@ -339,5 +394,3 @@ func (t *ipTransport) via(ctx context.Context, lease ipprovider.Lease, req pipel
 	client.CloseIdleConnections()
 	return consumeResponse(hresp), nil, false
 }
-
-var _ = net.Dialer{} // 保持 net 引用(dial 语义经 lease.Dial;直接依赖不漂移)

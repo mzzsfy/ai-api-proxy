@@ -557,6 +557,7 @@ func (r *Registry) Resolve(u *Upstream) (pipeline.Resolved, func(), error) {
 			BaseURL:    t.BaseURL,
 			Transport:  t.Transport,
 			SecretsRef: u.Name + "/" + t.Name,
+			Weight:     t.Weight,
 		})
 	}
 	return out, release, nil
@@ -626,7 +627,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 				continue
 			}
-			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package))
+			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package), r.pkgs.KeyReader(ex.Package))
 			if err != nil {
 				return nil, err
 			}
@@ -638,7 +639,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 		if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 			continue
 		}
-		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package))
+		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package))
 		if err != nil {
 			return nil, err
 		}
@@ -656,7 +657,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			return nil, err
 		}
 	} else {
-		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package))
+		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package))
 		if err != nil {
 			return nil, err
 		}

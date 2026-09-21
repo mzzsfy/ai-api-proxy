@@ -40,8 +40,10 @@ type HostDeps struct {
 	TargetSecrets func(target, key string) (string, bool)
 	// TargetSecretValues 当前 target 全量凭据值(inspect/log 脱敏用;可空)
 	TargetSecretValues func(target string) map[string]string
-	Storage            StorageKV
-	Log                func(level, msg string)
+	// PackageKey 包级 key 只读(实时;hooks 任务写入;可空=util.key 报错)
+	PackageKey func(name string) (any, bool)
+	Storage    StorageKV
+	Log        func(level, msg string)
 }
 
 // currentTarget 当前 target 名
@@ -183,6 +185,17 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		v, ok := deps.TargetSecrets(deps.currentTarget(), ref)
 		if !ok {
 			return "", fmt.Errorf("secret %q missing in target secrets (package %s)", ref, deps.PackageName)
+		}
+		return v, nil
+	})
+	// key:包级 key 只读出口(hooks 任务写入)
+	_ = util.Set("key", func(name string) (any, error) {
+		if deps.PackageKey == nil {
+			return nil, fmt.Errorf("key %q: no keys context (package %s)", name, deps.PackageName)
+		}
+		v, ok := deps.PackageKey(name)
+		if !ok {
+			return nil, nil
 		}
 		return v, nil
 	})

@@ -56,7 +56,7 @@ func loadJSPackage(t *testing.T) pipeline.Protocol {
 		return "", false
 	}
 	secretValues := map[string]map[string]string{"t1": {"api_key": goldenKey}}
-	p, err := plugin.NewProtocol(pkg, nil, secrets, func(string) map[string]string { return secretValues["t1"] }, nil)
+	p, err := plugin.NewProtocol(pkg, nil, secrets, func(string) map[string]string { return secretValues["t1"] }, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

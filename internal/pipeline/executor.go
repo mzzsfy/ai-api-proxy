@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
@@ -29,6 +30,8 @@ type Executor struct {
 	Transports func(name string) (Transport, bool)
 	// OnTargetExit 目标尝试结束回调(failed=非 2xx/3xx 或内部错误;metrics 用,可空)
 	OnTargetExit func(upstream, target string, failed bool)
+	// Rand 随机源注入(目标加权随机选择;nil = 全局 rand,并发安全)
+	Rand *rand.Rand
 }
 
 // Run 执行模型:①修改链 ②单目标直发 ③响应映射。entryReq = 入口协议请求体(声明协议与之恒等)
@@ -48,11 +51,11 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, e
 			entry = out
 		}
 	}
-	// ② 单目标:首个目标(Routing 多目标次序留给未来策略;失败不切换)
+	// ② 单目标:enabled 候选内加权随机(Routing 多目标权重分布;失败不切换)
 	if len(u.Targets) == 0 {
 		return nil, &BuildError{Err: errors.New("no enabled targets")}
 	}
-	target := u.Targets[0]
+	target := e.pickTarget(u.Targets)
 	pctx.Target = target
 	resp, req, failed, err := e.tryTarget(ctx, pctx, u, target, entry)
 	if e.OnTargetExit != nil {
@@ -66,6 +69,46 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, e
 		return terminalResponse(pctx, u, resp.Status, resp.Body), nil
 	}
 	return e.mapResponse(pctx, u, req.Stream, resp)
+}
+
+// PickTarget 目标加权随机选择导出入口(快速路径与引擎同源;weight ≤0 视为 1)
+func (e *Executor) PickTarget(targets []Target) Target {
+	return e.pickTarget(targets)
+}
+
+// pickTarget 目标加权随机选择(weight ≤0 视为 1)
+func (e *Executor) pickTarget(targets []Target) Target {
+	rnd := func(total int) int {
+		if e.Rand != nil {
+			return e.Rand.Intn(total)
+		}
+		return rand.Intn(total)
+	}
+	return weightedPick(targets, rnd)
+}
+
+// weightedPick 按权重区间选择;rnd 入参=总权重,返回 [0,total)
+func weightedPick(targets []Target, rnd func(int) int) Target {
+	total := 0
+	for _, t := range targets {
+		total += normalizeWeight(t)
+	}
+	x := rnd(total)
+	for _, t := range targets {
+		x -= normalizeWeight(t)
+		if x < 0 {
+			return t
+		}
+	}
+	return targets[len(targets)-1]
+}
+
+// normalizeWeight 非正权重归一为 1(缺省均匀参与)
+func normalizeWeight(t Target) int {
+	if t.Weight <= 0 {
+		return 1
+	}
+	return t.Weight
 }
 
 // tryTarget 单次请求:BuildRequest → RoundTrip;无重试语义

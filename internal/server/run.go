@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,9 +27,11 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/scheduler"
 	"github.com/mzzsfy/ai-api-proxy/internal/store"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
+	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
 // pluginSrc 插件来源(裸 .aap 或含 manifest.json 的包目录)
@@ -130,6 +134,7 @@ type App struct {
 	Registry  *upstream.Registry
 	Mux       *http.ServeMux
 	trMgr     *transport.Manager
+	Scheduler *scheduler.Scheduler
 }
 
 // transportNames 传输实例名清单(稳定序)
@@ -159,9 +164,9 @@ func Build(cfg *Config) (*App, error) {
 				return nil, fmt.Errorf("transports[%s].options: %w", t.Name, err)
 			}
 		}
-		defs = append(defs, transport.TransportDef{Name: t.Name, Type: t.Type, URL: t.URL, Options: opts})
+		defs = append(defs, transport.TransportDef{Name: t.Name, URL: t.URL, Options: opts})
 	}
-	trMgr, err := transport.NewManagerWithCfg(defs, nil, cfg.DataDir+"/ipp")
+	trMgr, err := transport.NewManagerWithCfg(defs, cfg.DataDir+"/ipp")
 	if err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("transports: %w", err)
@@ -230,6 +235,7 @@ func Build(cfg *Config) (*App, error) {
 		Upstream: reg,
 		Metrics:  recorder,
 		Secrets:  secrets,
+		KeysFunc: func(pkg string) map[string]any { return pkgs.Keys().View(pkg) },
 	}
 	mux := http.NewServeMux()
 	// 反代入口(鉴权 + panic recover)
@@ -282,12 +288,12 @@ func Build(cfg *Config) (*App, error) {
 		}
 		return out, rows.Err()
 	}
-	// 传输实例:只读清单 + 连通测试(管理台手动"测试连通";默认 probe=gstatic 204)
+	// 传输实例:只读清单 + 连通测试 + 失效命令(管理台手动;默认 probe=gstatic 204)
 	adminDeps.TransportsFunc = func() []map[string]any {
 		defs := trMgr.Defs()
 		out := make([]map[string]any, 0, len(defs))
 		for _, d := range defs {
-			out = append(out, map[string]any{"name": d.Name, "type": d.Type, "url": d.URL})
+			out = append(out, map[string]any{"name": d.Name, "url": ipprovider.SanitizeURL(d.URL)})
 		}
 		return out
 	}
@@ -297,6 +303,39 @@ func Build(cfg *Config) (*App, error) {
 			return latency, err.Error()
 		}
 		return latency, ""
+	}
+	adminDeps.TransportEvictFunc = func(ctx context.Context, name, scope, value string) error {
+		var scopeID uint8
+		var payload []byte
+		switch scope {
+		case "lease": // lease_id 32 字符 hex → 16B 原始字节;全零拒绝
+			id, err := hex.DecodeString(value)
+			if err != nil || len(id) != aapLeaseIDHexLen {
+				return admin.ErrBadScope
+			}
+			if bytes.Equal(id, make([]byte, aapLeaseIDHexLen)) {
+				return admin.ErrBadScope
+			}
+			scopeID, payload = transport.EvictScopeLease, id
+		case "egress": // IP 字符串 → SOCKS5 地址编码
+			ip := net.ParseIP(value)
+			if ip == nil {
+				return admin.ErrBadScope
+			}
+			scopeID = transport.EvictScopeEgress
+			if v4 := ip.To4(); v4 != nil {
+				payload = append([]byte{1}, v4...)
+			} else {
+				payload = append([]byte{4}, ip.To16()...)
+			}
+		default:
+			return admin.ErrBadScope
+		}
+		found, err := trMgr.Evict(ctx, name, scopeID, payload)
+		if !found {
+			return admin.ErrBadScope // 非 aap 传输
+		}
+		return err
 	}
 	// 健康检查
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -309,8 +348,29 @@ func Build(cfg *Config) (*App, error) {
 	}, nil
 }
 
+// hooks 启动:装配回调、启动调度器、对已加载包补发 onLoad(启动恢复路径)
+func (a *App) startHooks() {
+	a.Scheduler = wireHooks(a)
+	pkgs := a.AdminDeps.Packages
+	for _, name := range pkgs.ListPackages() {
+		if !pkgs.IsEnabled(name) {
+			continue
+		}
+		pkg, err := pkgs.GetPackage(name)
+		if err != nil || pkg.Manifest.Parts.Hooks == nil {
+			continue
+		}
+		previous, _ := pkgs.Keys().PreviousAll(name)
+		pkgs.OnLoad(pkg, previous)
+	}
+}
+
 // Close 释放资源(传输供给方级联在先——实例拨号依赖存储后端无关,先关无序约束)
 func (a *App) Close() error {
+	if a.Scheduler != nil {
+		a.Scheduler.Stop()
+		a.Scheduler.Wait()
+	}
 	a.trMgr.Close()
 	return a.St.Close()
 }
@@ -359,6 +419,9 @@ var (
 	transportProbeTimeout = 10 * time.Second
 )
 
+// aapLeaseIDHexLen aap lease_id hex 形态长度(128bit → 32 字符)
+const aapLeaseIDHexLen = 16
+
 // utilNowRFC3339 当前时间(测试确定性无关,直接格式化)
 func utilNowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -405,6 +468,7 @@ func Run(cfg *Config) error {
 		return err
 	}
 	defer func() { _ = app.Close() }()
+	app.startHooks()
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           app.Mux,

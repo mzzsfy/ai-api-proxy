@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"sync"
-	"time"
 )
 
 // bytesReader JSON 桥解码辅助
@@ -30,32 +28,4 @@ func decodeOptions(opts map[string]any, target any) error {
 		return fmt.Errorf("decode options: %w", err)
 	}
 	return nil
-}
-
-// leaseMark 供给方健康标记(kv 落地形态;clash/remote 用)
-type leaseMark struct {
-	Reason string    `json:"reason"`
-	At     time.Time `json:"at"`
-	OK     bool      `json:"ok"`
-}
-
-// markStore 进程内标记存储(生命周期同 Manager;server 可经 Stats 出口读)
-type markStore struct {
-	mu    sync.Mutex
-	marks map[string]leaseMark
-}
-
-func newMarkStore() *markStore { return &markStore{marks: map[string]leaseMark{}} }
-
-func (m *markStore) set(name string, mark leaseMark) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.marks[name] = mark
-}
-
-func (m *markStore) get(name string) (leaseMark, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	mark, ok := m.marks[name]
-	return mark, ok
 }

@@ -12,7 +12,7 @@ import (
 )
 
 // 真实 warp 端到端(env 门控:IPPROVIDER_WARP_E2E=1 才跑;CI 无外网/无凭据 skip)
-// 验收:Acquire→Dial 真实地址→EgressIP 非空→Report(Bad) → 实例 Draining
+// 验收:Acquire→Dial 真实地址→EgressIP 非空
 
 func warpE2EEnabled(t *testing.T) {
 	t.Helper()
@@ -68,15 +68,5 @@ func TestWarpE2E_全链路(t *testing.T) {
 			t.Fatalf("egress probe: %v", err)
 		}
 		_ = resp.Body.Close()
-	}
-	// Report(Bad) → 实例 Draining(重播换身份)
-	before := p.Stats()
-	lease.Report(ReportBad, ReasonTargetBlacklist)
-	deadline = time.Now().Add(30 * time.Second)
-	for p.Stats().Draining == before.Draining {
-		if time.Now().After(deadline) {
-			t.Fatalf("instance not draining after bad report: %+v", p.Stats())
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }

@@ -157,7 +157,7 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	cfg := &Config{
 		Listen: ":0", DataDir: t.TempDir(),
 		APIKeys: []string{"sk-test"}, AdminUser: "admin",
-		Transports: []TransportCfg{{Name: "sx", Type: "socks5", URL: "socks5://" + socks.addr()}},
+		Transports: []TransportCfg{{Name: "sx", URL: "socks5://" + socks.addr()}},
 	}
 	app, err := Build(cfg)
 	if err != nil {

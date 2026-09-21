@@ -106,6 +106,8 @@ export interface Util {
   inspect(obj: unknown): string;
   /** 当前 target.secrets 的键(ref 必须 ∈ 部件 secretRefs);缺键抛错 */
   secret(ref: string): string;
+  /** 读包级 key 当前值;无值 undefined(protocol/filter 侧只读;hooks 任务写入) */
+  key(name: string): unknown;
 }
 
 export interface Log {
@@ -119,6 +121,49 @@ export interface Storage {
   /** 单键上限 64KB;ns=包名 */
   set(key: string, value: string): void;
   delete(key: string): void;
+}
+
+/** 包级 key 只读说明:hooks 任务写入,protocol/filter 侧经 util.key 只读实时 */
+
+/** ctx.http 请求体(hooks 部件专属;经宿主全局出站传输) */
+export interface HookHttpRequest {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  /** 缺省 = min(30s, 外层剩余);显式取值亦按外层剩余钳制 */
+  timeoutMs?: number;
+}
+
+/** ctx.http 响应体 */
+export interface HookHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  /** 超过 1MB 截断 */
+  body: string;
+}
+
+/** ctx.keys 包级 key 读写(hooks 部件专属;set 前 current 整体移入 previous) */
+export interface HookKeys {
+  get(name: string): unknown;
+  set(values: Record<string, unknown>): void;
+  /** 仅热加载提供旧包快照;启停/首载 undefined */
+  previous(name: string): unknown;
+}
+
+/** hooks 部件调用上下文(onLoad 与每个 task) */
+export interface HookContext {
+  http: { run(req: HookHttpRequest): HookHttpResponse };
+  keys: HookKeys;
+  cron: { runAt: string };
+}
+
+/** hooks 部件导出(仅对象形态;onLoad 与各 task 均可选实现) */
+export interface HooksPart {
+  /** 包加载完成(导入/升级/启用)后调用一次;同步;失败不阻断加载 */
+  onLoad?(ctx: HookContext): void;
+  /** 每个 manifest parts.hooks.tasks 项同名导出 */
+  [taskName: string]: unknown;
 }
 
 // 宿主注入全局(CommonJS 部件经 reference 引用本文件时可用)

@@ -72,38 +72,19 @@ func TestClash_Dial_CONNECT目标为上游(t *testing.T) {
 	}
 }
 
-// 场景:ipp_clash Report 仅记录,出口不变(单出口);Dial 未成功 Bad no-op(契约 §2);ReportOk 清标记
-func TestClash_Report标记(t *testing.T) {
+// 场景:ipp_clash 单出口语义 —— Dial 失败可透传;egress 不可见;不可轮换
+func TestClash_单出口语义(t *testing.T) {
 	p, err := Create("ipp_clash", ProviderCfg{Name: "t", Options: map[string]any{"type": "socks5", "url": "socks5://127.0.0.1:1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp := p.(*clashProvider)
 	lease, _ := p.Acquire(context.Background(), Hint{})
-	// Dial 未成功:Bad no-op(契约)
-	lease.Report(ReportBad, ReasonTargetBlacklist)
-	if _, ok := cp.marks.get("socks5://127.0.0.1:1"); ok {
-		t.Fatal("bad report without dial must be no-op")
-	}
-	// Dial 成功后:Bad 落标记
-	_ = lease.(interface {
-		Dial(ctx context.Context, network, addr string) (net.Conn, error)
-	})
-	_, dialErr := lease.Dial(context.Background(), "tcp", "127.0.0.1:1") // 连接失败但 lease 记 dialed? 依实现:Dial 失败不置 dialed
+	_, dialErr := lease.Dial(context.Background(), "tcp", "127.0.0.1:1")
 	if dialErr == nil {
 		t.Fatal("dial to dead port must fail")
 	}
-	lease.Report(ReportBad, ReasonTargetBlacklist)
-	if _, ok := cp.marks.get("socks5://127.0.0.1:1"); ok {
-		t.Fatal("bad report without successful dial must be no-op")
-	}
 	if egress := lease.EgressIP(); egress != "" {
 		t.Fatalf("clash egress must be empty, got %q", egress)
-	}
-	lease.Report(ReportOk, "")
-	mark, _ := cp.marks.get("socks5://127.0.0.1:1")
-	if !mark.OK {
-		t.Fatal("ReportOk must record ok mark")
 	}
 	if p.Capabilities().CanRotateIP {
 		t.Fatal("clash must not rotate")
@@ -226,20 +207,13 @@ func ioReadFull(br *bufio.Reader, buf []byte) (int, error) {
 
 // ─── remote 适配 ───
 
-// 场景:ipp_remote 正常路径 —— acquire 返回能力/出口/代理地址,report/release 走协议
+// 场景:ipp_remote 正常路径 —— acquire 返回能力/出口/代理地址,release 走协议
 func TestRemote_正常路径(t *testing.T) {
-	var reportBody atomic.Value
 	var released atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/acquire", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"lease_id":"L1","proxy":{"type":"http","url":"http://127.0.0.1:1"},"egress_ip":"9.9.9.9","capabilities":{"can_rotate_ip":true,"session_affinity":false}}`))
-	})
-	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, 512)
-		n, _ := r.Body.Read(buf)
-		reportBody.Store(string(buf[:n]))
-		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
 		released.Store(true)
@@ -265,15 +239,10 @@ func TestRemote_正常路径(t *testing.T) {
 	if lease.Capabilities().SessionAffinity { // 服务端 false 覆盖配置 true
 		t.Fatal("lease caps must follow server")
 	}
-	lease.Report(ReportBad, ReasonRateLimited)
 	lease.Release()
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && reportBody.Load() == nil {
+	for time.Now().Before(deadline) && !released.Load() {
 		time.Sleep(10 * time.Millisecond)
-	}
-	rb, _ := reportBody.Load().(string)
-	if !strings.Contains(rb, `"result":"bad"`) || !strings.Contains(rb, `"lease_id":"L1"`) {
-		t.Fatalf("report body = %s", rb)
 	}
 	if !released.Load() {
 		t.Fatal("release endpoint not called")

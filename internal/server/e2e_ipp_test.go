@@ -163,12 +163,43 @@ func (f *ippFixture) chat(t *testing.T) (int, string) {
 	return resp.StatusCode, string(buf[:n])
 }
 
+// adminEvict 管理面 evict 调用(登录 + POST)
+func (f *ippFixture) adminEvict(t *testing.T, name, body string) int {
+	t.Helper()
+	lr, _ := http.NewRequest(http.MethodPost, f.gateway.URL+"/admin/api/login",
+		strings.NewReader(`{"user":"`+adminTestUser+`","password":"`+adminTestPass+`"}`))
+	lr.Header.Set("Content-Type", "application/json")
+	lresp, err := http.DefaultClient.Do(lr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lresp.Body.Close()
+	var sess *http.Cookie
+	for _, c := range lresp.Cookies() {
+		if c.Name == "aap_session" {
+			sess = c
+		}
+	}
+	if sess == nil {
+		t.Fatal("no session cookie")
+	}
+	req, _ := http.NewRequest(http.MethodPost, f.gateway.URL+"/admin/api/transports/"+name+"/evict", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(sess)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
 // 路径 1:ipp_clash 全链路 —— 请求经假 clash 隧道到 mock 上游
 func TestE2E_IPP_Clash全链路(t *testing.T) {
 	clash := newFakeClash(t)
 	f := newIPPFixture(t, TransportCfg{
-		Name: "clash-out", Type: "ipp_clash",
-		URL:     clash.URL,
+		Name:    "clash-out",
+		URL:     "ipp+clash://" + clash.URL,
 		Options: mustNode(t, map[string]any{"type": "http_proxy", "url": clash.URL}),
 	})
 	status, body := f.chat(t)
@@ -200,7 +231,8 @@ func TestE2E_IPP_Remote全链路(t *testing.T) {
 	proxyURL = clash.URL // 供给方返回的代理形态端点
 
 	f := newIPPFixture(t, TransportCfg{
-		Name: "remote-out", Type: "ipp_remote",
+		Name:    "remote-out",
+		URL:     "ipp+remote://prov",
 		Options: mustNode(t, map[string]any{"base": prov.URL, "api_key": "k", "allow_insecure": true, "can_rotate_ip": true, "session_affinity": true}),
 	})
 
@@ -231,7 +263,8 @@ func TestE2E_IPP_出口可见性(t *testing.T) {
 	proxyURL = clash.URL
 
 	f := newIPPFixture(t, TransportCfg{
-		Name: "remote-vis", Type: "ipp_remote",
+		Name:    "remote-vis",
+		URL:     "ipp+remote://prov",
 		Options: mustNode(t, map[string]any{"base": prov.URL, "api_key": "k", "allow_insecure": true}),
 	})
 
@@ -254,7 +287,7 @@ func TestE2E_IPP_未注册类型拒绝(t *testing.T) {
 	cfg := &Config{
 		Listen: ":0", DataDir: t.TempDir(),
 		APIKeys: []string{"sk-test"}, AdminUser: adminTestUser, AdminPassBcrypt: adminHash,
-		Transports: []TransportCfg{{Name: "bad", Type: "ipp_nonexistent"}},
+		Transports: []TransportCfg{{Name: "bad", URL: "ipp+nonexistent://x"}},
 	}
 	if _, err := Build(cfg); err == nil {
 		t.Fatal("want config rejection")
@@ -267,10 +300,39 @@ func TestE2E_IPP_注册名齐备(t *testing.T) {
 	for _, k := range ipprovider.Kinds() {
 		kinds[k] = true
 	}
-	for _, want := range []string{"ipp_clash", "ipp_remote"} {
+	for _, want := range []string{"ipp_clash", "ipp_remote", "aap"} {
 		if !kinds[want] {
 			t.Fatalf("missing builtin provider %s", want)
 		}
+	}
+}
+
+// 路径 7:admin evict 端点 —— 非法 scope 400;非 aap 传输 400;成功 200
+func TestE2E_IPP_Evict端点(t *testing.T) {
+	f := newIPPFixture(t, TransportCfg{
+		Name:    "clash-out",
+		URL:     "ipp+clash://clash",
+		Options: mustNode(t, map[string]any{"type": "http_proxy", "url": "http://127.0.0.1:1"}),
+	})
+	// 非法 scope → 400
+	status := f.adminEvict(t, "clash-out", `{"scope":"session","value":"x"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad scope: status=%d want 400", status)
+	}
+	// 非 aap 传输(无 Evictor)→ 400
+	status = f.adminEvict(t, "clash-out", `{"scope":"egress","value":"1.2.3.4"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("non-aap transport: status=%d want 400", status)
+	}
+	// 全零 lease → 400
+	status = f.adminEvict(t, "clash-out", `{"scope":"lease","value":"`+strings.Repeat("0", 32)+`"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("zero lease: status=%d want 400", status)
+	}
+	// 不存在的传输 → 400
+	status = f.adminEvict(t, "nope", `{"scope":"egress","value":"1.2.3.4"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("missing transport: status=%d want 400", status)
 	}
 }
 
@@ -284,7 +346,8 @@ func TestE2E_IPP_无出口503(t *testing.T) {
 	prov := httptest.NewServer(mux)
 	defer prov.Close()
 	f := newIPPFixture(t, TransportCfg{
-		Name: "noexit-out", Type: "ipp_remote",
+		Name:    "noexit-out",
+		URL:     "ipp+remote://prov",
 		Options: mustNode(t, map[string]any{"base": prov.URL, "api_key": "k", "allow_insecure": true}),
 	})
 	status, body := f.chat(t)

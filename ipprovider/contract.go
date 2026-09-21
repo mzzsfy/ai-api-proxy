@@ -8,6 +8,7 @@ package ipprovider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 )
 
@@ -41,9 +42,6 @@ type Lease interface {
 	Dial(ctx context.Context, network, addr string) (net.Conn, error)
 	// EgressIP 当前出口 IP;未探明返回空串;Dial 顺延后更新为实际值
 	EgressIP() string
-	// Report 出口裁决;幂等(首次生效,后续不同 reason 亦忽略);
-	// Dial 从未成功过时为 no-op(无实例可标记)
-	Report(result ReportResult, reason string)
 	// Release 归还租约;幂等;实现须在 RoundTrip 结束时被调用
 	Release()
 	// Capabilities lease 级能力(warp/clash 与 Provider 一致;remote 以服务端为准);
@@ -51,22 +49,29 @@ type Lease interface {
 	Capabilities() Capabilities
 }
 
-// ReportResult 出口裁决结果
-type ReportResult uint8
+// Excluder 支持 exclude 换出口重试的 Lease(aap);实现返回携带排除集的新租约视图
+type Excluder interface {
+	WithExclude(ids ...string) Lease
+}
 
-// 裁决结果:Ok 清除既有 Bad 标记(clash/remote;warp no-op);Bad 触发失效动作
-const (
-	ReportOk  ReportResult = 0
-	ReportBad ReportResult = 1
-)
+// RepError aap TUNNEL 应答错误;Rep 为节点 rep 码(协议 §rep)
+type RepError struct {
+	// Rep rep 码:1 出口不可用/目标连通失败;2 并发上限;3 请求含节点不支持的能力
+	Rep uint8
+	// LeaseID 失败前原绑定 lease_id(无绑定全零字符串,16 个 0x00)
+	LeaseID string
+}
 
-// 裁决原因枚举(规范固定,远程 API 协议同用)
-const (
-	ReasonConnectFail     = "connect_fail"     // 连接建立失败
-	ReasonTargetBlacklist = "target_blacklist" // 上游明确拒绝(默认 403)
-	ReasonRateLimited     = "rate_limited"     // 上游限速(默认 429)
-	ReasonManual          = "manual"           // 管理面手动触发
-)
+func (e *RepError) Error() string {
+	return fmt.Sprintf("aap node rep=%d", e.Rep)
+}
+
+// Evictor 支持管理面失效命令的 Provider(aap)
+type Evictor interface {
+	// Evict 按 scope 失效节点侧绑定;幂等(目标不存在亦成功)
+	// scope:1=lease(16B lease_id 原始字节)/2=egress(SOCKS5 地址编码)
+	Evict(ctx context.Context, scope uint8, value []byte) error
+}
 
 // Hint 取租约提示
 type Hint struct {
@@ -76,7 +81,7 @@ type Hint struct {
 
 // Capabilities 供给方能力声明
 type Capabilities struct {
-	// CanRotateIP 出口可轮换;false 时 Report(Bad) 仅记录,重试判定为不换出口
+	// CanRotateIP 出口可轮换;false 时 Dial 失败不换出口重试(ipp_* 路径判定用)
 	CanRotateIP bool
 	// SessionAffinity 支持会话亲和;false 时 Hint.SessionKey 被忽略
 	SessionAffinity bool

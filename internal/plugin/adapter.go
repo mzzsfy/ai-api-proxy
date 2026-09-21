@@ -39,6 +39,8 @@ type gojaProtocol struct {
 	declared string
 	support  pipeline.Supports
 	pool     *runtimePool
+	// secrets 读当前 target api_key(host 侧会话亲和素材;插件输出不携带)
+	targetKey func(target string) (string, bool)
 }
 
 // ClosePools 释放池(Reload 销毁;等待在途归零)
@@ -47,12 +49,12 @@ func (g *gojaProtocol) ClosePools() {
 }
 
 // NewProtocol 从包实例化 protocol 部件(池预热;绑定校验用首实例)
-func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV) (pipeline.Protocol, error) {
-	return buildProtocol(pkg, params, targetSecrets, targetSecretValues, storage, true)
+func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool)) (pipeline.Protocol, error) {
+	return buildProtocol(pkg, params, targetSecrets, targetSecretValues, storage, packageKey, true)
 }
 
 // buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(实例配置归上游,不阻塞安装)
-func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, enforceSchema bool) (pipeline.Protocol, error) {
+func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), enforceSchema bool) (pipeline.Protocol, error) {
 	part := pkg.Manifest.Parts.Protocol
 	src := pkg.Files[part.Entry]
 	prog, err := Compile(src, part.Entry)
@@ -69,7 +71,7 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 	newDeps := func() HostDeps {
 		return HostDeps{
 			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
-			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, Storage: storage,
+			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
 		}
 	}
 	// 声明的协议全名并入实例配置:部件按协议名渲染请求/事件(config.protocol)
@@ -91,7 +93,13 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 	if err != nil {
 		return nil, err
 	}
-	return &gojaProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool}, nil
+	return &gojaProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool,
+		targetKey: func(t string) (string, bool) {
+			if targetSecrets == nil {
+				return "", false
+			}
+			return targetSecrets(t, "api_key")
+		}}, nil
 }
 
 // mergeProtocol 声明协议名并入实例配置(不改写调用方 map;声明为准覆盖同名字段)
@@ -220,6 +228,11 @@ func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte)
 	}
 	if req.URL == "" {
 		return pipeline.Request{}, fmt.Errorf("buildRequest: url empty")
+	}
+	// 会话亲和素材由 host 注入(插件输出不携带凭据)
+	if ctx != nil {
+		req.Model = ctx.Vars.Model
+		req.APIKey, _ = g.targetKey(targetName(ctx))
 	}
 	return req, nil
 }
@@ -353,12 +366,12 @@ type gojaFilter struct {
 func (g *gojaFilter) ClosePools() { g.pool.Close() }
 
 // NewFilter 从包实例化 filter 部件
-func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV) (pipeline.Filter, error) {
-	return buildFilter(pkg, part, params, targetSecrets, targetSecretValues, storage, true)
+func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool)) (pipeline.Filter, error) {
+	return buildFilter(pkg, part, params, targetSecrets, targetSecretValues, storage, packageKey, true)
 }
 
 // buildFilter 实例化主体;enforceSchema=false 供安装期结构校验
-func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, enforceSchema bool) (pipeline.Filter, error) {
+func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), enforceSchema bool) (pipeline.Filter, error) {
 	src := pkg.Files[part.Entry]
 	prog, err := Compile(src, part.Entry)
 	if err != nil {
@@ -374,7 +387,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSec
 	newDeps := func() HostDeps {
 		return HostDeps{
 			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
-			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, Storage: storage,
+			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
 		}
 	}
 	factory := func() (*hookInstance, error) {

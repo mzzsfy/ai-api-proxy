@@ -3,6 +3,7 @@ package ipprovider
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,14 +83,14 @@ type remoteAddr struct {
 	URL  string `json:"url"`
 }
 
+// remoteReportReq 远程 release 请求体
 type remoteReportReq struct {
 	LeaseID string `json:"lease_id"`
-	Result  string `json:"result"` // ok | bad
-	Reason  string `json:"reason,omitempty"`
 }
 
 func (p *remoteProvider) Acquire(ctx context.Context, hint Hint) (Lease, error) {
-	body, _ := json.Marshal(map[string]string{"session_key": hint.SessionKey})
+	// session_key 以 hex 文本下发(JSON 文本契约;原始字节含非法 UTF-8 会被 Marshal 塌缩)
+	body, _ := json.Marshal(map[string]string{"session_key": hex.EncodeToString([]byte(hint.SessionKey))})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.opts.Base+"/acquire", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -132,25 +133,21 @@ func (p *remoteProvider) Acquire(ctx context.Context, hint Hint) (Lease, error) 
 	}
 }
 
-// Report 实现经由 lease(带 lease_id);Provider 级不做全局报告
-func (p *remoteProvider) report(ctx context.Context, leaseID string, result ReportResult, reason string) error {
-	req := remoteReportReq{LeaseID: leaseID, Result: "bad", Reason: reason}
-	if result == ReportOk {
-		req.Result, req.Reason = "ok", ""
-	}
-	body, _ := json.Marshal(req)
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.opts.Base+"/report", bytes.NewReader(body))
+// release 实现经由 lease(带 lease_id);Provider 级不做全局通知
+func (p *remoteProvider) release(ctx context.Context, leaseID string) error {
+	body, _ := json.Marshal(remoteReportReq{LeaseID: leaseID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.opts.Base+"/release", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	p.auth(hreq)
-	resp, err := p.client.Do(hreq)
+	p.auth(req)
+	resp, err := p.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("report: status %d", resp.StatusCode)
+		return fmt.Errorf("release: status %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -203,8 +200,6 @@ type remoteLease struct {
 	dialer   ProxyDialer
 	egress   string
 	caps     Capabilities
-	dialed   bool
-	reported bool
 	released bool
 	mu       sync.Mutex
 }
@@ -216,36 +211,10 @@ func (l *remoteLease) Dial(ctx context.Context, network, addr string) (net.Conn,
 		return nil, ErrLeaseReleased
 	}
 	l.mu.Unlock()
-	conn, err := l.dialer.Dial(ctx, network, addr)
-	if err == nil {
-		l.mu.Lock()
-		l.dialed = true
-		l.mu.Unlock()
-	}
-	return conn, err
+	return l.dialer.Dial(ctx, network, addr)
 }
 
 func (l *remoteLease) EgressIP() string { return l.egress }
-
-// Report 幂等(首次生效);异步 POST(不阻塞响应路径;失败仅记日志)
-func (l *remoteLease) Report(result ReportResult, reason string) {
-	l.mu.Lock()
-	if l.reported {
-		l.mu.Unlock()
-		return
-	}
-	l.reported = true
-	p := l.p
-	id := l.id
-	l.mu.Unlock()
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), remoteRPCTimeout)
-		defer cancel()
-		if err := p.report(ctx, id, result, reason); err != nil {
-			logf("ipp_remote %s: report %s/%s: %v", p.opts.Base, result, reason, err)
-		}
-	}()
-}
 
 // Release 幂等;异步通知供给方归还(不阻塞响应路径;SSE 长流不受 10s RPC 牵连;
 // 失败仅记日志,TTL 兜底)
@@ -256,25 +225,15 @@ func (l *remoteLease) Release() {
 		return
 	}
 	l.released = true
-	l.reported = true // Release 后 Report 不再发起(防竞态语义漂移)
 	p := l.p
 	id := l.id
 	l.mu.Unlock()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), remoteRPCTimeout)
 		defer cancel()
-		body, _ := json.Marshal(map[string]string{"lease_id": id})
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.opts.Base+"/release", bytes.NewReader(body))
-		if err != nil {
-			return
-		}
-		p.auth(req)
-		resp, err := p.client.Do(req)
-		if err != nil {
+		if err := p.release(ctx, id); err != nil {
 			logf("ipp_remote: release %s: %v", id, err)
-			return
 		}
-		defer resp.Body.Close()
 	}()
 }
 

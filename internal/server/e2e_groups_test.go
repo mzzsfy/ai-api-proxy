@@ -268,7 +268,7 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 	cfg := &Config{
 		Listen: ":0", DataDir: t.TempDir(),
 		APIKeys: []string{"sk-test"}, AdminUser: adminTestUser, AdminPassBcrypt: adminHash,
-		Transports: append([]TransportCfg{{Name: "px", Type: "http_proxy", URL: proxySrv.URL}}, extraTransports...),
+		Transports: append([]TransportCfg{{Name: "px", URL: proxySrv.URL}}, extraTransports...),
 	}
 	app, err := Build(cfg)
 	if err != nil {
