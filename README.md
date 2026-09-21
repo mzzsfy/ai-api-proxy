@@ -77,6 +77,7 @@ mkdir -p /srv/ai-api-proxy/{config,lib,plugins}
 
 docker run -d --name ai-api-proxy \
   -p 8080:8080 \
+  -e TZ=Asia/Shanghai \
   -v /srv/ai-api-proxy:/data \
   ghcr.io/mzzsfy/ai-api-proxy:latest
 ```

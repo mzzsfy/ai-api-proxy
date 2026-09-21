@@ -16,7 +16,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ai-api-proxy ./cmd
 #   /data/lib/                 数据(SQLite/会话;config.data_dir 指向此处)
 #   /data/plugins/             插件包热载目录(config.plugins_dir 指向此处)
 FROM alpine:3.20
-RUN mkdir -p /data/config /data/lib /data/plugins
+RUN apk add --no-cache tzdata \
+    && mkdir -p /data/config /data/lib /data/plugins
 COPY --from=build /out/ai-api-proxy /usr/local/bin/ai-api-proxy
 WORKDIR /data
 EXPOSE 8080

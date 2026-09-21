@@ -500,6 +500,8 @@ func Run(cfg *Config) error {
 	if probeInterval := time.Duration(app.Cfg.TransportProbeIntervalSec) * time.Second; probeInterval > 0 {
 		stopProbe = startTransportProbeLoop(app, probeInterval)
 	}
+	log.Printf("ai-api-proxy listening on %s | packages: %d | upstreams: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
+		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.List()))
 	select {
 	case <-sigCh:
 	case err = <-errCh:
