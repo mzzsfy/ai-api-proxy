@@ -85,8 +85,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	status := http.StatusOK
 	detail := "" // 模型/上游/插件路径等上下文(请求日志)
 	defer func() {
-		log.Printf("request %s %s %s status=%d duration=%s",
-			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond))
+		log.Printf("request %s %s %s status=%d duration=%s%s",
+			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond), levelMark(status))
 	}()
 	w = &statusWriter{ResponseWriter: w, code: &status}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
@@ -171,6 +171,18 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(pipelineStatus(resp.Status))
 	_, _ = w.Write(resp.Body)
+}
+
+// levelMark 日志分级标记:5xx=ERROR、4xx=WARN、其余空(grep 定位用)
+func levelMark(status int) string {
+	switch {
+	case status >= 500:
+		return " level=ERROR"
+	case status >= 400:
+		return " level=WARN"
+	default:
+		return ""
+	}
 }
 
 // statusWriter 捕获 WriteHeader 状态码(请求日志用)
