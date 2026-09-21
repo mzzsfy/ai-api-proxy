@@ -371,6 +371,9 @@ var (
 	transportProbeTimeout = 10 * time.Second
 )
 
+// slowTransportMS 慢代理探测延迟阈值(毫秒;超过打 WARN)
+var slowTransportMS = int64(5 * 1000)
+
 // transportHealthStatus 单传输最近探测结果(序列化进 kv,ns=transport_health)
 type transportHealthStatus struct {
 	OK        bool     `json:"ok"`
@@ -392,6 +395,9 @@ func startTransportProbeLoop(app *App, interval time.Duration) func() {
 				st := transportHealthStatus{OK: err == nil, LatencyMS: latency, CheckedAt: utilNowRFC3339()}
 				if err != nil {
 					st.Error = err.Error()
+					log.Printf("transport probe %s: %v level=ERROR", name, err)
+				} else if latency > slowTransportMS {
+					log.Printf("transport probe %s: slow (%dms > %dms) level=WARN", name, latency, slowTransportMS)
 				}
 				if prov, ok := app.trMgr.Provider(name); ok {
 					st.EgressIPs = prov.Stats().EgressIPs
