@@ -507,17 +507,33 @@ func (d *Deps) saveUpstreamImpl(w http.ResponseWriter, r *http.Request, id int64
 		httpError(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	// "***" 回读值从 kv 唯一存储合并旧凭据(实例快照不持明文)
+	// 实例名是存储主键:改名=删除重建,by-id 保存拒绝改名(防重复实例与凭据孤儿)
+	if id != 0 {
+		old, err := d.Upstream.Get(id)
+		if err != nil {
+			httpError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if old.Name != u.Name {
+			httpError(w, http.StatusBadRequest, "upstream 名不可修改:删除后重建")
+			return
+		}
+	}
+	// "***" 回读值从 kv 唯一存储合并旧凭据(实例快照不持明文);改名行以 rename_from 为旧凭据身份
+	// (新名可能已被其他目标的旧键占用,不可作身份依据)
 	for i, t := range u.Targets {
+		lookup := t.Name
+		if t.RenameFrom != "" && t.RenameFrom != t.Name {
+			lookup = t.RenameFrom
+		}
+		old, _ := d.Secrets.GetTargetSecrets(u.Name, lookup)
 		for k, v := range t.Secrets {
 			if v != secretMask {
 				continue
 			}
-			if old, ok := d.Secrets.GetTargetSecrets(u.Name, t.Name); ok {
-				if val, has := old[k]; has {
-					u.Targets[i].Secrets[k] = val
-					continue
-				}
+			if val, has := old[k]; has {
+				u.Targets[i].Secrets[k] = val
+				continue
 			}
 			delete(u.Targets[i].Secrets, k)
 		}
@@ -568,7 +584,7 @@ func (d *Deps) metricsLive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// metricsSeries 最近 minutes 个分钟点(含当前未落库分钟;老到新)
+// metricsSeries 最近 minutes 个已落库分钟点(老到新)
 func (d *Deps) metricsSeries(w http.ResponseWriter, r *http.Request) {
 	minutes := 60
 	if v := r.URL.Query().Get("minutes"); v != "" {

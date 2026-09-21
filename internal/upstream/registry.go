@@ -33,6 +33,8 @@ type Target struct {
 	Secrets   map[string]string `json:"secrets"`
 	Weight    int               `json:"weight,omitempty"`
 	Enabled   bool              `json:"enabled"`
+	// RenameFrom 改名前的目标名(仅保存期掩码迁移用,不落库)
+	RenameFrom string `json:"rename_from,omitempty"`
 }
 
 // Strategy 目标遍历策略
@@ -315,6 +317,7 @@ func sanitizeTargets(targets []Target) []Target {
 	out := make([]Target, len(targets))
 	for i, t := range targets {
 		t.Secrets = nil
+		t.RenameFrom = ""
 		out[i] = t
 	}
 	return out

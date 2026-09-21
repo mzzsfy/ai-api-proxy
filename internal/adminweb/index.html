@@ -233,7 +233,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   main.innerHTML = `
     <h3>${isNew ? "新建上游" : "编辑上游 " + esc(u.name)}</h3>
     <div class="row">
-      名称 <input id="un" value="${esc(u.name)}">
+      名称 <input id="un" value="${esc(u.name)}" ${isNew ? "" : "readonly"} title="${isNew ? "" : "实例名不可改;如需改名请删除后重建"}">
       主包 <select id="ub">${basePkgs.map(p => `<option ${u.base && u.base.package === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
       启用 <input id="ue" type="checkbox" ${u.enabled ? "checked" : ""}>
     </div>
@@ -251,6 +251,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   const tb = $("#ut");
   const addRow = t => {
     const tr = document.createElement("tr");
+    if (t && t.name) tr.dataset.prev = t.name; // 行对应旧目标名(改名迁移凭据用)
     tr.innerHTML = `<td><input class="tn" value="${esc(t.name || "")}"></td>
       <td><input class="tb" value="${esc(t.base_url || "")}" style="width:280px"></td>
       <td><select class="tt">${trOpts}</select></td>
@@ -291,14 +292,17 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   $("#saveu").onclick = async () => {
     const targets = [...tb.querySelectorAll("tr")].slice(1).map(tr => {
       const key = tr.querySelector(".ts").value;
+      const name = tr.querySelector(".tn").value;
+      const renamed = !isNew && tr.dataset.prev && tr.dataset.prev !== name;
       return {
-        name: tr.querySelector(".tn").value,
+        name,
         base_url: tr.querySelector(".tb").value,
         transport: tr.querySelector(".tt").value,
         enabled: tr.querySelector(".te").checked,
         weight: Math.max(1, parseInt(tr.querySelector(".tw").value, 10) || 1),
-        // 编辑态留空 = 保留旧凭据,按后端契约发掩码
+        // 编辑态留空 = 保留旧凭据,按后端契约发掩码;改名行附原名供迁移
         secrets: { api_key: !isNew && !key ? "***" : key },
+        ...(renamed ? { rename_from: tr.dataset.prev } : {}),
       };
     });
     const extras = [], filtersEnabled = {}, filterParams = {};

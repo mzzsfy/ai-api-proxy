@@ -704,9 +704,9 @@ func installSource(ctx context.Context, pkgs *plugin.Registry, src string, seen 
 	return nil
 }
 
-// persistSnapshot 计数快照落 metrics_minutely
+// persistSnapshot 计数快照落 metrics_minutely;now 为覆盖分钟右边界,计数属上一分钟
 func persistSnapshot(app *App, now time.Time) {
-	row := app.Recorder.Take(now)
+	row := app.Recorder.Take(now.Add(-time.Minute))
 	upJSON, err := row.UpstreamJSON()
 	if err != nil {
 		log.Printf("snapshot by_upstream: %v", err)
