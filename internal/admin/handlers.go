@@ -33,8 +33,24 @@ type Deps struct {
 	TransportTestFunc func(name string) (int64, string)
 	// TransportEvictFunc 失效命令(scope:"lease"|"egress";非法 scope/value 返回 errBadScope 语义错误)
 	TransportEvictFunc func(ctx context.Context, name, scope, value string) error
+	// FetchPackage URL 拉取实现(nil=fetchPackage;测试覆写注入:httptest 源站在回环,生产路径强制公网校验)
+	FetchPackage func(r *http.Request, url string) ([]byte, error)
 	// KeysFunc 包级 keys 明文视图(按包名隔离)
 	KeysFunc func(pkg string) map[string]any
+}
+
+// fetch 拉取实现取依赖覆写,缺省内置实现
+func (d *Deps) fetch(r *http.Request, url string) ([]byte, error) {
+	if d.FetchPackage != nil {
+		return d.FetchPackage(r, url)
+	}
+	return fetchPackage(r, url)
+}
+func (d *Deps) fetchPackageFunc() func(r *http.Request, url string) ([]byte, error) {
+	if d.FetchPackage != nil {
+		return d.FetchPackage
+	}
+	return fetchPackage
 }
 
 // Mux 构建管理 API 路由(挂在 /admin/api 前缀,已过会话中间件)
@@ -95,9 +111,6 @@ func protocolName(p *plugin.Package) string {
 	return p.Manifest.Parts.Protocol.Protocol
 }
 
-// FetchPackageFromURL 服务端拉取实现(变量供测试覆写:httptest 源站在回环,生产路径强制公网校验)
-var FetchPackageFromURL = fetchPackage
-
 // inspectPackage 解析包摘要但不安装(octet-stream=字节;application/json {"url"}=服务端拉取)
 func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 	var data []byte
@@ -110,14 +123,18 @@ func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, "url required")
 			return
 		}
-		fetched, err := FetchPackageFromURL(r, req.URL)
+		fetched, err := d.fetch(r, req.URL)
 		if err != nil {
 			httpError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		data = fetched
 	default:
-		b, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
+		b, err := readLimited(r.Body)
+		if errors.Is(err, errTooLarge) {
+			httpError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
 		if err != nil {
 			httpError(w, http.StatusBadRequest, "read body")
 			return
@@ -132,20 +149,16 @@ func (d *Deps) inspectPackage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, summary)
 }
 
-// fetchPackage 从 http(s) URL 拉取 .aap 字节(仅 http(s);限 8MB;拒绝私网/环回/链路本地目标防 SSRF)
+// fetchPackage 从 http(s) URL 拉取 .aap 字节(仅 http(s);限 8MB;拨号级公网校验防 SSRF,校验与连接同一次解析免疫 DNS rebinding)
 func fetchPackage(r *http.Request, url string) ([]byte, error) {
 	u, err := neturl.Parse(url)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("only http(s) url allowed")
 	}
-	if err := assertPublicHost(u.Hostname()); err != nil {
-		return nil, err
-	}
 	client := &http.Client{
 		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return assertPublicHost(req.URL.Hostname())
-		},
+		// 每次重定向后的新拨号同样经 publicDial 复检,无需在此重复域名校验
+		Transport: &http.Transport{DialContext: publicDial},
 	}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -155,25 +168,106 @@ func fetchPackage(r *http.Request, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	if resp.ContentLength > maxUpload {
+		return nil, errTooLarge
+	}
+	return readLimited(resp.Body)
 }
 
-// assertPublicHost 目标主机须解析为公网地址(防 SSRF 内网探测)
+// publicDial 拨号级 SSRF 防线:解析结果逐一公网校验后直连该 IP(TLS ServerName 仍取 URL 域名,不影响证书校验)
+func publicDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial addr: %w", err)
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve host: %w", err)
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("resolve host: no addresses")
+	}
+	var dialIP net.IP
+	for _, ip := range addrs {
+		if forbiddenIP(ip) {
+			return nil, fmt.Errorf("address %s is not allowed", ip)
+		}
+		if dialIP == nil {
+			dialIP = ip
+		}
+	}
+	d := net.Dialer{}
+	return d.DialContext(ctx, network, net.JoinHostPort(dialIP.String(), port))
+}
+
+// assertPublicHost 主机名解析结果须全为公网地址(SSRF 预检;拨号级校验为权威防线)
 func assertPublicHost(host string) error {
 	addrs, err := net.LookupIP(host)
-	if err != nil || len(addrs) == 0 {
-		return fmt.Errorf("resolve host: %v", err)
+	if err != nil {
+		return fmt.Errorf("resolve host: %w", err)
+	}
+	if len(addrs) == 0 {
+		return errors.New("resolve host: no addresses")
 	}
 	for _, ip := range addrs {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		if forbiddenIP(ip) {
 			return fmt.Errorf("address %s is not allowed", ip)
 		}
 	}
 	return nil
 }
 
+// forbiddenIP 非公网地址判定(环回/私网/链路本地/组播/未指定/CGNAT/基准测试/保留段/IPv6 文档段)
+func forbiddenIP(ip net.IP) bool {
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 0.0.0.0/8"本网络"段、240/4 保留段(含 255.255.255.255 广播)
+		if v4[0] == 0 || v4[0] >= 240 {
+			return true
+		}
+		// 100.64/10 CGNAT 共享地址段
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] < 128 {
+			return true
+		}
+		// 198.18/15 基准测试段;192.0.0/24 IETF 协议分配段
+		if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
+			return true
+		}
+		if v4[0] == 192 && v4[1] == 0 && v4[2] == 0 {
+			return true
+		}
+		return false
+	}
+	// IPv6:2001:db8::/32 文档段(ULA fc00::/7 已由 IsPrivate 覆盖)
+	return len(ip) == 16 && ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8
+}
+
+// maxUpload 上传/拉取包大小上限;读取按上限+1 判定超限(拒绝而非静默截断)
+const maxUpload = 8 * 1024 * 1024
+
+// errTooLarge 超限信号(调用方映射 413)
+var errTooLarge = errors.New("package exceeds size limit")
+
+// readLimited 读至多 maxUpload+1 字节;超出返回 errTooLarge
+func readLimited(rd io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(rd, maxUpload+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxUpload {
+		return nil, errTooLarge
+	}
+	return b, nil
+}
+
 func (d *Deps) installPackage(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
+	data, err := readLimited(r.Body)
+	if errors.Is(err, errTooLarge) {
+		httpError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "read body")
 		return
@@ -186,7 +280,7 @@ func (d *Deps) installPackage(w http.ResponseWriter, r *http.Request) {
 }
 
 // installPackageFromURL 从 URL 拉取 .aap 安装(body: {"url": "https://.../x.aap"})
-// 管理面已过会话鉴权;仅 http(s),限 8MB
+// 管理面已过会话鉴权;经 fetchPackage(仅 http(s)/公网校验/重定向复检/8MB 上限)
 func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
@@ -195,24 +289,9 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "url required")
 		return
 	}
-	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
-		httpError(w, http.StatusBadRequest, "only http(s) url allowed")
-		return
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(req.URL)
+	data, err := d.fetch(r, req.URL)
 	if err != nil {
-		httpError(w, http.StatusBadGateway, "fetch: "+err.Error())
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		httpError(w, http.StatusBadGateway, fmt.Sprintf("fetch status %d", resp.StatusCode))
-		return
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
-	if err != nil {
-		httpError(w, http.StatusBadGateway, "read body")
+		httpError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if err := d.Packages.Install(r.Context(), data); err != nil {

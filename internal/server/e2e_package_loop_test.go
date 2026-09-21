@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -151,7 +152,19 @@ func TestPackageLoop_TemplateInstallExportReimport(t *testing.T) {
 		t.Fatalf("revision after reimport: %d (want %d)", rev2, rev1+1)
 	}
 
-	// ⑥ import-url:本地 httptest 服务中转(真实 HTTP 拉取)
+	// ⑥ import-url:本地 httptest 服务中转(真实 HTTP 拉取;源站在回环,经 Deps.FetchPackage 覆写绕过公网校验,
+	// SSRF 拦截由 TestAdmin_InstallURLPrivateBlocked 覆盖)
+	f.app.AdminDeps.FetchPackage = func(r *http.Request, u string) ([]byte, error) {
+		resp, err := http.Get(u)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
+		}
+		return io.ReadAll(resp.Body)
+	}
 	urlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(exported)
 	}))

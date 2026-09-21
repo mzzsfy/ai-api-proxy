@@ -95,8 +95,10 @@ type Registry struct {
 	transportEvict func(transport, scope, value string) error
 }
 
-// SetTransportEvict 注入插件 util.evict 出口(装配根调用)
+// SetTransportEvict 注入插件 util.evict 出口(装配期调用;mu 保护读写,防运行期注入数据竞争)
 func (r *Registry) SetTransportEvict(f func(transport, scope, value string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.transportEvict = f
 }
 
@@ -618,6 +620,9 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 	parts := &resolvedParts{fingerprint: fingerprint(u)}
 	parts.refs.Store(1) // 缓存持有份
 	parts.baseRev = r.pkgs.Revision(u.Base.Package)
+	r.mu.RLock()
+	transportEvict := r.transportEvict
+	r.mu.RUnlock()
 	base, err := r.pkgs.GetPackage(u.Base.Package)
 	if err != nil {
 		return nil, err
@@ -634,7 +639,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 				continue
 			}
-			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package), r.pkgs.KeyReader(ex.Package), r.transportEvict)
+			f, err := plugin.NewFilter(pkg, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(ex.Package), r.pkgs.KeyReader(ex.Package), transportEvict)
 			if err != nil {
 				return nil, err
 			}
@@ -646,7 +651,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 		if enabled, ok := u.FiltersEnabled[key]; ok && !enabled {
 			continue
 		}
-		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), r.transportEvict)
+		f, err := plugin.NewFilter(base, fp, u.FilterParams[key], r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), transportEvict)
 		if err != nil {
 			return nil, err
 		}
@@ -664,7 +669,7 @@ func (r *Registry) instantiateParts(u *Upstream) (*resolvedParts, error) {
 			return nil, err
 		}
 	} else {
-		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), r.transportEvict)
+		proto, err = plugin.NewProtocol(base, u.Params, r.secretReader(u), r.secretValues(u), r.pkgStorage(u.Base.Package), r.pkgs.KeyReader(u.Base.Package), transportEvict)
 		if err != nil {
 			return nil, err
 		}

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mzzsfy/ai-api-proxy/internal/admin"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 )
 
@@ -43,9 +42,10 @@ func TestAdmin_InspectBytesReturnsSummaryNotInstall(t *testing.T) {
 
 func TestAdmin_InspectURL(t *testing.T) {
 	// Given inspect JSON {"url"} 指向测试服务器 .aap When POST Then 拉取解析返回摘要且不安装
-	// (httptest 源站在回环,覆写拉取实现绕过公网校验;SSRF 拦截由 TestAdmin_InspectURLPrivateBlocked 覆盖)
-	origFetch := admin.FetchPackageFromURL
-	admin.FetchPackageFromURL = func(r *http.Request, url string) ([]byte, error) {
+	// (httptest 源站在回环,经 Deps.FetchPackage 覆写拉取实现绕过公网校验;SSRF 拦截由 TestAdmin_InspectURLPrivateBlocked 覆盖)
+	pkgs, _ := testRegistry(t)
+	deps := newAdminDeps(pkgs)
+	deps.FetchPackage = func(r *http.Request, url string) ([]byte, error) {
 		resp, err := http.Get(url)
 		if err != nil {
 			return nil, err
@@ -53,9 +53,6 @@ func TestAdmin_InspectURL(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 		return io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	}
-	t.Cleanup(func() { admin.FetchPackageFromURL = origFetch })
-	pkgs, _ := testRegistry(t)
-	deps := newAdminDeps(pkgs)
 	mux := deps.Mux()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(hooksAAP(t, "0.2.0", `module.exports={}`))
@@ -95,6 +92,40 @@ func TestAdmin_InspectInvalidZip400(t *testing.T) {
 	}
 	if _, err := pkgs.GetPackage("checkin"); err == nil {
 		t.Fatal("inspect must not install")
+	}
+}
+
+func TestAdmin_InstallURLPrivateBlocked(t *testing.T) {
+	// Given import-url 指向环回地址 When POST Then 拒绝(与 inspect 同源 SSRF 防护)且不安装
+	pkgs, _ := testRegistry(t)
+	deps := newAdminDeps(pkgs)
+	mux := deps.Mux()
+	body, _ := json.Marshal(map[string]string{"url": "http://127.0.0.1:1/x.aap"})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/admin/api/packages/import-url", strings.NewReader(string(body)))
+	r.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(w, r)
+	if w.Code == http.StatusOK {
+		t.Fatalf("private address must be rejected: %s", w.Body.String())
+	}
+	if _, err := pkgs.GetPackage("checkin"); err == nil {
+		t.Fatal("rejected import must not install")
+	}
+}
+
+func TestAdmin_InstallBodyTooLarge413(t *testing.T) {
+	// Given 上传体超 8MB When POST install Then 413(不静默截断)
+	pkgs, _ := testRegistry(t)
+	deps := newAdminDeps(pkgs)
+	mux := deps.Mux()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/admin/api/packages", strings.NewReader(string(make([]byte, 8*1024*1024+1))))
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := pkgs.GetPackage("checkin"); err == nil {
+		t.Fatal("oversized upload must not install")
 	}
 }
 

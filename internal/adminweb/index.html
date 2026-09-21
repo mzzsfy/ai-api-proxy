@@ -163,7 +163,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   const addRow = t => {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><input class="tn" value="${esc(t.name || "")}"></td>
-      <td><input class="tb" value="${esc(t.baseURL || "")}" style="width:280px"></td>
+      <td><input class="tb" value="${esc(t.base_url || "")}" style="width:280px"></td>
       <td><select class="tt">${trOpts}</select></td>
       <td><input class="ts" value="${(t.secrets && t.secrets.api_key) || ""}" placeholder="***保留旧值"></td>
       <td><input class="tw" type="number" min="1" value="${t.weight > 0 ? t.weight : 1}" style="width:64px" title="加权随机权重"></td>
@@ -202,7 +202,7 @@ async function editUpstream(u, basePkgs, allPkgs, transports) {
   $("#saveu").onclick = async () => {
     const targets = [...tb.querySelectorAll("tr")].slice(1).map(tr => ({
       name: tr.querySelector(".tn").value,
-      baseURL: tr.querySelector(".tb").value,
+      base_url: tr.querySelector(".tb").value,
       transport: tr.querySelector(".tt").value,
       enabled: tr.querySelector(".te").checked,
       weight: Math.max(1, parseInt(tr.querySelector(".tw").value, 10) || 1),

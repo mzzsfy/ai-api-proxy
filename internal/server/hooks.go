@@ -66,11 +66,13 @@ func wireHooks(app *App) *scheduler.Scheduler {
 			Keys:        pkgs.Keys(),
 			Storage:     &kvStorage{db: app.St.DB(), ns: pkgName},
 			Log:         hooksLog(pkgName),
-			// 插件定时任务主动失效上报:同一命令转发(独立超时,仅失效不触发重试)
+			// 插件定时任务主动失效上报:同一命令转发(限流闸门;仅失效不触发重试)
 			TransportEvict: func(transport, scope, value string) error {
-				ctx, cancel := context.WithTimeout(context.Background(), pluginEvictTimeout)
-				defer cancel()
-				return evictForwarder(app.trMgr)(ctx, transport, scope, value)
+				gate := app.pluginEvictGate
+				if gate == nil {
+					gate = newEvictGate() // 测试装配路径(Build 未跑)兜底
+				}
+				return gatedEvict(gate, evictForwarder(app.trMgr))(transport, scope, value)
 			},
 		}
 	}

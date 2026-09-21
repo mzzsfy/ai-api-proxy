@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -135,6 +136,8 @@ type App struct {
 	Mux       *http.ServeMux
 	trMgr     *transport.Manager
 	Scheduler *scheduler.Scheduler
+	// pluginEvictGate 插件 evict 限流闸门(hooks 通道与 Registry 通道共用;Build 装配)
+	pluginEvictGate *evictGate
 }
 
 // transportNames 传输实例名清单(稳定序)
@@ -305,12 +308,9 @@ func Build(cfg *Config) (*App, error) {
 		return latency, ""
 	}
 	adminDeps.TransportEvictFunc = evictForwarder(trMgr)
-	// 插件 util.evict 出口:同一失效命令转发(仅失效,不触发重试;独立超时不随请求)
-	reg.SetTransportEvict(func(transport, scope, value string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), pluginEvictTimeout)
-		defer cancel()
-		return evictForwarder(trMgr)(ctx, transport, scope, value)
-	})
+	// 插件 util.evict 出口:同一失效命令转发(限流闸门;仅失效,不触发重试)
+	gate := newEvictGate()
+	reg.SetTransportEvict(gatedEvict(gate, evictForwarder(trMgr)))
 	// 健康检查
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -319,6 +319,7 @@ func Build(cfg *Config) (*App, error) {
 	return &App{
 		Cfg: cfg, St: st, Gateway: gw, AdminSvc: adminSvc, AdminDeps: adminDeps,
 		Recorder: recorder, Secrets: secrets, Registry: reg, Mux: mux, trMgr: trMgr,
+		pluginEvictGate: gate,
 	}, nil
 }
 
@@ -398,6 +399,63 @@ const aapLeaseIDHexLen = 16
 
 // pluginEvictTimeout 插件 util.evict 命令超时(独立于请求生命周期)
 const pluginEvictTimeout = 10 * time.Second
+
+// 插件 evict 闸门参数:令牌桶容量与并发上限(劣质/失控插件防连接洪水;每次 evict = 一条节点连接)
+const (
+	pluginEvictBurst     = 5
+	pluginEvictInflight  = 2
+	pluginEvictRefillSec = 1
+)
+
+// evictGate 插件 evict 限流:令牌桶(按秒补齐)+ 并发上限;不通过时拒绝报错
+type evictGate struct {
+	mu       sync.Mutex
+	tokens   float64
+	last     time.Time
+	inflight int
+}
+
+func newEvictGate() *evictGate {
+	return &evictGate{tokens: pluginEvictBurst, last: time.Now()}
+}
+
+// allow 取一个令牌并占一个并发位;超限返回 false
+func (g *evictGate) allow() bool {
+	now := time.Now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.tokens += now.Sub(g.last).Seconds() / pluginEvictRefillSec
+	if g.tokens > pluginEvictBurst {
+		g.tokens = pluginEvictBurst
+	}
+	g.last = now
+	if g.inflight >= pluginEvictInflight || g.tokens < 1 {
+		return false
+	}
+	g.tokens--
+	g.inflight++
+	return true
+}
+
+// done 归还并发位
+func (g *evictGate) done() {
+	g.mu.Lock()
+	g.inflight--
+	g.mu.Unlock()
+}
+
+// gatedEvict 限流包裹的插件 evict 出口
+func gatedEvict(gate *evictGate, forward func(ctx context.Context, transport, scope, value string) error) func(transport, scope, value string) error {
+	return func(transport, scope, value string) error {
+		if !gate.allow() {
+			return fmt.Errorf("evict %q/%s: 频率超限,稍后重试", transport, scope)
+		}
+		defer gate.done()
+		ctx, cancel := context.WithTimeout(context.Background(), pluginEvictTimeout)
+		defer cancel()
+		return forward(ctx, transport, scope, value)
+	}
+}
 
 // evictForwarder scope/value 文本 → aap EVICT 命令转发(admin API 与插件 util.evict 共用)
 func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, scope, value string) error {
