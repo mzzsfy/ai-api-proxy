@@ -310,14 +310,10 @@ async function showMonitor() {
     <canvas id="chart" width="960" height="220" style="border:1px solid var(--bd);max-width:100%"></canvas>
     <div class="muted row">蓝=请求数 红=错误数 <span id="cmin"></span></div>
     <h3>传输实例</h3>
-    <table><tr><th>名称</th><th>类型</th><th>地址</th><th>最近探测</th><th></th></tr>
+    <table><tr><th>名称</th><th>类型</th><th>地址</th><th></th></tr>
     ${(transports || []).map(t => {
-      const h = t.health;
-      const egress = h && h.egress_ips && h.egress_ips.length ? `<div class="muted">出口: ${esc(h.egress_ips.join(", "))}</div>` : "";
-      const health = h ? (h.ok ? `<span style="color:var(--ok)">通 ${h.latency_ms}ms</span> <span class="muted">${new Date(h.checked_at).toLocaleTimeString()}</span>${egress}`
-                              : `<span style="color:var(--err)">断</span> <span class="muted" title="${esc(h.error||"")}">${new Date(h.checked_at).toLocaleTimeString()}</span>${egress}`) : '<span class="muted">未探测</span>';
       return `<tr><td>${esc(t.name)}</td><td>${esc(t.type)}</td>
-      <td class="muted">${esc(t.url || "direct")}</td><td>${health}</td>
+      <td class="muted">${esc(t.url || "direct")}</td>
       <td><button data-tt="${esc(t.name)}">测试连通</button> <span id="tr-${esc(t.name)}" class="muted"></span></td></tr>`;
     }).join("")}</table>
     <h3>按上游</h3><pre class="log">${esc(JSON.stringify(m.by_upstream, null, 2))}</pre>
@@ -330,8 +326,6 @@ async function showMonitor() {
       const r = await api.post(`/transports/${b.dataset.tt}/test`, {});
       span.textContent = r.ok ? `通 ${r.latency_ms}ms` : `断: ${r.error}`;
       span.style.color = r.ok ? "var(--ok)" : "var(--err)";
-      // 刷新"最近探测"列(手动测试结果与周期探测同源展示)
-      setTimeout(() => showMonitor(), 300);
     } catch (err) { span.textContent = err.message; span.style.color = "var(--err)"; }
   });
 }

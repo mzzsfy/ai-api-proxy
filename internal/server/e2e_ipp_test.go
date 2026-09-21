@@ -178,15 +178,10 @@ func TestE2E_IPP_Clash全链路(t *testing.T) {
 	if !strings.Contains(body, "via-ipp") {
 		t.Fatalf("body=%s", body)
 	}
-	// 探测一轮后断言出口可见性(clash 单出口不可见 → egress_ips 空)
-	stop := startTransportProbeLoop(f.app, time.Hour)
-	stop()
-	hs := transportHealthFromKV(t, f.app, "clash-out")
-	if hs == nil || !hs.OK {
-		t.Fatalf("health=%+v", hs)
-	}
-	if len(hs.EgressIPs) != 0 {
-		t.Fatalf("clash egress must be invisible: %v", hs.EgressIPs)
+	// 连通测试一次,断言链路可用(clash 单出口 → egress_ips 空)
+	latency, err := f.app.trMgr.Test("clash-out", transportProbeURL, transportProbeTimeout)
+	if err != nil {
+		t.Fatalf("clash-out test: %v (latency=%dms)", err, latency)
 	}
 }
 
@@ -218,7 +213,7 @@ func TestE2E_IPP_Remote全链路(t *testing.T) {
 	}
 }
 
-// 路径 3:ipp_remote 出口可见性 —— stats egress_ips 进健康 kv
+// 路径 3:ipp_remote 出口可见性 —— provider stats 暴露 egress_ips
 func TestE2E_IPP_出口可见性(t *testing.T) {
 	clash := newFakeClash(t)
 	var proxyURL string
@@ -240,14 +235,13 @@ func TestE2E_IPP_出口可见性(t *testing.T) {
 		Options: mustNode(t, map[string]any{"base": prov.URL, "api_key": "k", "allow_insecure": true}),
 	})
 
-	stop := startTransportProbeLoop(f.app, time.Hour)
-	stop()
-	hs := transportHealthFromKV(t, f.app, "remote-vis")
-	if hs == nil {
-		t.Fatal("no health record")
+	provider, ok := f.app.trMgr.Provider("remote-vis")
+	if !ok {
+		t.Fatal("provider remote-vis not found")
 	}
-	if len(hs.EgressIPs) != 2 || hs.EgressIPs[0] != "7.7.7.7" {
-		t.Fatalf("egress_ips=%v", hs.EgressIPs)
+	ips := provider.Stats().EgressIPs
+	if len(ips) != 2 || ips[0] != "7.7.7.7" {
+		t.Fatalf("egress_ips=%v", ips)
 	}
 }
 

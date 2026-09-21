@@ -135,11 +135,6 @@ type App struct {
 // transportNames 传输实例名清单(稳定序)
 func (a *App) transportNames() []string { return a.trMgr.Names() }
 
-// TransportTest 单传输连通测试
-func (a *App) TransportTest(name, probeURL string, timeout time.Duration) (int64, error) {
-	return a.trMgr.Test(name, probeURL, timeout)
-}
-
 // Build 装配全部模块(仅运行态;打包路径见 Run)
 func Build(cfg *Config) (*App, error) {
 	if err := cfg.EnsureDirs(); err != nil {
@@ -287,19 +282,12 @@ func Build(cfg *Config) (*App, error) {
 		}
 		return out, rows.Err()
 	}
-	// 传输实例:只读清单(含最近健康探测结果) + 连通测试(代理链路探测;默认 probe=gstatic 204)
+	// 传输实例:只读清单 + 连通测试(管理台手动"测试连通";默认 probe=gstatic 204)
 	adminDeps.TransportsFunc = func() []map[string]any {
 		defs := trMgr.Defs()
 		out := make([]map[string]any, 0, len(defs))
 		for _, d := range defs {
-			item := map[string]any{"name": d.Name, "type": d.Type, "url": d.URL}
-			if v, ok, _ := st.KVGet(context.Background(), "transport_health", d.Name); ok {
-				var hs transportHealthStatus
-				if jsonUnmarshal([]byte(v), &hs) == nil {
-					item["health"] = hs
-				}
-			}
-			out = append(out, item)
+			out = append(out, map[string]any{"name": d.Name, "type": d.Type, "url": d.URL})
 		}
 		return out
 	}
@@ -365,64 +353,11 @@ func keyAuth(keys []string, next http.Handler) http.Handler {
 	})
 }
 
-// 传输连通探测目标与超时(204 端点,无副作用;变量供测试覆写指向本地 mock)
+// 传输连通测试目标与超时(管理台手动"测试连通"用;204 端点,无副作用;变量供测试覆写指向本地 mock)
 var (
 	transportProbeURL     = "https://www.gstatic.com/generate_204"
 	transportProbeTimeout = 10 * time.Second
 )
-
-// slowTransportMS 慢代理探测延迟阈值(毫秒;超过打 WARN)
-var slowTransportMS = int64(5 * 1000)
-
-// transportHealthStatus 单传输最近探测结果(序列化进 kv,ns=transport_health)
-type transportHealthStatus struct {
-	OK        bool     `json:"ok"`
-	LatencyMS int64    `json:"latency_ms"`
-	Error     string   `json:"error,omitempty"`
-	CheckedAt string   `json:"checked_at"`
-	EgressIPs []string `json:"egress_ips,omitempty"` // ipp_* 供给方出口(非 ipp 无此字段)
-}
-
-// startTransportProbeLoop 周期探测全部传输实例,结果落 kv 供 GUI 读取;返回停止函数(同步等待退出)
-func startTransportProbeLoop(app *App, interval time.Duration) func() {
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		runProbe := func() {
-			for _, name := range app.transportNames() {
-				latency, err := app.TransportTest(name, transportProbeURL, transportProbeTimeout)
-				st := transportHealthStatus{OK: err == nil, LatencyMS: latency, CheckedAt: utilNowRFC3339()}
-				if err != nil {
-					st.Error = err.Error()
-					log.Printf("transport probe %s: %v level=ERROR", name, err)
-				} else if latency > slowTransportMS {
-					log.Printf("transport probe %s: slow (%dms > %dms) level=WARN", name, latency, slowTransportMS)
-				}
-				if prov, ok := app.trMgr.Provider(name); ok {
-					st.EgressIPs = prov.Stats().EgressIPs
-				}
-				b, mErr := jsonMarshal(st)
-				if mErr != nil {
-					continue
-				}
-				_ = app.St.KVSet(context.Background(), "transport_health", name, string(b))
-			}
-		}
-		runProbe() // 启动即探一轮
-		timer := time.NewTicker(interval)
-		defer timer.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-timer.C:
-				runProbe()
-			}
-		}
-	}()
-	return func() { close(stop); <-done }
-}
 
 // utilNowRFC3339 当前时间(测试确定性无关,直接格式化)
 func utilNowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -501,11 +436,6 @@ func Run(cfg *Config) error {
 			}
 		}
 	}()
-	// 传输健康周期探测(interval<=0 关闭)
-	var stopProbe func()
-	if probeInterval := time.Duration(app.Cfg.TransportProbeIntervalSec) * time.Second; probeInterval > 0 {
-		stopProbe = startTransportProbeLoop(app, probeInterval)
-	}
 	log.Printf("ai-api-proxy listening on %s | packages: %d | upstreams: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
 		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.List()))
 	select {
@@ -520,15 +450,12 @@ func Run(cfg *Config) error {
 			return err
 		}
 	}
-	// 优雅退出:停新连接 → 停快照 → 停探测 → 排空(30s 上限)
+	// 优雅退出:停新连接 → 停快照 → 排空(30s 上限)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	close(stopSnap)
 	<-snapDone
-	if stopProbe != nil {
-		stopProbe()
-	}
 	return nil
 }
 

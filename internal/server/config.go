@@ -44,8 +44,6 @@ type Config struct {
 	// PackDir 打包输出目录(非空则打包两级目录内的包到该目录后退出;唯一 .aap 产出路径)
 	PackDir    string         `yaml:"pack_dir"`
 	Transports []TransportCfg `yaml:"transports"`
-	// 传输健康探测周期(秒;0=关闭周期探测,仅保留手动测试)
-	TransportProbeIntervalSec int `yaml:"transport_probe_interval_sec"`
 }
 
 // Load 按优先级合并配置;空 APIKeys 视为拒绝启动的调用方职责。

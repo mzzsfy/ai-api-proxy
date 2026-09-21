@@ -57,7 +57,3 @@ transports: []
 #            tls: true
 #            network: ws
 #            ws-opts: { path: /ws }
-
-# 传输健康周期探测(秒;0 或缺省=关闭,仅保留管理台手动"测试连通")
-# 开启后按周期对全部传输实例发一次 HEAD(默认探 gstatic 204),结果展示在管理台监控页
-transport_probe_interval_sec: 0
