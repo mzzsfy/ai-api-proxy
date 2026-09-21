@@ -81,32 +81,46 @@ func (g *Gateway) Messages(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, anthropicEntry bool) {
 	exit := g.Metrics.EnterRequest()
 	defer exit()
+	start := time.Now()
+	status := http.StatusOK
+	detail := "" // 模型/上游/插件路径等上下文(请求日志)
+	defer func() {
+		log.Printf("request %s %s %s status=%d duration=%s",
+			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond))
+	}()
+	w = &statusWriter{ResponseWriter: w, code: &status}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
+		status = http.StatusBadRequest
 		writeError(w, entry, http.StatusBadRequest, "read body")
 		return
 	}
 	model, entryStream, feats, err := entry.Inspect(body)
 	if err != nil {
+		status = http.StatusBadRequest
 		writeError(w, entry, http.StatusBadRequest, err.Error())
 		return
 	}
+	detail = "model=" + model
 	// n>1 → 400
 	for _, f := range feats {
 		if f == convert.FeatureN {
+			status = http.StatusBadRequest
 			writeError(w, entry, http.StatusBadRequest, "n>1 unsupported")
 			return
 		}
 	}
 	candidates, pickErr, err := g.Registry.Pick(model, featsToStrings(feats), entry.Protocol, entryStream)
 	if err != nil {
+		status = pickStatus(pickErr)
+		detail += " reason=" + pickErr.Error() + " plugins=-"
 		switch pickErr {
 		case upstream.PickNoModel:
-			writeErrorWithModels(w, entry, http.StatusNotFound, "no upstream for model", g.availableModels(entry.Protocol))
+			writeErrorWithModels(w, entry, status, "no upstream for model", g.availableModels(entry.Protocol))
 		case upstream.PickCapability:
-			writeError(w, entry, http.StatusBadRequest, err.Error()+"; declared by "+g.slotSummary(model))
+			writeError(w, entry, status, err.Error()+"; declared by "+g.slotSummary(model))
 		default:
-			writeError(w, entry, http.StatusServiceUnavailable, "no healthy target")
+			writeError(w, entry, status, "no healthy target")
 		}
 		return
 	}
@@ -114,10 +128,14 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	resolved, release, err := g.Registry.Resolve(u)
 	if err != nil {
 		log.Printf("resolve %s: %v", u.Name, err)
+		status = http.StatusBadGateway
+		detail += " upstream=" + u.Name
 		writeError(w, entry, http.StatusBadGateway, "resolve failed")
 		return
 	}
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
+	detail += " upstream=" + u.Name + " target=" + firstTarget(resolved) +
+		" plugins=" + pluginPath(u.Name, resolved)
 	// 快速路径:openai 入口 ∧ 内置协议 ∧ 有效 filter 链空
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
 		g.fastPath(w, r, u, resolved, body, model)
@@ -131,6 +149,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
+		status = runErrorStatus(err)
+		detail += " error=" + err.Error()
 		g.writeRunError(w, entry, pctx, resolved, err)
 		return
 	}
@@ -138,10 +158,12 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		// 终局错误(mapError 已在 executor 应用;未实现则原样透传)
 		g.Metrics.IncUpstream(u.Name, true)
 		g.Metrics.IncError()
+		status = resp.Status
 		writeRaw(w, resp.Status, resp.Body)
 		return
 	}
 	g.Metrics.IncUpstream(u.Name, false)
+	detail += fmt.Sprintf(" stream=%t", resp.Stream)
 	if resp.Stream {
 		g.writeStream(w, entry, resp)
 		return
@@ -149,6 +171,65 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(pipelineStatus(resp.Status))
 	_, _ = w.Write(resp.Body)
+}
+
+// statusWriter 捕获 WriteHeader 状态码(请求日志用)
+type statusWriter struct {
+	http.ResponseWriter
+	code *int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	*s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush 透传流式冲刷(保持原 writer 的 Flusher 能力)
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// pluginPath 插件路径描述:协议包 + filter 链(与请求路由/处理顺序一致)
+func pluginPath(upstreamName string, resolved pipeline.Resolved) string {
+	parts := make([]string, 0, 1+len(resolved.Filters))
+	parts = append(parts, resolved.Protocol.Name())
+	for _, f := range resolved.Filters {
+		parts = append(parts, f.Name())
+	}
+	return strings.Join(parts, "->")
+}
+// firstTarget 首个启用目标名(无目标时为 -)
+func firstTarget(resolved pipeline.Resolved) string {
+	if len(resolved.Targets) == 0 {
+		return "-"
+	}
+	return resolved.Targets[0].Name
+}
+
+// pickStatus 路由失败状态(与 serve 内错误分支一致)
+func pickStatus(pickErr upstream.PickError) int {
+	switch pickErr {
+	case upstream.PickNoModel:
+		return http.StatusNotFound
+	case upstream.PickCapability:
+		return http.StatusBadRequest
+	default:
+		return http.StatusServiceUnavailable
+	}
+}
+
+// runErrorStatus Run 错误状态(与 writeRunError 分支一致)
+func runErrorStatus(err error) int {
+	var capErr *pipeline.CapabilityError
+	if errors.As(err, &capErr) {
+		return http.StatusBadRequest
+	}
+	if errors.Is(err, pipeline.ErrPoolBusy) || errors.Is(err, ipprovider.ErrNoExits) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
 }
 
 // writeRunError Run 错误输出:形态不符 400;池耗尽/无出口 503;其余 502 协议格式
