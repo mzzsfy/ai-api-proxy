@@ -8,7 +8,7 @@
 /** 协议槽枚举(manifest:parts.protocol.protocol) */
 export type ProtocolSlot = "openai-completions" | "anthropic-messages";
 
-/** 声明形态(manifest:parts.protocol.forms 子集) */
+/** 请求形态(由实现推导:导出 mapEvent = 支持流式;导出 mapResponse = 支持非流式) */
 export type Form = "streaming" | "non_streaming";
 
 /** 管道请求上下文(部件只读;私有数据用 state) */

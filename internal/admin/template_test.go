@@ -18,7 +18,7 @@ func TestTemplateParsesWithHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"protocol.js", "filter.js", "settings.js", "tasks/heartbeat.js"} {
+	for _, want := range []string{plugin.ProtocolEntry, "filters/log-request.js", "settings.js", "tasks/heartbeat.js"} {
 		if _, ok := pkg.Files[want]; !ok {
 			t.Fatalf("missing %s", want)
 		}

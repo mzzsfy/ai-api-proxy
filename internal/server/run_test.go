@@ -33,10 +33,10 @@ func testDirs(pluginsDir, builtinDir string) *Config {
 func writeAAP(t *testing.T, dir, name, version, js string) {
 	t.Helper()
 	manifest := `{"manifestVersion":1,"name":"` + name + `","version":"` + version + `","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"openai-completions","features":["tools"],"secretRefs":["api_key"]}}}`
 	data, err := plugin.BuildAAP(
 		mustManifest(t, manifest),
-		map[string][]byte{"p.js": []byte(js)},
+		map[string][]byte{plugin.ProtocolEntry: []byte(js)},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -54,11 +54,11 @@ func writePackageDir(t *testing.T, root, name, version, protocol, js string) str
 		t.Fatal(err)
 	}
 	manifest := `{"manifestVersion":1,"name":"` + name + `","version":"` + version + `","parts":{
-		"protocol":{"entry":"p.js","protocol":"` + protocol + `","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"` + protocol + `","features":["tools"],"secretRefs":["api_key"]}}}`
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "p.js"), []byte(js), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "protocol.js"), []byte(js), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "test", "p.test.js"), []byte("// 测试资产随包分发\n"), 0o600); err != nil {

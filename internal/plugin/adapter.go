@@ -56,8 +56,8 @@ func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target,
 // buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(实例配置归上游,不阻塞安装)
 func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Protocol, error) {
 	part := pkg.Manifest.Parts.Protocol
-	src := pkg.Files[part.Entry]
-	prog, err := Compile(src, part.Entry)
+	src := pkg.Files[ProtocolEntry]
+	prog, err := Compile(src, ProtocolEntry)
 	if err != nil {
 		return nil, err
 	}
@@ -78,16 +78,22 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 	// 声明的协议全名并入实例配置:部件按协议名渲染请求/事件(config.protocol)
 	params = mergeProtocol(params, part.Protocol)
 	factory := func() (*hookInstance, error) {
-		return newInstance(prog, part.Entry, params, newDeps())
+		return newInstance(prog, ProtocolEntry, params, newDeps())
 	}
 	first, err := factory()
 	if err != nil {
 		return nil, fmt.Errorf("protocol %s: %w", pkg.Manifest.Name, err)
 	}
-	// 双向绑定校验:声明 streaming ↔ mapEvent;non_streaming ↔ mapResponse(对称)
+	// 形态支持由实现推导(有 mapEvent = 支持流式;有 mapResponse = 支持非流式),manifest 不声明
 	hooks := first.hooks
-	support := pipeline.Supports{Forms: part.Form, Features: part.Features}
-	if err := validateProtocolBindings(pkg.Manifest.Name, part, hooks); err != nil {
+	support := pipeline.Supports{Features: part.Features}
+	if hooks.MapEvent != nil {
+		support.Forms = append(support.Forms, string(FormStreaming))
+	}
+	if hooks.MapResponse != nil {
+		support.Forms = append(support.Forms, string(FormNonStreaming))
+	}
+	if err := validateProtocolBindings(pkg.Manifest.Name, hooks); err != nil {
 		return nil, err
 	}
 	pool, err := newRuntimePool(poolSize(), QueueTimeout, factory)
@@ -113,36 +119,15 @@ func mergeProtocol(params map[string]any, protocol string) map[string]any {
 	return out
 }
 
-// validateProtocolBindings 声明↔实现双向对称 + buildRequest 必备
-func validateProtocolBindings(name string, part *ProtocolPart, hooks *Hooks) error {
-	for _, f := range part.Form {
-		if f == string(FormStreaming) && hooks.MapEvent == nil {
-			return fmt.Errorf("protocol %s: declares streaming but mapEvent missing", name)
-		}
-		if f == string(FormNonStreaming) && hooks.MapResponse == nil {
-			return fmt.Errorf("protocol %s: declares non_streaming but mapResponse missing", name)
-		}
-	}
-	if hooks.MapEvent != nil && !formDeclared(part.Form, string(FormStreaming)) {
-		return fmt.Errorf("protocol %s: mapEvent implemented but streaming not declared", name)
-	}
-	if hooks.MapResponse != nil && !formDeclared(part.Form, string(FormNonStreaming)) {
-		return fmt.Errorf("protocol %s: mapResponse implemented but non_streaming not declared", name)
-	}
+// validateProtocolBindings 实现必备校验(buildRequest 必实现;至少支持一形态)
+func validateProtocolBindings(name string, hooks *Hooks) error {
 	if hooks.BuildRequest == nil {
 		return fmt.Errorf("protocol %s: buildRequest missing", name)
 	}
-	return nil
-}
-
-// formDeclared 形态是否已声明
-func formDeclared(forms []string, form string) bool {
-	for _, f := range forms {
-		if f == form {
-			return true
-		}
+	if hooks.MapEvent == nil && hooks.MapResponse == nil {
+		return fmt.Errorf("protocol %s: no forms supported (implement mapEvent or mapResponse)", name)
 	}
-	return false
+	return nil
 }
 
 func (g *gojaProtocol) Name() string { return g.name }
@@ -373,8 +358,9 @@ func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecre
 
 // buildFilter 实例化主体;enforceSchema=false 供安装期结构校验
 func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Filter, error) {
-	src := pkg.Files[part.Entry]
-	prog, err := Compile(src, part.Entry)
+	entry := ProtocolEntryFor("filter", part.Name)
+	src := pkg.Files[entry]
+	prog, err := Compile(src, entry)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +379,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSec
 		}
 	}
 	factory := func() (*hookInstance, error) {
-		return newInstance(prog, part.Entry, params, newDeps())
+		return newInstance(prog, entry, params, newDeps())
 	}
 	first, err := factory()
 	if err != nil {

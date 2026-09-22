@@ -478,9 +478,9 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 	protoSrc := "module.exports={buildRequest:function(ctx,req){return {url:String(util.key('endpoint')),method:'POST',headers:{},body:req};},mapEvent:function(ctx,e){return '[]';}}"
 	pkg := &Package{
 		Manifest: &Manifest{ManifestVersion: ManifestVersion, Name: "kp", Version: "0.1.0"},
-		Files:    map[string][]byte{"p.js": []byte(protoSrc)},
+		Files:    map[string][]byte{ProtocolEntry: []byte(protoSrc)},
 	}
-	pkg.Manifest.Parts.Protocol = &ProtocolPart{Entry: "p.js", Protocol: "openai-completions", Form: []string{"streaming"}}
+	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
 	ks := NewKeysStore(testKeysDB(t))
 	_ = ks.Set("kp", map[string]any{"endpoint": "https://a"})
 	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil)
@@ -510,9 +510,9 @@ func TestHooks_UtilNoListInProtocol(t *testing.T) {
 	protoSrc := "module.exports={buildRequest:function(ctx,req){return {url:String(util.list===undefined),method:'POST',headers:{},body:req};},mapEvent:function(ctx,e){return '[]';}}"
 	pkg := &Package{
 		Manifest: &Manifest{ManifestVersion: ManifestVersion, Name: "kp", Version: "0.1.0"},
-		Files:    map[string][]byte{"p.js": []byte(protoSrc)},
+		Files:    map[string][]byte{ProtocolEntry: []byte(protoSrc)},
 	}
-	pkg.Manifest.Parts.Protocol = &ProtocolPart{Entry: "p.js", Protocol: "openai-completions", Form: []string{"streaming"}}
+	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
 	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return nil, false }, nil)
 	if err != nil {
 		t.Fatal(err)

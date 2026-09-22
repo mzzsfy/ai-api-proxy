@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -139,17 +140,17 @@ transports:
 		t.Fatalf("login %d: %s", status, body)
 	}
 	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
-		aapZip(t, jsProtoManifest, map[string]string{"p.js": jsProtoSrc}))
+		aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc}))
 	if status != http.StatusOK {
 		t.Fatalf("install js-openai %d: %s", status, body)
 	}
 	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
-		aapZip(t, jsProtoAnthropicManifest, map[string]string{"p.js": jsProtoSrc}))
+		aapZip(t, jsProtoAnthropicManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc}))
 	if status != http.StatusOK {
 		t.Fatalf("install js-anthropic %d: %s", status, body)
 	}
 	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
-		aapZip(t, rewriteManifest, map[string]string{"f.js": rewriteSrc}))
+		aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc}))
 	if status != http.StatusOK {
 		t.Fatalf("install rewrite-model %d: %s", status, body)
 	}

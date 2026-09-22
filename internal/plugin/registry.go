@@ -199,7 +199,6 @@ func (r *Registry) Inspect(data []byte) (map[string]any, error) {
 	}
 	if p := m.Parts.Protocol; p != nil {
 		out["protocol"] = p.Protocol
-		out["form"] = p.Form
 		out["features"] = p.Features
 	}
 	if h := m.Parts.Hooks; h != nil {
@@ -312,6 +311,44 @@ func (r *Registry) DeclaredProtocol(name string) string {
 	return p.Manifest.Parts.Protocol.Protocol
 }
 
+// ProtocolSupports 包协议的形态/能力支持(内置走工厂实例;JS 包实现推导:mapEvent=流式 mapResponse=非流式;不可判定 nil)
+func (r *Registry) ProtocolSupports(name string) *pipeline.Supports {
+	r.mu.RLock()
+	p, ok := r.pkgs[name]
+	r.mu.RUnlock()
+	if !ok || p.Manifest.Parts.Protocol == nil {
+		return nil
+	}
+	if factory, isBuiltin := r.builtins[name]; isBuiltin {
+		proto, err := factory(BuiltinDeps{})
+		if err != nil {
+			return nil
+		}
+		s := proto.Supports()
+		return &s
+	}
+	src, ok := p.Files[ProtocolEntry]
+	if !ok {
+		return nil
+	}
+	prog, err := Compile(src, ProtocolEntry)
+	if err != nil {
+		return nil
+	}
+	hooks, err := ProbeHooks(prog)
+	if err != nil {
+		return nil
+	}
+	s := pipeline.Supports{Features: p.Manifest.Parts.Protocol.Features}
+	if hooks.MapEvent != nil {
+		s.Forms = append(s.Forms, string(FormStreaming))
+	}
+	if hooks.MapResponse != nil {
+		s.Forms = append(s.Forms, string(FormNonStreaming))
+	}
+	return &s
+}
+
 // Export 导出 .aap 字节(manifest+parts 重打包;secrets 在 upstream 层,包内天然无凭据)
 func (r *Registry) Export(name string) ([]byte, error) {
 	r.mu.RLock()
@@ -392,11 +429,11 @@ func partEntry(pkg *Package, kind, partName string) (string, error) {
 		if pkg.Manifest.Parts.Protocol == nil {
 			return "", fmt.Errorf("package %q has no protocol part", pkg.Manifest.Name)
 		}
-		return pkg.Manifest.Parts.Protocol.Entry, nil
+		return ProtocolEntry, nil
 	case "filter":
 		for _, fp := range pkg.Manifest.Parts.Filters {
 			if fp.Name == partName {
-				return fp.Entry, nil
+				return ProtocolEntryFor("filter", partName), nil
 			}
 		}
 		return "", fmt.Errorf("filter %q not found in %q", partName, pkg.Manifest.Name)

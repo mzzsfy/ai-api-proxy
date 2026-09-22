@@ -94,9 +94,9 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		return &builtin.Protocol{TargetSecrets: deps.TargetSecrets}, nil
 	})
 	manifest := `{"manifestVersion":1,"name":"openai-compatible","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"openai-completions","features":["tools","vision"],"secretRefs":["api_key"]}}}`
 	protoSrc := `module.exports = {};`
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"p.js": protoSrc})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: protoSrc})); err != nil {
 		t.Fatal(err)
 	}
 	secrets := &memSecrets{m: map[string]map[string]string{}}
@@ -152,11 +152,11 @@ func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 // installJSProtocol 换装 JS 协议包(非内置,走完整管道;上游 SSE 直通语义)
 func (f *fixture) installJSProtocol(t *testing.T) {
 	t.Helper()
-	f.installJSProtocolAs(t, "openai-completions", []string{"streaming"})
+	f.installJSProtocolAs(t, "openai-completions")
 }
 
-// installJSProtocolAs 装 JS 协议包并换装注册表(声明协议与形态可指定)
-func (f *fixture) installJSProtocolAs(t *testing.T, protocol string, forms []string) {
+// installJSProtocolAs 装 JS 协议包并换装注册表(协议可指定;形态由实现推导)
+func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/js.db")
 	if err != nil {
@@ -177,15 +177,8 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string, forms []str
 		}
 	}
 	pkgs := plugin.NewRegistry(db)
-	openaiForm := []string{"streaming", "non_streaming"}
-	anthropicFormDecl := []string{"non_streaming"}
-	declaredForm := openaiForm
-	if protocol == "anthropic-messages" {
-		declaredForm = anthropicFormDecl
-	}
-	formJSON, _ := json.Marshal(declaredForm)
 	manifest := `{"manifestVersion":1,"name":"js-proto","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"` + protocol + `","form":` + string(formJSON) + `,"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"` + protocol + `","features":["tools","vision"],"secretRefs":["api_key"]}}}`
 	src := `module.exports = function (config) {
 		return { buildRequest: function (ctx, entry) {
 			var key = util.secret("api_key");
@@ -207,7 +200,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string, forms []str
 		mapResponse: function (ctx, b) { return b; } };
 	};`
 	}
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"p.js": src})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})); err != nil {
 		t.Fatal(err)
 	}
 	reg := upstream.NewRegistry(db, pkgs, f.g.Secrets)
@@ -296,7 +289,7 @@ func TestChatCompletions_UpstreamTerminal(t *testing.T) {
 func TestExhausted_LastStatusPassthrough(t *testing.T) {
 	// Given 非内置协议(JS 包)+ 上游 503 When 请求 Then 透传上游状态与原始 body
 	f := newFixture(t, 503, "application/json", `{"error":{"message":"overloaded upstream"}}`)
-	f.installJSProtocolAs(t, "openai-completions", []string{"streaming", "non_streaming"})
+	f.installJSProtocolAs(t, "openai-completions")
 	body := `{"model":"test-model","messages":[]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -335,7 +328,7 @@ func TestMessages_CapabilityMismatch400(t *testing.T) {
 func TestMessages_DeclaredProtocolServes(t *testing.T) {
 	// Given 上游声明 anthropic-messages When anthropic 入口请求 Then 响应体原样透传
 	f := newFixture(t, 200, "application/json", `{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}]}`)
-	f.installJSProtocolAs(t, "anthropic-messages", []string{"streaming", "non_streaming"})
+	f.installJSProtocolAs(t, "anthropic-messages")
 	body := `{"model":"test-model","max_tokens":10,"messages":[{"role":"user","content":"q"}]}`
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 	w := httptest.NewRecorder()

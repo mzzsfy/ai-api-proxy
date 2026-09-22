@@ -7,8 +7,6 @@
   "parts": {
     "protocol": {
       "protocol": "openai-completions",
-      "entry": "protocol.js",
-      "form": ["streaming", "non_streaming"],
       "features": [],
       "secretRefs": ["api_key"],
       "configSchema": {

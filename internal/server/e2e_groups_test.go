@@ -2,6 +2,8 @@ package server
 
 import (
 	"archive/zip"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -170,11 +172,11 @@ func aapZip(t *testing.T, manifest string, files map[string]string) []byte {
 }
 
 const jsProtoManifest = `{"manifestVersion":1,"name":"js-openai","version":"1.0.0",
-	"parts":{"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+	"parts":{"protocol":{"protocol":"openai-completions","features":["tools","vision"],"secretRefs":["api_key"]}}}`
 
 // jsProtoAnthropicManifest 同一部件源码的另一协议声明(anthropic-messages)
 const jsProtoAnthropicManifest = `{"manifestVersion":1,"name":"js-anthropic","version":"1.0.0",
-	"parts":{"protocol":{"entry":"p.js","protocol":"anthropic-messages","form":["streaming","non_streaming"],"features":["tools","vision"],"secretRefs":["api_key"]}}}`
+	"parts":{"protocol":{"protocol":"anthropic-messages","features":["tools","vision"],"secretRefs":["api_key"]}}}`
 
 // jsProtoSrc 真实 JS 协议部件:构造请求/帧解包(声明协议事件数组)/响应透传
 // 协议由工厂 config 注入(部件声明的协议名随 config.protocol 下发)
@@ -211,7 +213,7 @@ const jsProtoSrc = `module.exports = function (config) {
 };`
 
 const rewriteManifest = `{"manifestVersion":1,"name":"rewrite-model","version":"1.0.0","parts":{
-	"filters":[{"name":"rewrite","entry":"f.js","configSchema":{"type":"object","properties":{"model":{"type":"string"}},"required":["model"]}}]}}`
+	"filters":[{"name":"rewrite","configSchema":{"type":"object","properties":{"model":{"type":"string"}},"required":["model"]}}]}}`
 
 // rewriteSrc 真实 JS 修改部件:改写请求模型名
 const rewriteSrc = `module.exports = function (config) {
@@ -277,14 +279,14 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 	t.Cleanup(func() { _ = app.Close() })
 	// 安装 2 个真实插件包
 	ctx := context.Background()
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{"p.js": jsProtoSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
 		t.Fatal(err)
 	}
 	// 同源码的 anthropic 协议声明包(声明式单协议:入口 anthropic 需上游声明 anthropic-messages)
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{"p.js": jsProtoSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"f.js": rewriteSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
 	// mkUpstream 按入口协议装组:anthropic 入口组用 anthropic 声明包

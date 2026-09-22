@@ -30,19 +30,35 @@ const (
 	FormNonStreaming = pipeline.FormNonStreaming
 )
 
-// ProtocolPart protocol 部件声明(声明式单协议:一个包恰服务一种协议)
-type ProtocolPart struct {
-	Entry      string   `json:"entry"`
-	Protocol   string   `json:"protocol"`
-	Form       []string `json:"form"`
-	Features   []string `json:"features"`
-	SecretRefs []string `json:"secretRefs"`
+// 部件路径约定(manifest 不写 entry:约定即路径)
+const (
+	ProtocolEntry      = "protocol.js"             // protocol 单例部件固定路径
+	FilterEntryPrefix  = "filters/"                // filter 部件 = filters/<name>.js
+	HooksTaskEntryFmt  = "tasks/%s.js"             // hooks 任务缺省 = tasks/<name>.js
+)
+
+// ProtocolEntryFor 部件入口路径的唯一定义点(manifest 不承载 entry)
+func ProtocolEntryFor(kind, name string) string {
+	switch kind {
+	case "protocol":
+		return ProtocolEntry
+	case "filter":
+		return FilterEntryPrefix + name + ".js"
+	default:
+		return fmt.Sprintf(HooksTaskEntryFmt, name)
+	}
 }
 
-// FilterPart filter 部件声明
+// ProtocolPart protocol 部件声明(声明式单协议:一个包恰服务一种协议;路径约定 protocol.js)
+type ProtocolPart struct {
+	Protocol   string   `json:"protocol"`
+	Features   []string `json:"features,omitempty"`
+	SecretRefs []string `json:"secretRefs,omitempty"`
+}
+
+// FilterPart filter 部件声明(路径约定 filters/<name>.js)
 type FilterPart struct {
 	Name         string          `json:"name"`
-	Entry        string          `json:"entry"`
 	ConfigSchema json.RawMessage `json:"configSchema,omitempty"`
 	SecretRefs   []string        `json:"secretRefs,omitempty"`
 }
@@ -79,7 +95,6 @@ type Manifest struct {
 	} `json:"parts"`
 	UpstreamTemplate json.RawMessage            `json:"upstreamTemplate,omitempty"`
 	ConfigSchema     json.RawMessage            `json:"configSchema,omitempty"`
-	KeySchema        json.RawMessage            `json:"keySchema,omitempty"` // 包级 key 键声明(仅 GUI 提示,不校验)
 	Extra            map[string]json.RawMessage `json:"-"`
 }
 
@@ -127,28 +142,17 @@ func (p *Package) Validate() error {
 	if proto == nil && len(filters) == 0 && m.Parts.Hooks == nil {
 		return fmt.Errorf("package has no parts: need protocol, filters or hooks")
 	}
-	// protocol 声明绑定:协议全名 + form 必填至少一
+	// protocol 声明绑定:协议全名(形态由实现推导,不在 manifest 声明)
 	if proto != nil {
 		if proto.Protocol != string(ProtocolOpenAICompletions) && proto.Protocol != string(ProtocolAnthropicMessages) {
 			return fmt.Errorf("protocol: unknown protocol %q (want %s | %s)",
 				proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
 		}
-		if len(proto.Form) == 0 {
-			return fmt.Errorf("protocol: form required (at least one of streaming/non_streaming)")
-		}
-		for _, f := range proto.Form {
-			if f != string(FormStreaming) && f != string(FormNonStreaming) {
-				return fmt.Errorf("protocol: unknown form %q", f)
-			}
-		}
-		if proto.Entry == "" {
-			return fmt.Errorf("protocol: entry required")
-		}
-		if _, ok := p.Files[proto.Entry]; !ok {
-			return fmt.Errorf("protocol: entry %q missing in package", proto.Entry)
+		if _, ok := p.Files[ProtocolEntry]; !ok {
+			return fmt.Errorf("protocol: %s missing in package", ProtocolEntry)
 		}
 	}
-	// filter 声明绑定:name 包内唯一 + entry 存在
+	// filter 声明绑定:name 包内唯一 + 约定路径存在
 	seen := map[string]bool{}
 	for _, fp := range filters {
 		if fp.Name == "" {
@@ -158,11 +162,9 @@ func (p *Package) Validate() error {
 			return fmt.Errorf("filter %q duplicated", fp.Name)
 		}
 		seen[fp.Name] = true
-		if fp.Entry == "" {
-			return fmt.Errorf("filter %s: entry required", fp.Name)
-		}
-		if _, ok := p.Files[fp.Entry]; !ok {
-			return fmt.Errorf("filter %s: entry %q missing in package", fp.Name, fp.Entry)
+		entry := ProtocolEntryFor("filter", fp.Name)
+		if _, ok := p.Files[entry]; !ok {
+			return fmt.Errorf("filter %s: %s missing in package", fp.Name, entry)
 		}
 	}
 	// hooks 声明绑定:任务文件存在 + task 名唯一 + 调度形态合法(cron 或 next 二选一)
@@ -178,7 +180,7 @@ func (p *Package) Validate() error {
 			seenTask[tk.Name] = true
 			entry := tk.Entry
 			if entry == "" {
-				entry = "tasks/" + tk.Name + ".js"
+				entry = ProtocolEntryFor("hooks", tk.Name)
 			}
 			if _, ok := p.Files[entry]; !ok {
 				return fmt.Errorf("hooks task %s: entry %q missing in package", tk.Name, entry)

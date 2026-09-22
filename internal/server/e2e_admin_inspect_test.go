@@ -136,10 +136,10 @@ func TestAdmin_ListPackagesIncludesProtocolName(t *testing.T) {
 	_ = ctx
 	mm := &plugin.Manifest{ManifestVersion: plugin.ManifestVersion, Name: "proto-pkg", Version: "1.0.0"}
 	mm.Parts.Protocol = &plugin.ProtocolPart{
-		Entry: "p.js", Protocol: "anthropic-messages",
-		Form: []string{"streaming"}, Features: []string{"tools"},
+		Protocol: "anthropic-messages",
+		Features: []string{"tools"},
 	}
-	data, err := plugin.BuildAAP(mm, map[string][]byte{"p.js": []byte(`module.exports={
+	data, err := plugin.BuildAAP(mm, map[string][]byte{plugin.ProtocolEntry: []byte(`module.exports={
 		buildRequest:function(ctx,e){return{url:"http://x",method:"POST",headers:{},body:e};},
 		mapEvent:function(ctx,ev){return "[]";}}`)})
 	if err != nil {

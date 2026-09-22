@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"bufio"
 	"context"
 	"encoding/binary"
@@ -165,7 +166,7 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = app.Close() })
 	ctx := context.Background()
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{"p.js": jsProtoSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
 		t.Fatal(err)
 	}
 	u := &upstream.Upstream{

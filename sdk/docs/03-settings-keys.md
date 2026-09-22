@@ -108,7 +108,7 @@ module.exports = {
 - fields 值的键名:声明里加 `name` 字段(如 `setting.string({ name: "account", description: "账号" })`),否则 GUI 按字段描述/序号兜底——**建议显式 name**
 - keyAction/keySubmit 才有 `ctx.keys.set` 与出站意义;keyWrite/keyRead 只有 keys.get/previous
 - 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败
-- GUI「新增凭据」预填名来源:manifest `keySchema` 声明的键名 → 已有键序号 `key-N` 兜底
+- GUI「新增凭据」预填名:已有键序号 `key-N` 兜底;keyForm 声明 fields 后以表单采集为正入口
 
 ### 手动管理兜底
 

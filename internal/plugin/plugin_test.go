@@ -59,8 +59,8 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 const goodManifest = `{"manifestVersion":1,"name":"demo","version":"1.0.0","parts":{
-	"protocol":{"entry":"protocol.js","protocol":"openai-completions","form":["streaming","non_streaming"],"features":["tools"],"secretRefs":["api_key"]},
-	"filters":[{"name":"identity","entry":"filters/identity.js","configSchema":{"type":"object"}}]}}`
+	"protocol":{"protocol":"openai-completions","features":["tools"],"secretRefs":["api_key"]},
+	"filters":[{"name":"identity","configSchema":{"type":"object"}}]}}`
 
 const protoSrc = `module.exports = {
 	buildRequest: function (ctx, entry) {
@@ -124,49 +124,48 @@ func TestParseAndInstantiate_FullFlow(t *testing.T) {
 	}
 }
 
-func TestValidate_MissingFormRejected(t *testing.T) {
-	// Given protocol 无 form When Install Then 拒绝
+func TestValidate_MissingProtocolNameRejected(t *testing.T) {
+	// Given protocol 无协议槽名 When Install Then 拒绝
 	m := `{"manifestVersion":1,"name":"nfm","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","features":["tools"]}}}`
+		"protocol":{"features":["tools"]}}}`
 	r := NewRegistry(testDB(t))
-	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"p.js": protoSrc})); err == nil {
-		t.Fatal("missing form accepted")
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: protoSrc})); err == nil {
+		t.Fatal("missing protocol name accepted")
 	}
 }
 
 func TestValidate_MissingImplementationRejected(t *testing.T) {
-	// Given 声明 streaming 但缺 mapEvent When Install Then 安装期拒绝(双向绑定校验)
+	// Given 无 mapEvent/mapResponse(两形态都不支持)When Install Then 拒绝(至少支持一形态)
 	m := `{"manifestVersion":1,"name":"noimpl","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
+		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = { buildRequest: function(){return {url:"u"}} };`
 	r := NewRegistry(testDB(t))
-	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"p.js": src}))
-	if err == nil || !strings.Contains(err.Error(), "mapEvent missing") {
+	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src}))
+	if err == nil || !strings.Contains(err.Error(), "no forms") {
 		t.Fatalf("install must reject missing impl: %v", err)
 	}
 }
 
-func TestValidate_ExtraImplRejected(t *testing.T) {
-	// Given 实现 mapResponse 但未声明 non_streaming(多实现)When Install Then 拒绝
+func TestValidate_ExtraImplAccepted(t *testing.T) {
+	// Given 双形态全实现 When Install Then 接受(实现即声明,多实现是合法形态覆盖)
 	m := `{"manifestVersion":1,"name":"extraimpl","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
+		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = { buildRequest: function(){return {url:"u"}},
 		mapEvent: function(ctx,e){ return e; },
 		mapResponse: function(ctx,b){ return b; } };`
 	r := NewRegistry(testDB(t))
-	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"p.js": src}))
-	if err == nil || !strings.Contains(err.Error(), "non_streaming not declared") {
-		t.Fatalf("install must reject extra impl: %v", err)
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src})); err != nil {
+		t.Fatalf("full impl must be accepted: %v", err)
 	}
 }
 
 func TestValidate_SyntaxErrorLineReported(t *testing.T) {
 	// Given 语法错误部件 When Install Then 错误带行号
 	m := `{"manifestVersion":1,"name":"badline","version":"1","parts":{
-		"filters":[{"name":"f","entry":"f.js"}]}}`
+		"filters":[{"name":"f"}]}}`
 	src := "module.exports = function (config) {\n  return { mapRequest: function (ctx, p) {\n    return p  // 缺分号致下一行语法错\n  } };\n};\n)))"
 	r := NewRegistry(testDB(t))
-	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"f.js": src}))
+	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/f.js": src}))
 	if err == nil || !strings.Contains(err.Error(), "Line 6") {
 		t.Fatalf("syntax error must report line: %v", err)
 	}
@@ -175,11 +174,11 @@ func TestValidate_SyntaxErrorLineReported(t *testing.T) {
 func TestDrift_RequiredMissingRejectedAtInstantiate(t *testing.T) {
 	// Given configSchema required=model 且实例缺该键 When NewFilter Then 错误注明待补字段
 	m := `{"manifestVersion":1,"name":"drift","version":"1","parts":{
-		"filters":[{"name":"rw","entry":"f.js","configSchema":{"type":"object","required":["model"],"properties":{"model":{"type":"string"}}}}]}}`
+		"filters":[{"name":"rw","configSchema":{"type":"object","required":["model"],"properties":{"model":{"type":"string"}}}}]}}`
 	src := `module.exports = function (config) {
 		return { mapRequest: function (ctx, p) { return p; } };
 	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"f.js": src}))
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/rw.js": src}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +196,11 @@ func TestDrift_RequiredMissingRejectedAtInstantiate(t *testing.T) {
 func TestDrift_UnknownKeysStripped(t *testing.T) {
 	// Given 实例参数含 schema 外未知键 When NewFilter Then 注入 config 不含未知键
 	m := `{"manifestVersion":1,"name":"strip","version":"1","parts":{
-		"filters":[{"name":"rw","entry":"f.js","configSchema":{"type":"object","properties":{"keep":{"type":"string"}}}}]}}`
+		"filters":[{"name":"rw","configSchema":{"type":"object","properties":{"keep":{"type":"string"}}}}]}}`
 	src := `module.exports = function (config) {
 		return { mapRequest: function (ctx, p) { return JSON.stringify(config); } };
 	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"f.js": src}))
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/rw.js": src}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,11 +219,11 @@ func TestDrift_UnknownKeysStripped(t *testing.T) {
 }
 
 func TestValidate_DuplicatedFilterNameRejected(t *testing.T) {
-	// Given 同包重复 filter 名 When Install Then 拒绝
+	// Given 同包重复 filter 名 When Install Then 拒绝(名即路径,重复名 = 重复路径)
 	m := `{"manifestVersion":1,"name":"dup","version":"1","parts":{
-		"filters":[{"name":"same","entry":"a.js"},{"name":"same","entry":"b.js"}]}}`
+		"filters":[{"name":"same"},{"name":"same"}]}}`
 	r := NewRegistry(testDB(t))
-	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"a.js": filterSrc, "b.js": filterSrc})); err == nil {
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/same.js": filterSrc})); err == nil {
 		t.Fatal("duplicate filter accepted")
 	}
 }
@@ -321,9 +320,9 @@ func TestUpdatePart_CompileValidation(t *testing.T) {
 func TestRuntime_SyncViolationDetected(t *testing.T) {
 	// Given mapEvent 返回 Promise When MapEvent Then 同步违规错误
 	m := `{"manifestVersion":1,"name":"async","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["streaming"]}}}`
+		"protocol":{"protocol":"openai-completions"}}}`
 	asyncSrc := `module.exports = { buildRequest: function(){return {url:"u"}}, mapEvent: function(ctx, e){ return Promise.resolve(e); } };`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"p.js": asyncSrc}))
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{ProtocolEntry: asyncSrc}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,8 +343,8 @@ func TestRuntime_FilterFactoryConfig(t *testing.T) {
 		} };
 	};`
 	m := `{"manifestVersion":1,"name":"cfg","version":"1","parts":{
-		"filters":[{"name":"tag","entry":"f.js","configSchema":{"type":"object"}}]}}`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"f.js": cfgSrc}))
+		"filters":[{"name":"tag","configSchema":{"type":"object"}}]}}`
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/tag.js": cfgSrc}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +364,7 @@ func TestRuntime_FilterFactoryConfig(t *testing.T) {
 func TestUtil_TemplateAndPath(t *testing.T) {
 	// Given util 注入 When template/get/set Then 点路径含数组索引可用
 	m := `{"manifestVersion":1,"name":"ut","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["non_streaming"]}}}`
+		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = {
 		buildRequest: function (ctx, entry) {
 			var o = util.set(JSON.parse(entry), "messages[0].role", "system");
@@ -374,7 +373,7 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 		},
 		mapResponse: function (ctx, b) { return b; }
 	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"p.js": src}))
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{ProtocolEntry: src}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +393,7 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 func TestInspect_MasksSecrets(t *testing.T) {
 	// Given 部件 inspect 含凭据值 When 输出 Then 凭据替换 ***
 	m := `{"manifestVersion":1,"name":"mask","version":"1","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":["non_streaming"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"openai-completions","secretRefs":["api_key"]}}}`
 	src := `module.exports = {
 		buildRequest: function (ctx, entry) {
 			var k = util.secret("api_key");
@@ -402,7 +401,7 @@ func TestInspect_MasksSecrets(t *testing.T) {
 		},
 		mapResponse: function (ctx, b) { return b; }
 	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"p.js": src}))
+	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{ProtocolEntry: src}))
 	if err != nil {
 		t.Fatal(err)
 	}

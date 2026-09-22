@@ -96,19 +96,18 @@ func installBuiltinLikePkg(t *testing.T, pkgs *plugin.Registry, name string) {
 	installBuiltinLikePkgForm(t, pkgs, name, `["streaming","non_streaming"]`, `["tools"]`)
 }
 
-// installBuiltinLikePkgForm 按给定 form/features 声明装包(形态把关用例)
-// features 逐项生成实现,保证声明↔实现对称
+// installBuiltinLikePkgForm 按给定 form/features 装包(形态把关用例;form 即实现——导出哪个 map 钩子就支持哪形态)
 func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, features string) {
 	t.Helper()
 	var impl string
-	if strings.Contains(features, `"streaming"`) || strings.Contains(form, `"streaming"`) {
+	if strings.Contains(form, `"streaming"`) {
 		impl += `mapEvent: function (ctx, e) { return e; },`
 	}
 	if strings.Contains(form, `"non_streaming"`) {
 		impl += `mapResponse: function (ctx, b) { return b; },`
 	}
 	manifest := `{"manifestVersion":1,"name":"` + name + `","version":"1.0.0","parts":{
-		"protocol":{"entry":"p.js","protocol":"openai-completions","form":` + form + `,"features":` + features + `,"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"openai-completions","features":` + features + `,"secretRefs":["api_key"]}}}`
 	src := fmt.Sprintf(`module.exports = function (config) {
 		return {
 			buildRequest: function (ctx, entry) {
@@ -119,7 +118,7 @@ func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, 
 		};
 	};`, impl)
 	// 经 zip 装包走 Install 全流程
-	data := buildZip(t, manifest, map[string]string{"p.js": src})
+	data := buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})
 	if err := pkgs.Install(context.Background(), data); err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +138,9 @@ func TestValidate_MissingSecretsKey(t *testing.T) {
 func TestValidate_BaseWithoutProtocol(t *testing.T) {
 	// Given base 仅 filters 包(无 protocol 部件)When Save Then 拒建
 	pkgs, reg := testEnv(t)
-	manifest := `{"manifestVersion":1,"name":"onlyf","version":"1","parts":{"filters":[{"name":"f","entry":"a.js"}]}}`
+	manifest := `{"manifestVersion":1,"name":"onlyf","version":"1","parts":{"filters":[{"name":"f"}]}}`
 	src := `module.exports = { mapRequest: function (ctx, p) { return p; } };`
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"a.js": src})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"filters/f.js": src})); err != nil {
 		t.Fatal(err)
 	}
 	u := &Upstream{Name: "u2", Base: PackageRef{Package: "onlyf"}, Models: []string{"m"}, Targets: []Target{
@@ -250,7 +249,7 @@ func TestPick_CapabilityErrorCarriesReasons(t *testing.T) {
 	if pe != PickCapability {
 		t.Fatalf("want Capability, got %v", pe)
 	}
-	if !strings.Contains(err.Error(), "ns declares non_streaming only") {
+	if !strings.Contains(err.Error(), "ns implements non_streaming only") {
 		t.Fatalf("form reason missing: %v", err)
 	}
 	if !strings.Contains(err.Error(), "nv lacks thinking") {
@@ -280,9 +279,9 @@ func TestResolve_FilterOrderAndSecretsRef(t *testing.T) {
 	// Given extras+base 各一 filter When Resolve Then extras 先于 base;SecretsRef=upstream/target
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "base")
-	fManifest := `{"manifestVersion":1,"name":"fx","version":"1","parts":{"filters":[{"name":"f1","entry":"f.js"}]}}`
+	fManifest := `{"manifestVersion":1,"name":"fx","version":"1","parts":{"filters":[{"name":"f1"}]}}`
 	fsrc := `module.exports = { mapRequest: function (ctx, p) { return p; } };`
-	_ = pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"f.js": fsrc}))
+	_ = pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"filters/f1.js": fsrc}))
 	u := &Upstream{Name: "u", Enabled: true, Base: PackageRef{Package: "base"}, Extras: []PackageRef{{Package: "fx"}},
 		Models: []string{"m"}, FilterParams: map[string]map[string]any{},
 		Targets: []Target{{Name: "t1", BaseURL: "https://x", Enabled: true, Secrets: map[string]string{"api_key": "k"}}}}
@@ -307,9 +306,9 @@ func TestResolve_FiltersEnabledToggle(t *testing.T) {
 	// Given filter 启停=false When Resolve Then 该 filter 被过滤
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "base")
-	fManifest := `{"manifestVersion":1,"name":"fx","version":"1","parts":{"filters":[{"name":"f1","entry":"f.js"}]}}`
+	fManifest := `{"manifestVersion":1,"name":"fx","version":"1","parts":{"filters":[{"name":"f1"}]}}`
 	fsrc := `module.exports = { mapRequest: function (ctx, p) { return p; } };`
-	_ = pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"f.js": fsrc}))
+	_ = pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"filters/f1.js": fsrc}))
 	u := &Upstream{Name: "u", Enabled: true, Base: PackageRef{Package: "base"}, Extras: []PackageRef{{Package: "fx"}},
 		Models: []string{"m"}, FiltersEnabled: map[string]bool{"fx/f1": false},
 		Targets: []Target{{Name: "t1", Enabled: true, Secrets: map[string]string{"api_key": "k"}}}}

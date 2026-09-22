@@ -497,11 +497,13 @@ func (r *Registry) mismatchReason(u *Upstream, features []Feature, entry string,
 	if d.Protocol != entry {
 		return u.Name + " declares " + d.Protocol, false
 	}
-	if !hasForm(d.Form, stream) {
+	// 形态由实现推导(内置走工厂实例 Supports)
+	supports := r.pkgs.ProtocolSupports(u.Base.Package)
+	if supports == nil || !hasForm(supports.Forms, stream) {
 		if stream {
-			return u.Name + " declares non_streaming only", false
+			return u.Name + " implements non_streaming only", false
 		}
-		return u.Name + " declares streaming only", false
+		return u.Name + " implements streaming only", false
 	}
 	var missing []string
 	for _, f := range features {
@@ -515,7 +517,7 @@ func (r *Registry) mismatchReason(u *Upstream, features []Feature, entry string,
 	return "", true
 }
 
-// hasForm 入口形态是否被声明
+// hasForm 入口形态是否被支持
 func hasForm(forms []string, stream bool) bool {
 	want := pipeline.FormNonStreaming
 	if stream {

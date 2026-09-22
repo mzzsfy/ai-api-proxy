@@ -299,6 +299,15 @@ func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*
 	return &hookInstance{vm: vm, hooks: hooks, cursor: deps.Cursor}, nil
 }
 
+// ProbeHooks 结构探测:求值一次取钩子存在性(不进池;对象导出形态可探测)
+func ProbeHooks(prog *goja.Program) (*Hooks, error) {
+	inst, err := newInstance(prog, "", map[string]any{}, HostDeps{})
+	if err != nil {
+		return nil, err
+	}
+	return inst.hooks, nil
+}
+
 // Hooks 部件导出的 hook 函数集(同步调用);恰一次直发语义下无 refresh
 type Hooks struct {
 	VM           *goja.Runtime

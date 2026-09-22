@@ -18,8 +18,7 @@ protocol 部件把**入口协议**翻译成**上游协议**。设计是"声明�
 /// <reference path="../ai-api-proxy.d.ts" />
 module.exports = {
   // 必实现:入口原文 → 上游请求(同步)
-  buildRequest: function (ctx, entry) {
-    var body = JSON.parse(entry);
+  buildRequest: function (ctx, entry) {    var body = JSON.parse(entry);
     return {
       url: ctx.target.baseUrl + "/v1/chat/completions",
       method: "POST",
@@ -59,14 +58,12 @@ module.exports = {
 - `mapResponse(ctx, body)`:上游完整响应体 → 声明协议响应体
 - 管道顺序:buildRequest → 上游 → (流式:mapEvent 逐帧 / 非流式:mapResponse)→ filters 逆序(mapChunk/mapResponse)
 
-## 三、manifest 声明与对称性校验
+## 三、manifest 声明
 
 ```jsonc
 "parts": {
   "protocol": {
-    "protocol": "openai-completions",            // 唯一槽位
-    "entry": "protocol.js",
-    "form": ["streaming", "non_streaming"],      // 支持的形态子集
+    "protocol": "openai-completions",            // 唯一槽位;文件路径约定 protocol.js(manifest 不写 entry)
     "features": ["tools", "vision"],             // 能力标记(入口请求携带未声明能力 → 400)
     "secretRefs": ["api_key"],                   // util.secret 白名单
     "configSchema": { ... }                      // 部件实例参数(可选)
@@ -74,13 +71,7 @@ module.exports = {
 }
 ```
 
-安装期双向强制(声明 ↔ 实现对称,违者拒装):
-
-- 声明 `streaming` → 必须实现 `mapEvent`;实现了 `mapEvent` → 必须声明 `streaming`
-- 声明 `non_streaming` → 必须实现 `mapResponse`;实现了 `mapResponse` → 必须声明 `non_streaming`
-- `buildRequest` 永远必实现;`form` 至少声明一个形态
-
-运行期宿主同样 400:入口请求的流形态不在 form 里、入口协议与槽位不符、请求携带未声明 features。
+**形态由实现推导,manifest 不声明**:`mapEvent` 导出 = 支持流式;`mapResponse` 导出 = 支持非流式;两者都没有 → 拒装。入口请求的流形态不被支持、协议槽不符、携带未声明 features,运行期宿主一律 400,不做转换。
 
 ## 四、实例参数(configSchema)与 factory 形态
 

@@ -19,24 +19,26 @@
 ```
 my-package/
 ├── manifest.json          # 必需;包声明
-├── protocol.js            # protocol 部件(entry 在 manifest 声明)
-├── filter.js              # filter 部件(entry 在 manifest 声明)
+├── protocol.js            # protocol 部件(路径约定:protocol.js)
+├── filters/
+│   └── <name>.js          # filter 部件(路径约定:filters/<name>.js)
 ├── settings.js            # 可选;hooks 包共享参数声明(纯声明,无逻辑)
 ├── init.js                # 可选;onLoad 加载钩子
 ├── keys.js                # 可选;凭据钩子(归一化/详情/添加表单)
 ├── tasks/
-│   └── <task-name>.js     # 任务体;manifest 未写 entry 时按此约定路径找
+│   └── <task-name>.js     # 任务体(路径约定:tasks/<name>.js)
 └── lib/
     └── consts.js          # 可选;共享常量,被 require
 ```
 
 规则:
-- `tasks/<name>.js` 是约定路径:manifest 任务行不写 entry 时,宿主按 `tasks/<该行name>.js` 找文件
-- 多个 crontab 行可指向同一个 entry 文件,运行时用 `ctx.task` 区分是哪一行
+- 全部部件按路径约定寻址,manifest 不写 entry;唯一例外:多个 crontab 行共用一个实现时,任务行可显式写 `entry` 指向同一文件,运行时用 `ctx.task` 区分是哪一行
 - `require("./lib/consts.js")` 包内相对路径:扩展名可省、目录自动找 index.js、同一次任务执行内幂等单例、循环 require 拒装
 - 共享代码与声明都可 require;不允许 npm 依赖
 
 ## 三、manifest.json
+
+**原则:约定路径能表达的绝不写进 manifest。** 部件文件位置全部由约定决定,manifest 只描述推导不出来的事实。
 
 ```jsonc
 {
@@ -51,22 +53,17 @@ my-package/
   "homepage": "https://...",
   "license": "MIT",
 
-  // ── 包级 key 键名提示(可选;仅 GUI 预填名,不校验) ──
-  "keySchema": { "token": "string" },
-
   "parts": {
-    // protocol:主包至多一个
+    // protocol:主包至多一个;文件固定 protocol.js(约定)
     "protocol": {
       "protocol": "openai-completions",          // 槽位:"openai-completions" | "anthropic-messages"
-      "entry": "protocol.js",
-      "form": ["streaming", "non_streaming"],    // 声明了哪个形态就必须实现对应钩子
-      "features": ["tools"],
+      "features": ["tools"],                     // 上游能力标记
       "secretRefs": ["api_key"],                 // 允许 util.secret 读的目标凭据名
       "configSchema": { ... }                    // 部件实例参数 schema(用户建上游时填,经 config 注入)
     },
-    // filters:0..n
+    // filters:0..n;文件约定 filters/<name>.js(manifest 不写路径)
     "filters": [
-      { "name": "log-request", "entry": "filter.js", "configSchema": { ... } }
+      { "name": "log-request", "configSchema": { ... } }
     ],
     // hooks:可选;定时任务声明(crontab 心智模型:一行 = 一个时刻 + 一个命令)
     "hooks": {
@@ -79,7 +76,19 @@ my-package/
 }
 ```
 
-校验红线(拒装):name/version 缺失、`upstream:` 前缀、cron 行与 next 行同现、任务名重复、缺 entry 文件、cron 表达式非法、title >64 字符。
+### 路径约定(manifest 不写 entry)
+
+| 部件 | 文件路径 | 说明 |
+|---|---|---|
+| protocol | `protocol.js` | 固定 |
+| filter | `filters/<name>.js` | name 即路径 |
+| hooks 任务 | `tasks/<name>.js` | 仅当多行 crontab 共用一个实现时才显式写 `entry` 覆盖 |
+
+### 实现即声明
+
+协议部件支持哪些流形态(流式/非流式)由导出推导:`mapEvent` = 支持流式,`mapResponse` = 支持非流式,都没有拒装。manifest 不写 form。
+
+校验红线(拒装):name/version 缺失、`upstream:` 前缀、cron 行与 next 行同现、任务名重复、约定路径文件缺失、cron 表达式非法、title >64 字符。
 
 ## 四、开发循环
 
