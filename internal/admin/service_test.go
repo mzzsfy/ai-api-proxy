@@ -60,6 +60,52 @@ func TestLogin_WrongPassword401(t *testing.T) {
 	}
 }
 
+func TestLogin_PlainConfigured(t *testing.T) {
+	// Given 配置明文口令 When 以该明文登录 Then 200
+	s, plain, err := New("admin", "my-plain-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "" {
+		t.Fatal("configured password must not generate plain")
+	}
+	w, token := login(t, s, "admin", "my-plain-pass")
+	if w.Code != 200 || token == "" {
+		t.Fatalf("plain login: %d", w.Code)
+	}
+}
+
+func TestNew_InvalidBcryptHashRejected(t *testing.T) {
+	// Given $2 前缀但格式非法 When 构造 Then 报错且含配置键名(包装契约)
+	_, _, err := New("admin", "$2a$not-a-valid-hash")
+	if err == nil {
+		t.Fatal("invalid hash must be rejected")
+	}
+	if !strings.Contains(err.Error(), "admin_pass_bcrypt") {
+		t.Fatalf("error must mention config key: %v", err)
+	}
+}
+
+func TestLogin_BcryptVersionVariants(t *testing.T) {
+	// Given 合法哈希替换版本前缀为各变体 When 以明文登录 Then 全部 200
+	// (特征测试:锁定 $2b$/$2x$/$2y$ 前缀按哈希解析)
+	base, err := BcryptHash("s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ver := range bcryptVersions {
+		hash := ver + base[len("$2a$"):]
+		s, _, err := New("admin", hash)
+		if err != nil {
+			t.Fatalf("%s: %v", ver, err)
+		}
+		w, token := login(t, s, "admin", "s3cret")
+		if w.Code != 200 || token == "" {
+			t.Fatalf("%s login: %d", ver, w.Code)
+		}
+	}
+}
+
 func TestLogin_BcryptConfigured(t *testing.T) {
 	// Given 配置 bcrypt 口令 When 以明文登录 Then 通过
 	// (bcrypt 哈希由部署生成;此处自造一圈)

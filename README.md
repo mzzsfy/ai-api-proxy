@@ -33,7 +33,7 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 | listen | 监听地址 | `:8080` |
 | data_dir | SQLite 数据目录 | `./data` |
 | api_keys | 反代入口 Bearer key(必填,空拒绝启动) | - |
-| admin_user / admin_pass_bcrypt | 管理账户;口令空则启动生成随机口令打印一次 | admin / 随机 |
+| admin_user / admin_pass_bcrypt | 管理账户;口令支持明文或 bcrypt 哈希(`$2a$`/`$2b$`/`$2x$`/`$2y$` 开头按哈希解析,以此开头的明文口令不可用),空则启动生成随机口令打印一次 | admin / 随机 |
 | plugins_dir | 普通插件目录(裸 .aap 或含 manifest.json 的包目录)启动时自动导入(幂等) | `./plugins` |
 | builtin_dir | 内置插件目录(随分发的预置包;只补缺,不覆盖用户同名包) | `./builtin-plugins` |
 | pack_dir | 非空 = 只打包不服务:把上述两级目录打成 `<包名>.aap` 落到此目录 | 空(服务模式) |

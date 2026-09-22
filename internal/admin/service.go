@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,8 +43,25 @@ func BcryptHash(plain string) (string, error) {
 	return string(b), err
 }
 
-// New 构造;passBcrypt 为空则生成随机口令(返回明文供启动打印一次)
-func New(user, passBcrypt string) (*Service, string, error) {
+// bcryptVersions bcrypt 哈希版本前缀,命中即按哈希解析而非明文
+var bcryptVersions = []string{"$2a$", "$2b$", "$2x$", "$2y$"}
+
+func isBcryptHash(v string) bool {
+	for _, p := range bcryptVersions {
+		if strings.HasPrefix(v, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// hashPass 生产口令哈希,统一成本
+func hashPass(plain string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+}
+
+// New 构造;配置值支持明文或 bcrypt 哈希($2a$/$2b$/$2x$/$2y$ 开头按哈希解析,仅校验结构格式,哈希体错误会在登录时暴露),其余非空按明文,为空则生成随机口令(返回明文供启动打印一次)
+func New(user, pass string) (*Service, string, error) {
 	s := &Service{
 		user:     user,
 		hmacKey:  make([]byte, 32),
@@ -53,19 +71,30 @@ func New(user, passBcrypt string) (*Service, string, error) {
 		return nil, "", err
 	}
 	var plain string
-	if passBcrypt == "" {
+	switch {
+	case pass == "":
 		b := make([]byte, 18)
 		if _, err := rand.Read(b); err != nil {
 			return nil, "", err
 		}
 		plain = base64.RawURLEncoding.EncodeToString(b)
-		hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+		hash, err := hashPass(plain)
 		if err != nil {
 			return nil, "", err
 		}
 		s.passHash = hash
-	} else {
-		s.passHash = []byte(passBcrypt)
+	case isBcryptHash(pass):
+		// 结构格式非法则启动失败,哈希体错误留待登录比较暴露
+		if _, err := bcrypt.Cost([]byte(pass)); err != nil {
+			return nil, "", fmt.Errorf("admin_pass_bcrypt: %w", err)
+		}
+		s.passHash = []byte(pass)
+	default:
+		hash, err := hashPass(pass)
+		if err != nil {
+			return nil, "", fmt.Errorf("hash admin pass: %w", err)
+		}
+		s.passHash = hash
 	}
 	return s, plain, nil
 }
