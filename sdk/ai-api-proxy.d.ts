@@ -153,7 +153,8 @@ export interface HookHttpResponse {
 /** ctx.keys 包级 key 读写(hooks 部件专属;set 前 current 整体移入 previous) */
 export interface HookKeys {
   get(name: string): unknown;
-  set(values: Record<string, unknown>): void;
+  /** 合并覆写:给定键覆盖,未提及键保留;写前 current 整体快照进 previous */
+  overwrite(values: Record<string, unknown>): void;
   /** 仅热加载提供旧包快照;启停/首载 undefined */
   previous(name: string): unknown;
   /** 键名枚举(排序;不含值——值走 get;多账号遍历场景) */
@@ -219,7 +220,7 @@ export interface InitModule {
 /**
  * keys.js 导出(凭据读写钩子 + 添加表单采集;全部可选)
  * ctx 裁剪:keyWrite/keyRead 仅 keys.get/previous;keyForm 仅 keys.get;
- * keyAction/keySubmit 另含 keys.set + http(采集 = 出站动作)
+ * keyAction/keySubmit 另含 keys.overwrite + http(采集 = 出站动作)
  */
 export interface KeysModule {
   /** 键写入归一化(管理台新增/编辑);undefined/null = 透传;拒绝写入须抛错 */
@@ -228,7 +229,7 @@ export interface KeysModule {
   keyRead?(ctx: HookContext, keyName: string): unknown;
   /**
    * 添加表单声明(声明后 GUI 弹层渲染采集表单)
-   * fields 用 setting 构建器声明;actions 按钮点击回调 keyAction
+   * fields 用 setting 构建器声明(建议显式 name,errors 按它定位输入框);actions 按钮点击回调 keyAction
    */
   keyForm?(ctx: HookContext): {
     fields: SettingDecl[];
@@ -236,8 +237,14 @@ export interface KeysModule {
   };
   /** 表单按钮回调(可出站;如发送验证码);返回值 toast 呈现 */
   keyAction?(ctx: HookContext, action: string, values: Record<string, unknown>): unknown;
-  /** 表单提交(可出站;写入经 ctx.keys.set——校验全部通过后再 set,set 后抛错不回滚);返回值 toast 呈现 */
-  keySubmit?(ctx: HookContext, values: Record<string, unknown>): unknown;
+  /**
+   * 表单提交(可出站;写入经 ctx.keys.overwrite——框架不自动落库,验证码等一次性字段由脚本决定不写)
+   * 返回三通道:string = 成功 toast;{message} = 失败提示(存储不变);{errors: {字段: 原因}} = 字段级拒绝(GUI 逐框标红);抛错 = 崩溃处理
+   */
+  keySubmit?(ctx: HookContext, values: Record<string, unknown>): string | {
+    message?: string;
+    errors?: Record<string, string>;
+  } | void;
   settings?: Record<string, unknown>;
 }
 

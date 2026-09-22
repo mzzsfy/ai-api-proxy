@@ -26,6 +26,8 @@ type Deps struct {
 	Metrics  *metrics.Recorder
 	Secrets  upstream.SecretsStore                                   // "***" 回读合并的旧值来源(kv 唯一存储)
 	TestFunc func(upstreamID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
+	// ChatTestFunc 对话测试(走完整管道;返回延迟/状态码/响应体/错误说明)
+	ChatTestFunc func(ctx context.Context, upstreamID int64, model, message string) (latencyMS int64, status int, body []byte, errMsg string)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
 	SeriesFunc func(minutes int) ([]map[string]any, error)
 	// TransportsFunc 命名传输实例清单(只读;名称+URL)
@@ -48,8 +50,8 @@ type Deps struct {
 	KeyFormFunc func(pkg string) (any, error)
 	// KeyActionFunc 表单按钮回调(可出站)
 	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
-	// KeySubmitFunc 表单提交(回调内 ctx.keys.set 写入;written 收集)
-	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, error)
+	// KeySubmitFunc 表单提交(回调内 ctx.keys.overwrite 写入;written 收集;errors=字段级拒绝)
+	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, map[string]any, error)
 }
 
 // fetch 拉取实现取依赖覆写,缺省内置实现
@@ -87,6 +89,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("PUT /admin/api/upstreams/{id}", d.saveUpstreamByID)
 	mux.HandleFunc("DELETE /admin/api/upstreams/{id}", d.deleteUpstream)
 	mux.HandleFunc("POST /admin/api/upstreams/{id}/test", d.testUpstream)
+	mux.HandleFunc("POST /admin/api/upstreams/{id}/chat-test", d.chatTestUpstream)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/transports", d.listTransports)
@@ -376,16 +379,15 @@ func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 		Description:     "protocol + filter + 定时任务起步模板",
 	}
 	tpl.Parts.Protocol = &plugin.ProtocolPart{
-		Entry: "protocol.js", Protocol: string(plugin.ProtocolOpenAICompletions),
-		Form:     []string{string(plugin.FormStreaming), string(plugin.FormNonStreaming)},
+		Protocol: string(plugin.ProtocolOpenAICompletions),
 		Features: []string{"tools"}, SecretRefs: []string{"api_key"},
 	}
-	tpl.Parts.Filters = []plugin.FilterPart{{Name: "log-request", Entry: "filter.js"}}
+	tpl.Parts.Filters = []plugin.FilterPart{{Name: "log-request"}}
 	tpl.Parts.Hooks = &plugin.HooksPart{Tasks: []plugin.HooksTask{
 		{Name: "heartbeat", Cron: "0 * * * *", TimeoutMs: 10 * 1000},
 	}}
 	files := map[string][]byte{
-		"protocol.js": []byte(`// openai-completions 起步模板:按需改造
+		"protocol.js": []byte(`// openai-completions 起步模板:按需改造(路径约定 protocol.js;流式=导出 mapEvent,非流式=导出 mapResponse)
 module.exports = {
   buildRequest: function (ctx, entry) {
     return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
@@ -399,7 +401,7 @@ module.exports = {
   },
   mapResponse: function (ctx, body) { return body; }
 };`),
-		"filter.js": []byte(`// filter 起步模板:透传
+		"filters/log-request.js": []byte(`// filter 起步模板:透传(路径约定 filters/<name>.js)
 module.exports = {
   mapRequest: function (ctx, p) { return p; },
   mapChunk: function (ctx, c) { return c; },
@@ -894,7 +896,7 @@ func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
 		return
 	}
-	written, msg, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
+	written, msg, errs, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
 	if err != nil {
 		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
 			httpError(w, http.StatusNotImplemented, "keySubmit not implemented")
@@ -906,7 +908,13 @@ func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
 	if written == nil {
 		written = []string{}
 	}
-	writeJSON(w, map[string]any{"written": written, "message": msg})
+	out := map[string]any{"ok": true, "written": written, "message": msg}
+	if len(errs) > 0 {
+		// 字段级拒绝:处理成功(200)但提交未通过,GUI 据此定位输入框
+		out["ok"] = false
+		out["errors"] = errs
+	}
+	writeJSON(w, out)
 }
 
 // writeKeyErr 错误映射:禁用 409/冲突 409/无部件 501/其余(钩子抛错/超限/超时)400|500 判别
@@ -1034,11 +1042,60 @@ func (d *Deps) testUpstream(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// chatTestUpstream 对话测试(诊断结果 200 + ok 字段,非服务端错误语义;错误路径见 plan 对话测试节)
+func (d *Deps) chatTestUpstream(w http.ResponseWriter, r *http.Request) {
+	if d.ChatTestFunc == nil {
+		httpError(w, http.StatusNotImplemented, "chat test not configured")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	u, err := d.Upstream.Get(id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var req struct {
+		Model   string `json:"model"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	if req.Model == "" {
+		httpError(w, http.StatusBadRequest, "model required")
+		return
+	}
+	if len(u.Models) == 0 {
+		httpError(w, http.StatusBadRequest, "upstream has no models")
+		return
+	}
+	if req.Message == "" {
+		req.Message = "ping"
+	}
+	latency, status, body, errMsg := d.ChatTestFunc(r.Context(), id, req.Model, req.Message)
+	out := map[string]any{"ok": errMsg == "", "latency_ms": latency}
+	if status != 0 {
+		out["status"] = status
+	}
+	if errMsg != "" {
+		out["error"] = errMsg
+	}
+	if body != nil {
+		out["body"] = json.RawMessage(body)
+	}
+	writeJSON(w, out)
+}
+
 func (d *Deps) metricsLive(w http.ResponseWriter, r *http.Request) {
-	reqs, errs, conc, byUp, byTarget := d.Metrics.SnapshotLive()
+	reqs, errs, conc, byUp, byTarget, byPkg := d.Metrics.SnapshotLive()
 	writeJSON(w, map[string]any{
 		"active_concurrent": conc, "total_requests": reqs, "total_errors": errs,
-		"by_upstream": byUp, "by_target": byTarget,
+		"by_upstream": byUp, "by_target": byTarget, "by_package": byPkg,
 	})
 }
 

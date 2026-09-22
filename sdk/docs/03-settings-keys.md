@@ -48,11 +48,13 @@ keys 是**包级 name → value 映射**(整包一份,current + 上一版 previo
 
 ### 写入途径
 
-| 途径 | 时机 | 语义 |
-|---|---|---|
-| 任务/钩子里 `ctx.keys.set({...})` | 运行期(如刷到的 token) | 写前 current 整体移入 previous |
-| 管理台手动新增/编辑 | 用户操作 | 走 keyWrite 归一化后同样轮转 |
-| keySubmit 表单采集 | 用户在 keys 弹层提交 | 钩子内自行 ctx.keys.set |
+写入只有一条路:**`ctx.keys.overwrite({...})` 合并覆写**——给定键覆盖,未提及的键保留不动;写前 current 整体快照进 previous。不存在"整文档替换"语义,任务刷 token 不会误删用户手动加的其他键。
+
+| 途径 | 时机 |
+|---|---|
+| 任务/钩子里 `ctx.keys.overwrite({...})` | 运行期(如刷到的 token) |
+| 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) |
+| keySubmit 表单采集 | 钩子内自行 overwrite(只写真凭据;验证码这类一次性字段不该落库) |
 
 读:`ctx.keys.get(name)`;旧版快照:`ctx.keys.previous(name)`(仅热升级的 onLoad/首轮任务提供,平时 undefined)。
 
@@ -79,8 +81,8 @@ module.exports = {
   keyForm: function (ctx) {
     return {
       fields: [
-        setting.string({ description: "账号", required: true }),
-        setting.string({ description: "密码" }),
+        setting.string({ name: "account", description: "账号", required: true }),
+        setting.string({ name: "password", description: "密码" }),
       ],
       actions: [{ name: "sendCode", label: "发送验证码" }],   // 可选
     };
@@ -88,25 +90,30 @@ module.exports = {
 
   // 4) 表单按钮回调(可出站,如发验证码);返回值 toast 展示
   keyAction: function (ctx, action, values) {
-    ctx.http.run({ url: "https://example/sendCode?to=" + values["账号"] });
+    ctx.http.run({ url: "https://example/sendCode?to=" + values.account });
     return "已发送";
   },
 
-  // 5) 表单提交(可出站;校验全过再 ctx.keys.set;set 后再抛错不回滚)
+  // 5) 表单提交(可出站)。三种反馈通道,无需抛异常:
+  //    {errors: {字段: 原因}} → 字段级拒绝:GUI 逐输入框标红,存储不变
+  //    {message: "..."}       → 失败提示(toast),存储不变
+  //    字符串                  → 成功 toast;写入用 ctx.keys.overwrite 只写真凭据
   keySubmit: function (ctx, values) {
-    if (!values["账号"]) throw new Error("账号必填");          // 抛错 = 存储不变
+    if (!values.account) return { errors: { account: "必填" } };
     var resp = ctx.http.run({ url: "https://example/login", method: "POST",
-      body: JSON.stringify({ u: values["账号"], p: values["密码"] }) });
-    if (resp.status !== 200) throw new Error("登录失败 " + resp.status);
-    ctx.keys.set({ token: JSON.parse(resp.body).token });      // 实际写入
-    return "登录成功";                                          // toast 展示
+      body: JSON.stringify({ u: values.account, p: values.password }) });
+    if (resp.status !== 200) return { message: "登录失败 " + resp.status };
+    ctx.keys.overwrite({ token: JSON.parse(resp.body).token });   // 合并覆写:只写 token
+    return "登录成功";
   },
 };
 ```
 
 要点:
-- fields 值的键名:声明里加 `name` 字段(如 `setting.string({ name: "account", description: "账号" })`),否则 GUI 按字段描述/序号兜底——**建议显式 name**
-- keyAction/keySubmit 才有 `ctx.keys.set` 与出站意义;keyWrite/keyRead 只有 keys.get/previous
+- fields 建议显式 `name`(errors 按它定位输入框);缺省按 description/序号兜底
+- **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 overwrite 决定
+- 抛错仍然可用(视为崩溃,GUI 显示错误文本),但业务拒绝请用 errors/message 通道
+- keyAction/keySubmit 才有 `ctx.keys.overwrite` 与出站意义;keyWrite/keyRead 只有 keys.get/previous
 - 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败
 - GUI「新增凭据」预填名:已有键序号 `key-N` 兜底;keyForm 声明 fields 后以表单采集为正入口
 

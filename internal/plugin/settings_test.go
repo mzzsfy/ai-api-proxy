@@ -112,7 +112,7 @@ func TestSettingsStoreLimit(t *testing.T) {
 func TestKeysStoreOnBlobTable(t *testing.T) {
 	db := newTestDB(t)
 	ks := NewKeysStore(db)
-	if err := ks.Set("checkin", map[string]any{"token": "t1"}); err != nil {
+	if err := ks.Overwrite("checkin", map[string]any{"token": "t1"}); err != nil {
 		t.Fatal(err)
 	}
 	if v, ok := ks.Get("checkin", "token"); !ok || v != "t1" {
@@ -128,7 +128,7 @@ func TestKeysStoreOnBlobTable(t *testing.T) {
 	}
 	// 64KB 上限
 	big := strings.Repeat("x", KeysLimit)
-	if err := ks.Set("checkin", map[string]any{"blob": big}); err == nil {
+	if err := ks.Overwrite("checkin", map[string]any{"blob": big}); err == nil {
 		t.Fatal("want limit error")
 	}
 	ks.Delete("checkin")

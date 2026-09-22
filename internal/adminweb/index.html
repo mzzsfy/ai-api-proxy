@@ -556,28 +556,31 @@ function prefillNewKey(name, kv) {
   $("#newkeyval").value = "";
 }
 
-/* keyForm 采集表单(推荐入口):fields 渲染 + actions 按钮 + 提交 */
+/* keyForm 采集表单(推荐入口):fields 渲染 + actions 按钮 + 提交(errors 字段级标红) */
 async function renderKeyForm(name) {
   const f = await api.post(`/packages/${name}/keys/form`, {});
   $("#keyformbox").style.display = "block";
   $("#keyformfields").innerHTML = (f.fields || []).map((slot, i) => {
+    const nm = esc(slot.name || slot.description || "f" + i);
     const label = `<label>${esc(slot.description || slot.name || "字段 " + (i + 1))}${slot.required ? " *" : ""}</label>`;
-    if (slot.type === "bool") return `${label}<input type="checkbox" data-f="${i}">`;
-    if (slot.type === "enum") return `${label}<select data-f="${i}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select>`;
+    if (slot.type === "bool") return `${label}<input type="checkbox" data-f="${i}" data-nm="${nm}">`;
+    if (slot.type === "enum") return `${label}<select data-f="${i}" data-nm="${nm}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select>`;
     const typ = slot.type === "int" || slot.type === "number" ? "number" : "text";
-    return `${label}<input type="${typ}" data-f="${i}">`;
+    return `${label}<input type="${typ}" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}" style="color:var(--err);font-size:11px"></span>`;
   }).join("");
   const values = () => {
     const out = {};
     (f.fields || []).forEach((slot, i) => {
       const el = document.querySelector(`[data-f="${i}"]`);
       if (!el) return;
-      if (el.type === "checkbox") out[slot.name || slot.description || `f${i}`] = el.checked;
-      else if (el.type === "number") out[slot.name || slot.description || `f${i}`] = Number(el.value);
-      else out[slot.name || slot.description || `f${i}`] = el.value;
+      const nm = el.dataset.nm || slot.name || slot.description || `f${i}`;
+      if (el.type === "checkbox") out[nm] = el.checked;
+      else if (el.type === "number") out[nm] = Number(el.value);
+      else out[nm] = el.value;
     });
     return out;
   };
+  const clearErrs = () => document.querySelectorAll("[data-ferr]").forEach(e => e.textContent = "");
   $("#keyformactions").innerHTML = (f.actions || []).map(a => `<button data-act="${esc(a.name)}">${esc(a.label || a.name)}</button>`).join("");
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
     try {
@@ -586,8 +589,19 @@ async function renderKeyForm(name) {
     } catch (err) { msg(false, err.message); }
   });
   document.getElementById("keyformsubmit").onclick = async () => {
+    clearErrs();
     try {
       const r = await api.post(`/packages/${name}/keys/form-submit`, { values: values() });
+      if (r.ok === false && r.errors) {
+        Object.entries(r.errors).forEach(([nm, text]) => {
+          const el = [...document.querySelectorAll("#keyformfields [data-nm]")].find(e => e.dataset.nm === nm);
+          const slot = el ? el.dataset.f : undefined;
+          const tip = document.querySelector(`[data-ferr="${slot}"]`);
+          if (tip) tip.textContent = String(text);
+        });
+        msg(false, r.message || "提交未通过");
+        return;
+      }
       msg(true, r.message || "已提交" + ((r.written || []).length ? "(" + r.written.join(",") + ")" : ""));
       openKeys(name, true);
     } catch (err) { msg(false, err.message); }

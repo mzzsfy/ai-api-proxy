@@ -121,14 +121,14 @@ func wireKeyHooks(app *App) {
 		return rt.CallKeyAction(action, values)
 	}
 
-	// KeySubmitFunc 表单提交(写入由回调内 ctx.keys.set;written 拦截收集)
-	app.AdminDeps.KeySubmitFunc = func(pkg string, values map[string]any) ([]string, any, error) {
+	// KeySubmitFunc 表单提交(写入由回调内 ctx.keys.overwrite;written 拦截收集;errors=字段级拒绝)
+	app.AdminDeps.KeySubmitFunc = func(pkg string, values map[string]any) ([]string, any, map[string]any, error) {
 		rt, err := loadKeys(pkg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if !pkgs.IsEnabled(pkg) {
-			return nil, nil, plugin.ErrPackageDisabled
+			return nil, nil, nil, plugin.ErrPackageDisabled
 		}
 		return rt.CallKeySubmit(values)
 	}

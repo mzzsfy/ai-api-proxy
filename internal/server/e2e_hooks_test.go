@@ -61,8 +61,8 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 
 	// 安装:onLoad 异步触发,写入 token
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){ctx.keys.set({token:"loaded"});}}`,
-		`module.exports={handler:function(ctx){ctx.keys.set({token:"signed"});}}`,
+		`module.exports={onLoad:function(ctx){ctx.keys.overwrite({token:"loaded"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed"});}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
@@ -73,8 +73,8 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 
 	// 升级:onLoad 再次触发(current 移入 previous)
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){ctx.keys.set({token:"reloaded"});}}`,
-		`module.exports={handler:function(ctx){ctx.keys.set({token:"signed"});}}`,
+		`module.exports={onLoad:function(ctx){ctx.keys.overwrite({token:"reloaded"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed"});}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	sched := wireHooks(wire)
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set({token:ctx.task});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.overwrite({token:ctx.task});}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Keys().Set("checkin", map[string]any{"token": "secret-value"}); err != nil {
+	if err := pkgs.Keys().Overwrite("checkin", map[string]any{"token": "secret-value"}); err != nil {
 		t.Fatal(err)
 	}
 	deps := newAdminDeps(pkgs)
@@ -173,7 +173,7 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     `module.exports.settings={account:{type:"string",description:"账号"},level:{type:"int",default:1}}`,
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set({who:String(ctx.settings.account||"?")});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.overwrite({who:String(ctx.settings.account||"?")});}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}

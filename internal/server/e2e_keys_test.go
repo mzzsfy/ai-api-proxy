@@ -123,9 +123,13 @@ func TestKeys_FormFlow(t *testing.T) {
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
 		"keys.js": `module.exports={
-			keyForm:function(ctx){ return {fields:[{type:"string",description:"账号",required:true},{type:"string",description:"验证码"}], actions:[{name:"sendCode",label:"发送验证码"}]}; },
+			keyForm:function(ctx){ return {fields:[{type:"string",name:"account",description:"账号",required:true},{type:"string",name:"code",description:"验证码"}], actions:[{name:"sendCode",label:"发送验证码"}]}; },
 			keyAction:function(ctx,action,values){ if(action==="sendCode"){ return "sent to "+values.account; } return "unknown"; },
-			keySubmit:function(ctx,values){ if(!values.account){ throw new Error("账号必填"); } ctx.keys.set({token:"t-"+values.account}); return "ok"; },
+			keySubmit:function(ctx,values){
+				if(!values.account){ return {errors:{account:"账号必填"}}; }
+				ctx.keys.overwrite({token:"t-"+values.account});
+				return "ok";
+			},
 		}`,
 	})); err != nil {
 		t.Fatal(err)
@@ -156,12 +160,12 @@ func TestKeys_FormFlow(t *testing.T) {
 	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "t-me@x" {
 		t.Fatalf("submitted token: %v", v)
 	}
-	// 校验抛错 → 400 存储不变(KF5)
+	// 校验 errors 返回 → 200+ok:false 字段级拒绝,存储不变(KF5;非异常通道)
 	w4 := httptest.NewRecorder()
 	mux.ServeHTTP(w4, httptest.NewRequest(http.MethodPost, "/admin/api/packages/checkin/keys/form-submit",
 		strings.NewReader(`{"values":{"code":"123"}}`)))
-	if w4.Code != http.StatusBadRequest {
-		t.Fatalf("reject status %d: %s", w4.Code, w4.Body.String())
+	if w4.Code != http.StatusOK || !containsStr(w4.Body.String(), `"ok":false`) || !containsStr(w4.Body.String(), "账号必填") {
+		t.Fatalf("reject: %d %s", w4.Code, w4.Body.String())
 	}
 	// form 501:无 keyForm 的包(KF2)
 	pkgs2, mux2 := keysFixture(t)

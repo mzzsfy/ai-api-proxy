@@ -428,10 +428,11 @@ func (h *HooksRuntime) CallKeyAction(action string, values map[string]any) (any,
 	return v.Export(), nil
 }
 
-// CallKeySubmit 表单提交(写入由回调内 ctx.keys.set;written 拦截收集,同键去重按首次序;未导出 = ErrHookNotExported)
-func (h *HooksRuntime) CallKeySubmit(values map[string]any) ([]string, any, error) {
+// CallKeySubmit 表单提交(落库由回调内 ctx.keys.overwrite;written 拦截收集,同键去重按首次序)
+// 返回契约:undefined/null = 无消息;string = toast 消息;对象可带 {message?, errors?}(errors 非空 = 字段级拒绝,GUI 标红)
+func (h *HooksRuntime) CallKeySubmit(values map[string]any) ([]string, any, map[string]any, error) {
 	if h.handler("keySubmit") == nil {
-		return nil, nil, ErrHookNotExported
+		return nil, nil, nil, ErrHookNotExported
 	}
 	h.written = nil
 	h.writtenSeen = map[string]bool{}
@@ -439,13 +440,23 @@ func (h *HooksRuntime) CallKeySubmit(values map[string]any) ([]string, any, erro
 	v, err := h.keyHook("keySubmit", KeyFlowTimeoutMs, h.vm.ToValue(values))
 	h.collectWrite = false
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var message any
+	var errs map[string]any
 	if v != nil && !goja.IsUndefined(v) && !goja.IsNull(v) {
-		message = v.Export()
+		if s, ok := v.Export().(string); ok {
+			message = s
+		} else if m, ok := v.Export().(map[string]any); ok {
+			if msg, ok := m["message"]; ok {
+				message = msg
+			}
+			if e, ok := m["errors"].(map[string]any); ok && len(e) > 0 {
+				errs = e
+			}
+		}
 	}
-	return h.written, message, nil
+	return h.written, message, errs, nil
 }
 
 // Handler 导出函数暴露(装配面探测/调用)
@@ -481,7 +492,7 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 		}
 		return v, nil
 	})
-	_ = keysObj.Set("set", func(values map[string]any) error {
+	_ = keysObj.Set("overwrite", func(values map[string]any) error {
 		if h.deps.Keys == nil {
 			return fmt.Errorf("keys unavailable (package %s)", h.pkg)
 		}
@@ -493,7 +504,7 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 				}
 			}
 		}
-		return h.deps.Keys.Set(h.pkg, values)
+		return h.deps.Keys.Overwrite(h.pkg, values)
 	})
 	_ = keysObj.Set("previous", func(name string) (any, error) {
 		if h.deps.Keys == nil {

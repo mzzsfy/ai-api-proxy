@@ -108,13 +108,29 @@ func (s *KeysStore) List(pkg string) []string {
 	return names
 }
 
-// Set 批量写入;写入前 current 整体移入 previous(覆盖式);包内串行
-func (s *KeysStore) Set(pkg string, values map[string]any) error {
+// Overwrite 合并覆写:给定键覆盖、未提及键保留;写入前 current 整体移入 previous;包内串行
+func (s *KeysStore) Overwrite(pkg string, values map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	doc := s.load(pkg)
-	doc.Previous = doc.Current
-	doc.Current = values
+	if doc.Current != nil {
+		// 拷贝后再改:doc.Previous 与 doc.Current 共享底层引用,原地写会污染轮转历史
+		prev := doc.Current
+		cur := make(map[string]any, len(prev)+len(values))
+		for k, v := range prev {
+			cur[k] = v
+		}
+		for k, v := range values {
+			cur[k] = v
+		}
+		doc.Previous, doc.Current = prev, cur
+	} else {
+		cur := make(map[string]any, len(values))
+		for k, v := range values {
+			cur[k] = v
+		}
+		doc.Previous, doc.Current = nil, cur
+	}
 	doc.UpdatedAt = time.Now().UnixMilli()
 	return s.save(pkg, doc)
 }
