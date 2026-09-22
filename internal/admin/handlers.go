@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/history"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
@@ -24,6 +25,7 @@ type Deps struct {
 	Packages *plugin.Registry
 	Upstream *upstream.Registry
 	Metrics  *metrics.Recorder
+	History  *history.Store                                          // 请求历史(nil = 未装配,对应路由 501)
 	Secrets  upstream.SecretsStore                                   // "***" 回读合并的旧值来源(kv 唯一存储)
 	TestFunc func(upstreamID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
 	// ChatTestFunc 对话测试(走完整管道,非流式;返回延迟/状态码/响应体/错误说明)
@@ -92,6 +94,8 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/upstreams/{id}/chat-test", d.chatTestUpstream)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
+	mux.HandleFunc("GET /admin/api/history", d.listHistory)
+	mux.HandleFunc("GET /admin/api/history/{id}", d.getHistory)
 	mux.HandleFunc("GET /admin/api/transports", d.listTransports)
 	mux.HandleFunc("POST /admin/api/transports/{name}/test", d.testTransport)
 	mux.HandleFunc("POST /admin/api/transports/{name}/evict", d.evictTransport)
@@ -113,10 +117,10 @@ func (d *Deps) listPackages(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"name": n, "version": p.Manifest.Version, "revision": p.Revision,
 			"hasProtocol": p.HasProtocol(), "filters": filterNames,
-			"secretRefs": p.SecretRefsUnion(),
-			"protocol":   protocolName(p),
-			"hasHooks":   p.Manifest.Parts.Hooks != nil,
-			"enabled":    d.Packages.IsEnabled(n),
+			"secretRefs":  p.SecretRefsUnion(),
+			"protocol":    protocolName(p),
+			"hasHooks":    p.Manifest.Parts.Hooks != nil,
+			"enabled":     d.Packages.IsEnabled(n),
 			"title":       p.MetaTitle(),
 			"description": p.Manifest.Description,
 			"author":      p.Manifest.Author,
@@ -539,9 +543,9 @@ func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Config     map[string]any            `json:"config"`
-		Tasks      map[string]map[string]any `json:"tasks"`
-		BaseVersion int64                    `json:"version"`
+		Config      map[string]any            `json:"config"`
+		Tasks       map[string]map[string]any `json:"tasks"`
+		BaseVersion int64                     `json:"version"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
@@ -792,7 +796,7 @@ func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Value        any   `json:"value"`
+		Value         any   `json:"value"`
 		BaseUpdatedAt int64 `json:"baseUpdatedAt"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
@@ -1114,6 +1118,59 @@ func (d *Deps) metricsSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rows)
+}
+
+// listHistory 请求历史分页查询(?model=&upstream=&error=1&limit=&offset=)
+func (d *Deps) listHistory(w http.ResponseWriter, r *http.Request) {
+	if d.History == nil {
+		httpError(w, http.StatusNotImplemented, "history not configured")
+		return
+	}
+	q := r.URL.Query()
+	f := history.Filter{
+		Model:    q.Get("model"),
+		Upstream: q.Get("upstream"),
+		Error:    q.Get("error") == "1",
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.Limit = n
+		}
+	}
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.Offset = n
+		}
+	}
+	rows, total, err := d.History.Query(r.Context(), f)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"items": rows, "total": total})
+}
+
+// getHistory 单条详情(含 bodies;不存在 404)
+func (d *Deps) getHistory(w http.ResponseWriter, r *http.Request) {
+	if d.History == nil {
+		httpError(w, http.StatusNotImplemented, "history not configured")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	e, err := d.History.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, history.ErrNotFound) {
+			httpError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, e)
 }
 
 // listTransports 传输实例清单(只读)

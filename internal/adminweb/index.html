@@ -205,9 +205,9 @@ function msg(ok, text) {
   el._t = setTimeout(() => el.style.display = "none", 3200);
 }
 
-/* ─── 外壳与路由:资源(模型管理/插件管理/插件配置) + 观测(监控) ─── */
-const PAGES = { ups: showUpstreams, pkgs: showPackages, plugconf: showPlugConf, mon: showMonitor };
-const PAGE_NAMES = { ups: "模型管理", pkgs: "插件管理", plugconf: "插件配置", mon: "监控" };
+/* ─── 外壳与路由:资源(模型管理/插件管理/插件配置) + 观测(监控/请求历史) ─── */
+const PAGES = { ups: showUpstreams, pkgs: showPackages, plugconf: showPlugConf, mon: showMonitor, hist: showHistory };
+const PAGE_NAMES = { ups: "模型管理", pkgs: "插件管理", plugconf: "插件配置", mon: "监控", hist: "请求历史" };
 function shell(page, mainHTML) {
   canvasDraws = [];
   $("#app").innerHTML = `
@@ -217,7 +217,7 @@ function shell(page, mainHTML) {
         <div class="navgroup">资源</div>
         <a data-p="ups">模型管理</a><a data-p="pkgs">插件管理</a><a data-p="plugconf">插件配置</a>
         <div class="navgroup">观测</div>
-        <a data-p="mon">监控</a>
+        <a data-p="mon">监控</a><a data-p="hist">请求历史</a>
         <div class="gap"></div>
         <button class="mini" id="themetoggle"></button>
         <a id="logout">退出</a>
@@ -890,6 +890,86 @@ async function renderPkgMonPane(name) {
   registerDraw("pkg-chart", draw);
   draw();
 }
+/* ─── 请求历史:分页 + 过滤 + 单条详情(bodies;状态色按 4xx/5xx 分级) ─── */
+const histState = { limit: 50, offset: 0 };
+const histStatusColor = s => s >= 500 ? "color:var(--err)" : (s >= 400 ? "color:var(--warn)" : "");
+
+async function showHistory() {
+  $("#main").innerHTML = `
+    <div class="titlerow"><h2>请求历史</h2><button id="histrf">刷新</button></div>
+    <div class="row">
+      模型 <input id="his-model" style="width:180px">
+      上游 <input id="his-upstream" style="width:140px">
+      <label class="muted" style="font-size:13px">仅错误 <input id="his-err" type="checkbox"></label>
+      <button class="pri" id="his-q">查询</button>
+      <span class="muted" id="his-total"></span>
+    </div>
+    <div id="his-table"><div class="muted">载入中…</div></div>
+    <div id="his-detail"></div>`;
+  $("#histrf").onclick = showHistory;
+  $("#his-q").onclick = () => { histState.offset = 0; loadHistory(); };
+  loadHistory();
+}
+
+async function loadHistory() {
+  const q = new URLSearchParams({ limit: histState.limit, offset: histState.offset });
+  const model = $("#his-model").value.trim(), upstream = $("#his-upstream").value.trim();
+  if (model) q.set("model", model);
+  if (upstream) q.set("upstream", upstream);
+  if ($("#his-err").checked) q.set("error", "1");
+  let r;
+  try { r = await api.get("/history?" + q); }
+  catch (err) { $("#his-table").innerHTML = `<div class="empty">加载失败: ${esc(err.message)}</div>`; return; }
+  const items = r.items || [];
+  $("#his-total").textContent = `共 ${fmt(r.total)} 条`;
+  $("#his-table").innerHTML = items.length ? `<table>
+    <tr><th>时间</th><th>模型</th><th>上游</th><th>目标</th><th>状态</th><th>耗时</th><th>路径</th></tr>
+    ${items.map(e => `<tr data-id="${e.id}" style="cursor:pointer">
+      <td class="num">${new Date(e.ts).toLocaleString()}</td>
+      <td>${esc(e.model)}</td><td>${esc(e.upstream)}</td><td>${esc(e.target || "—")}</td>
+      <td class="num" style="${histStatusColor(e.status)}">${e.status}</td>
+      <td class="num">${fmt(e.duration_ms)}ms</td>
+      <td>${esc(e.path)}${e.stream ? ' <span class="badge">流</span>' : ""}</td>
+    </tr>`).join("")}</table>${histPagerHTML(r)}` : `<div class="empty">暂无请求历史</div>`;
+  document.querySelectorAll("#his-table tr[data-id]").forEach(tr => tr.onclick = () => openHistoryDetail(tr.dataset.id));
+  const prev = $("#his-prev"), next = $("#his-next");
+  if (prev) prev.onclick = () => { histState.offset = Math.max(0, histState.offset - histState.limit); loadHistory(); };
+  if (next) next.onclick = () => { histState.offset += histState.limit; loadHistory(); };
+}
+
+function histPagerHTML(r) {
+  if (r.total <= histState.limit) return "";
+  const page = Math.floor(histState.offset / histState.limit);
+  const pages = Math.ceil(r.total / histState.limit);
+  return `<div class="row">
+    <button id="his-prev" ${page === 0 ? "disabled" : ""}>上一页</button>
+    <span class="muted">第 ${page + 1} / ${pages} 页</span>
+    <button id="his-next" ${(page + 1) * histState.limit >= r.total ? "disabled" : ""}>下一页</button>
+  </div>`;
+}
+
+async function openHistoryDetail(id) {
+  const box = $("#his-detail");
+  box.innerHTML = `<div class="muted">载入中…</div>`;
+  let e;
+  try { e = await api.get("/history/" + id); }
+  catch (err) { box.innerHTML = `<div class="empty">加载失败: ${esc(err.message)}</div>`; return; }
+  const pretty = s => {
+    if (!s) return "(空)";
+    try { return JSON.stringify(JSON.parse(s), null, 2); } catch (x) { return s; }
+  };
+  box.innerHTML = `
+    <div class="card">
+      <div class="titlerow"><h3 style="margin:0">#${e.id} ${esc(e.method)} ${esc(e.path)}</h3><button id="his-close">关闭</button></div>
+      <div class="row muted">${new Date(e.ts).toLocaleString()} · 模型 ${esc(e.model || "—")} · 上游 ${esc(e.upstream || "—")} · 目标 ${esc(e.target || "—")} · 状态 ${e.status} · ${fmt(e.duration_ms)}ms${e.stream ? " · 流式" : ""}</div>
+      <h3>请求体</h3>
+      <pre class="log">${esc(pretty(e.request_body))}</pre>
+      <h3>响应体${e.stream ? "(流式不记录)" : ""}</h3>
+      <pre class="log">${esc(e.stream ? "(流式响应不记录)" : pretty(e.response_body))}</pre>
+    </div>`;
+  $("#his-close").onclick = () => box.innerHTML = "";
+}
+
 /* ─── 监控 ─── */
 async function showMonitor() {
   $("#main").innerHTML = `<h2>监控</h2><div class="muted">载入中…</div>`;

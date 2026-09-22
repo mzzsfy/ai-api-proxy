@@ -41,9 +41,14 @@ type Config struct {
 	// BuiltinDir 内置插件目录(不入库的分发资产;与普通目录同形,同名唯一)
 	BuiltinDir string `yaml:"builtin_dir"`
 	// PackDir 打包输出目录(非空则打包两级目录内的包到该目录后退出;唯一 .aap 产出路径)
-	PackDir    string         `yaml:"pack_dir"`
-	Transports []TransportCfg `yaml:"transports"`
+	PackDir string `yaml:"pack_dir"`
+	// HistoryRetentionDays 请求历史保留天数(独立库 history.db);<0 永久保留,0 视为未配置取默认
+	HistoryRetentionDays int            `yaml:"history_retention_days"`
+	Transports           []TransportCfg `yaml:"transports"`
 }
+
+// defaultHistoryRetentionDays 未配置时的请求历史保留天数
+const defaultHistoryRetentionDays = 7
 
 // Load 按优先级合并配置;空 APIKeys 视为拒绝启动的调用方职责。
 // 配置文件不存在时释放内嵌示例配置到该路径(缺失才写,不覆盖),再行读取
@@ -114,6 +119,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("API_PROXY_PACK_DIR"); v != "" {
 		cfg.PackDir = v
 	}
+	if v := os.Getenv("API_PROXY_HISTORY_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.HistoryRetentionDays = n
+		}
+	}
 }
 
 func applyDefaults(cfg *Config) {
@@ -134,6 +144,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.AdminUser == "" {
 		cfg.AdminUser = "admin"
+	}
+	if cfg.HistoryRetentionDays == 0 {
+		cfg.HistoryRetentionDays = defaultHistoryRetentionDays
 	}
 }
 

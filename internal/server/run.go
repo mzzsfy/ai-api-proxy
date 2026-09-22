@@ -25,6 +25,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
 	"github.com/mzzsfy/ai-api-proxy/internal/convert"
 	"github.com/mzzsfy/ai-api-proxy/internal/gateway"
+	"github.com/mzzsfy/ai-api-proxy/internal/history"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
@@ -134,6 +135,7 @@ type App struct {
 	Secrets   upstream.SecretsStore
 	Registry  *upstream.Registry
 	Mux       *http.ServeMux
+	History   *history.Store
 	trMgr     *transport.Manager
 	Scheduler *scheduler.Scheduler
 	// pluginEvictGate 插件 evict 限流闸门(hooks 通道与 Registry 通道共用;Build 装配)
@@ -194,6 +196,11 @@ func Build(cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("import plugins dir: %w", err)
 	}
 	recorder := metrics.NewRecorder()
+	// 请求历史:独立库;打开失败降级为不记录(旁路诊断,不阻塞主服务)
+	hist, histErr := history.New(cfg.DataDir + "/history.db")
+	if histErr != nil {
+		log.Printf("history open: %v (recording disabled)", histErr)
+	}
 	secrets := &storeSecrets{st: st}
 	reg := upstream.NewRegistry(st.DB(), pkgs, secrets)
 	if err := reg.LoadFromDB(ctx); err != nil {
@@ -222,6 +229,7 @@ func Build(cfg *Config) (*App, error) {
 		Registry: reg,
 		Metrics:  recorder,
 		Secrets:  secrets,
+		History:  hist,
 	}
 	// 管理服务
 	adminSvc, randomPass, err := admin.New(cfg.AdminUser, cfg.AdminPassBcrypt)
@@ -237,6 +245,7 @@ func Build(cfg *Config) (*App, error) {
 		Packages: pkgs,
 		Upstream: reg,
 		Metrics:  recorder,
+		History:  hist,
 		Secrets:  secrets,
 		KeysFunc: func(pkg string) map[string]any { return pkgs.Keys().View(pkg) },
 	}
@@ -328,7 +337,7 @@ func Build(cfg *Config) (*App, error) {
 	return &App{
 		Cfg: cfg, St: st, Gateway: gw, AdminSvc: adminSvc, AdminDeps: adminDeps,
 		Recorder: recorder, Secrets: secrets, Registry: reg, Mux: mux, trMgr: trMgr,
-		pluginEvictGate: gate,
+		History: hist, pluginEvictGate: gate,
 	}, nil
 }
 
@@ -357,6 +366,9 @@ func (a *App) Close() error {
 		a.Scheduler.Wait()
 	}
 	a.trMgr.Close()
+	if a.History != nil {
+		_ = a.History.Close()
+	}
 	return a.St.Close()
 }
 
@@ -402,6 +414,12 @@ func keyAuth(keys []string, next http.Handler) http.Handler {
 var (
 	transportProbeURL     = "https://www.gstatic.com/generate_204"
 	transportProbeTimeout = 10 * time.Second
+)
+
+// 请求历史保留清理:执行间隔与单次超时
+const (
+	historyCleanupInterval = time.Hour
+	historyCleanupTimeout  = 10 * time.Second
 )
 
 // aapLeaseIDHexLen aap lease_id hex 形态长度(128bit → 32 字符)
@@ -593,6 +611,24 @@ func Run(cfg *Config) error {
 			}
 		}
 	}()
+	// 请求历史保留清理:启动清一次,此后按小时
+	stopClean := make(chan struct{})
+	cleanDone := make(chan struct{})
+	go func() {
+		defer close(cleanDone)
+		cleanupHistory(app)
+		timer := time.NewTimer(historyCleanupInterval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-stopClean:
+				return
+			case <-timer.C:
+				cleanupHistory(app)
+				timer.Reset(historyCleanupInterval)
+			}
+		}
+	}()
 	log.Printf("ai-api-proxy listening on %s | packages: %d | upstreams: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
 		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.List()))
 	select {
@@ -604,6 +640,8 @@ func Run(cfg *Config) error {
 		if err != nil {
 			close(stopSnap)
 			<-snapDone
+			close(stopClean)
+			<-cleanDone
 			return err
 		}
 	}
@@ -613,7 +651,26 @@ func Run(cfg *Config) error {
 	_ = srv.Shutdown(ctx)
 	close(stopSnap)
 	<-snapDone
+	close(stopClean)
+	<-cleanDone
 	return nil
+}
+
+// cleanupHistory 请求历史保留期清理(retention<=0 = 永久保留,不清理)
+func cleanupHistory(app *App) {
+	if app.History == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), historyCleanupTimeout)
+	defer cancel()
+	n, err := app.History.Cleanup(ctx, app.Cfg.HistoryRetentionDays)
+	if err != nil {
+		log.Printf("history cleanup: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("history cleanup: removed %d entries", n)
+	}
 }
 
 // ensureBuiltinPackage 内置协议实体包缺失时自动安装(哑 manifest,实现走 Go 工厂)

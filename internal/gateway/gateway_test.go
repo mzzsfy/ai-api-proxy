@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
 	"github.com/mzzsfy/ai-api-proxy/internal/convert"
+	"github.com/mzzsfy/ai-api-proxy/internal/history"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
@@ -391,5 +393,158 @@ func TestModels_Aggregation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("models: %v", m)
+	}
+}
+
+// newHistory 供网关测试挂载的独立历史库
+func newHistory(t *testing.T) *history.Store {
+	t.Helper()
+	s, err := history.New(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// lastHistory 取最新一条历史(单行场景;经 Get 验证详情路径)
+func lastHistory(t *testing.T, h *history.Store) history.Entry {
+	t.Helper()
+	rows, total, err := h.Query(context.Background(), history.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("history rows: %d", total)
+	}
+	e, err := h.Get(context.Background(), rows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestHistory_RecordsFastPath(t *testing.T) {
+	// Given 网关挂历史库 When 快速路径请求 Then 记录 model/upstream/target/status/bodies
+	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
+	h := newHistory(t)
+	f.g.History = h
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	f.g.ChatCompletions(httptest.NewRecorder(), req)
+	e := lastHistory(t, h)
+	if e.Method != "POST" || e.Path != "/v1/chat/completions" || e.Model != "test-model" {
+		t.Fatalf("basic fields: %+v", e)
+	}
+	if e.Upstream != "u1" || e.Target != "t1" {
+		t.Fatalf("routing fields: %+v", e)
+	}
+	if e.Status != 200 || e.DurationMS < 0 || e.Stream {
+		t.Fatalf("result fields: %+v", e)
+	}
+	if e.RequestBody != body {
+		t.Fatalf("request body: %s", e.RequestBody)
+	}
+	if !strings.Contains(e.ResponseBody, "hi") {
+		t.Fatalf("response body: %s", e.ResponseBody)
+	}
+}
+
+func TestHistory_RecordsUpstreamError(t *testing.T) {
+	// Given 上游 429 When 请求 Then 历史状态 429 且响应体含错误 JSON
+	f := newFixture(t, 429, "application/json", `{"error":{"message":"rate limited"}}`)
+	h := newHistory(t)
+	f.g.History = h
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","messages":[]}`)))
+	e := lastHistory(t, h)
+	if e.Status != 429 {
+		t.Fatalf("status: %d", e.Status)
+	}
+	if !strings.Contains(e.ResponseBody, "rate limited") {
+		t.Fatalf("error body: %s", e.ResponseBody)
+	}
+}
+
+func TestHistory_StreamNoResponseBody(t *testing.T) {
+	// Given 上游 SSE When 流式请求 Then 历史标记 stream 且响应体为空
+	f := newFixture(t, 200, "text/event-stream",
+		"data: {\"id\":\"c\",\"delta\":{\"content\":\"a\"}}\n\ndata: [DONE]\n\n")
+	h := newHistory(t)
+	f.g.History = h
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","stream":true,"messages":[]}`)))
+	e := lastHistory(t, h)
+	if !e.Stream {
+		t.Fatalf("stream flag: %+v", e)
+	}
+	if e.ResponseBody != "" {
+		t.Fatalf("stream response body must be empty: %s", e.ResponseBody)
+	}
+}
+
+func TestHistory_TruncatesOversizedRequest(t *testing.T) {
+	// Given 请求体超上限 When 请求 Then 历史 request_body 截断到上限
+	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[]}`)
+	h := newHistory(t)
+	f.g.History = h
+	big := `{"model":"test-model","messages":[{"role":"user","content":"` + strings.Repeat("x", history.BodyLimit*2) + `"}]}`
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(big)))
+	e := lastHistory(t, h)
+	if len(e.RequestBody) != history.BodyLimit {
+		t.Fatalf("request body len: %d", len(e.RequestBody))
+	}
+}
+
+func TestHistory_RecordsPipelinePath(t *testing.T) {
+	// Given 非内置协议(JS 包)走管道 When 请求 Then 照常记录路由字段
+	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[]}`)
+	f.installJSProtocol(t)
+	h := newHistory(t)
+	f.g.History = h
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","messages":[]}`)))
+	e := lastHistory(t, h)
+	if e.Status != 200 || e.Upstream != "u1" || e.Target != "t1" {
+		t.Fatalf("pipeline record: %+v", e)
+	}
+}
+
+func TestHistory_PipelineStreamNoResponseBody(t *testing.T) {
+	// Given JS 协议包走管道(writeStream)When 流式请求 Then stream=true 且响应体为空
+	f := newFixture(t, 200, "text/event-stream", "data: {\"id\":\"c\",\"delta\":{\"content\":\"a\"}}\n\n")
+	f.installJSProtocol(t)
+	h := newHistory(t)
+	f.g.History = h
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","stream":true,"messages":[]}`)))
+	e := lastHistory(t, h)
+	if !e.Stream || e.ResponseBody != "" {
+		t.Fatalf("pipeline stream record: %+v", e)
+	}
+}
+
+func TestHistory_PickFailureEmptyRouting(t *testing.T) {
+	// Given 未知模型(路由失败) When 请求 Then 落行 status=404 且 upstream/target 为空,model 保留
+	f := newFixture(t, 200, "application/json", `{}`)
+	h := newHistory(t)
+	f.g.History = h
+	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"no-such","messages":[]}`)))
+	e := lastHistory(t, h)
+	if e.Status != 404 || e.Upstream != "" || e.Target != "" || e.Model != "no-such" {
+		t.Fatalf("pick failure record: %+v", e)
+	}
+}
+
+func TestHistory_AbsentNoPanic(t *testing.T) {
+	// Given 未装配历史库 When 请求 Then 正常服务不 panic
+	f := newFixture(t, 200, "application/json", `{"id":"c1","choices":[]}`)
+	w := httptest.NewRecorder()
+	f.g.ChatCompletions(w, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","messages":[]}`)))
+	if w.Code != 200 {
+		t.Fatalf("status: %d", w.Code)
 	}
 }

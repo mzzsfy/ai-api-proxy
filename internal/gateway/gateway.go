@@ -14,6 +14,7 @@ import (
 
 	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
 	"github.com/mzzsfy/ai-api-proxy/internal/convert"
+	"github.com/mzzsfy/ai-api-proxy/internal/history"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
@@ -47,6 +48,8 @@ type Gateway struct {
 	Registry  *upstream.Registry
 	Metrics   *metrics.Recorder
 	Secrets   upstream.SecretsStore
+	// History 请求历史存储(nil = 不记录;装配可选)
+	History *history.Store
 }
 
 // requestIDHeader 请求标识(header 键)
@@ -99,12 +102,20 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	start := time.Now()
 	status := http.StatusOK
 	detail := "" // 模型/上游/插件路径等上下文(请求日志)
+	model := ""
+	upstreamName := ""
+	var reqBody []byte
+	var pickedTarget string // fastPath 实际选中目标(管道路径经 pctx.Target)
+	sw := &statusWriter{ResponseWriter: w, code: &status}
+	w = sw
 	defer func() {
 		log.Printf("request %s %s %s status=%d duration=%s%s",
 			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond), levelMark(status))
+		// 已知局限:panic 请求(recoverMW 兜底前)状态捕获不到,历史与日志同记默认值 200
+		g.recordHistory(r, model, upstreamName, pickedTarget, status, time.Since(start), reqBody, sw)
 	}()
-	w = &statusWriter{ResponseWriter: w, code: &status}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	reqBody = truncateBody(body)
 	if err != nil {
 		status = http.StatusBadRequest
 		writeError(w, entry, http.StatusBadRequest, "read body")
@@ -140,6 +151,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		return
 	}
 	u := candidates[0].Upstream
+	upstreamName = u.Name
 	resolved, release, err := g.Registry.Resolve(u)
 	if err != nil {
 		log.Printf("resolve %s: %v", u.Name, err)
@@ -153,7 +165,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		" plugins=" + pluginPath(u.Name, resolved)
 	// 快速路径:openai 入口 ∧ 内置协议 ∧ 有效 filter 链空
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
-		g.fastPath(w, r, u, resolved, body, model)
+		g.fastPath(w, r, u, resolved, body, model, &pickedTarget)
 		return
 	}
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
@@ -164,11 +176,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
+		pickedTarget = pctx.Target.Name
 		status = runErrorStatus(err)
 		detail += " error=" + err.Error()
 		g.writeRunError(w, entry, pctx, resolved, err)
 		return
 	}
+	pickedTarget = pctx.Target.Name
 	if resp.Status >= 400 {
 		// 终局错误(mapError 已在 executor 应用;未实现则原样透传)
 		g.recordUpstream(u, true)
@@ -188,6 +202,32 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	_, _ = w.Write(resp.Body)
 }
 
+// recordHistory 落一条请求历史(响应已完成,不阻塞输出;流式不存响应体)
+func (g *Gateway) recordHistory(r *http.Request, model, upstreamName, target string, status int, took time.Duration, reqBody []byte, sw *statusWriter) {
+	if g.History == nil {
+		return
+	}
+	stream := isEventStreamCT(sw.ct)
+	respBody := ""
+	if !stream {
+		respBody = string(sw.body)
+	}
+	g.History.Record(history.Entry{
+		Method: r.Method, Path: r.URL.Path, Model: model,
+		Upstream: upstreamName, Target: target,
+		Status: status, DurationMS: took.Milliseconds(), Stream: stream,
+		RequestBody: string(reqBody), ResponseBody: respBody,
+	})
+}
+
+// truncateBody 历史记录用请求体截断(存储上限不变式的采集侧)
+func truncateBody(b []byte) []byte {
+	if len(b) > history.BodyLimit {
+		return b[:history.BodyLimit]
+	}
+	return b
+}
+
 // levelMark 日志分级标记:5xx=ERROR、4xx=WARN、其余空(grep 定位用)
 func levelMark(status int) string {
 	switch {
@@ -200,15 +240,29 @@ func levelMark(status int) string {
 	}
 }
 
-// statusWriter 捕获 WriteHeader 状态码(请求日志用)
+// statusWriter 捕获 WriteHeader 状态码、Content-Type 与响应体前缀(请求日志与历史记录用)
 type statusWriter struct {
 	http.ResponseWriter
 	code *int
+	ct   string
+	body []byte
 }
 
 func (s *statusWriter) WriteHeader(code int) {
 	*s.code = code
+	s.ct = s.Header().Get("Content-Type")
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Write 透传并捕获响应体前缀(上限内;历史记录用)
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if room := history.BodyLimit - len(s.body); room > 0 {
+		if room > len(b) {
+			room = len(b)
+		}
+		s.body = append(s.body, b[:room]...)
+	}
+	return s.ResponseWriter.Write(b)
 }
 
 // Flush 透传流式冲刷(保持原 writer 的 Flusher 能力)
@@ -373,13 +427,15 @@ func writeRaw(w http.ResponseWriter, status int, body []byte) {
 // 声明式单协议下无 pivot 中转:入口原文经 filters 直达 buildRequest,回程帧直接来自 mapEvent
 
 // fastPath 透传:body 原样,目标 secrets 注入 Authorization,不切换不刷新
-func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string) {
+// pickedTarget 回写实际选中目标名(历史记录用;候选为空时不写)
+func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string, pickedTarget *string) {
 	// 目标选择与引擎同源:enabled 候选内加权随机(resolved.Targets 已滤 disabled)
 	if len(resolved.Targets) == 0 {
 		writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no enabled target")
 		return
 	}
 	picked := g.Executor.PickTarget(resolved.Targets)
+	*pickedTarget = picked.Name
 	exitTarget := g.Metrics.EnterTarget(u.Name, picked.Name)
 	failed := false
 	defer func() { exitTarget(failed) }()

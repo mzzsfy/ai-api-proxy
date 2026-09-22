@@ -19,16 +19,25 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open 打开连接并设置 pragma
+// Open 打开主库并设置 pragma
 func Open(dataDir string) (*Store, error) {
-	dsn := "file:" + dataDir + "/app.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
+	db, err := OpenDB(dataDir + "/app.db")
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// OpenDB 打开独立 SQLite 连接并设置 pragma(主库之外的单独库共用此出口)
+func OpenDB(path string) (*sql.DB, error) {
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	// 单写连接串行化写事务,避免 SQLITE_BUSY
 	db.SetMaxOpenConns(1)
-	return &Store{db: db}, nil
+	return db, nil
 }
 
 // Migrate 幂等执行嵌入迁移,版本表记录

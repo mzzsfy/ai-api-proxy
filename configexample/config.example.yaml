@@ -11,6 +11,9 @@ admin_pass_bcrypt: ""
 log_level: "info"
 plugins_dir: "./plugins"
 
+# 请求历史保留天数(管理台"请求历史"页;独立 SQLite 文件 history.db;<0 永久保留,0 视为未配置取默认)
+history_retention_days: 7
+
 # 全局传输实例(部署资产,target 按名引用;仅 yaml 可表达嵌套)
 # url scheme 判型:direct(字面值)|socks5://|http://|https://|aap://|ipp+<kind>://
 # 管理面 /admin → 监控 → 传输实例:可对每个实例做连通测试与失效命令(evict)

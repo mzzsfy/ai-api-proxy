@@ -36,6 +36,7 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 | admin_user / admin_pass_bcrypt | 管理账户;口令支持明文或 bcrypt 哈希(`$2a$`/`$2b$`/`$2x$`/`$2y$` 开头按哈希解析,以此开头的明文口令不可用),空则启动生成随机口令打印一次 | admin / 随机 |
 | plugins_dir | 普通插件目录(裸 .aap 或含 manifest.json 的包目录)启动时自动导入(幂等) | `./plugins` |
 | builtin_dir | 内置插件目录(随分发的预置包;只补缺,不覆盖用户同名包) | `./builtin-plugins` |
+| history_retention_days | 请求历史保留天数(独立库 `history.db`;管理 GUI"请求历史"页;<0 永久保留,0 视为未配置) | 7 |
 | pack_dir | 非空 = 只打包不服务:把上述两级目录打成 `<包名>.aap` 落到此目录 | 空(服务模式) |
 | transports | 命名传输实例(direct/http_proxy/socks5),target 按名引用 | direct |
 
@@ -55,7 +56,7 @@ go test -race ./...    # Go 全量
 go vet ./...
 ```
 
-目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/admin/adminweb/store/transport)、`sdk/`(镜像内插件 SDK 快照)。
+目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/history/admin/adminweb/store/transport)、`sdk/`(镜像内插件 SDK 快照)。
 
 ## 部署
 
