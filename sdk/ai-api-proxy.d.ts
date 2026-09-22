@@ -125,7 +125,7 @@ export interface Log {
 
 export interface Storage {
   get(key: string): string | null;
-  /** 单键上限 64KB;ns=包名 */
+  /** 单键上限 64KB;ns=包名;事务语义:执行期写私有缓冲,本次执行成功才归并持久化,抛错/超时丢弃 */
   set(key: string, value: string): void;
   delete(key: string): void;
 }
@@ -153,8 +153,11 @@ export interface HookHttpResponse {
 /** ctx.keys 包级 key 读写(hooks 部件专属;set 前 current 整体移入 previous) */
 export interface HookKeys {
   get(name: string): unknown;
-  /** 合并覆写:给定键覆盖,未提及键保留;写前 current 整体快照进 previous */
-  overwrite(values: Record<string, unknown>): void;
+  /**
+   * 合并覆写:给定键覆盖,未提及键保留;写前 current 整体快照进 previous
+   * 仅任务执行与 keySubmit 的 ctx 挂载此方法(其余钩子 undefined——阉割即权限)
+   */
+  overwrite?(values: Record<string, unknown>): void;
   /** 仅热加载提供旧包快照;启停/首载 undefined */
   previous(name: string): unknown;
   /** 键名枚举(排序;不含值——值走 get;多账号遍历场景) */

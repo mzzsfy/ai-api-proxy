@@ -187,9 +187,10 @@ type HooksRuntime struct {
 	deps         HooksDeps
 	settings     map[string]any // ctx.settings 快照
 	taskName     string         // ctx.task
-	written      []string       // CallKeySubmit 期间 ctx.keys.set 写入键名(去重按首次序)
+	written      []string       // keySubmit 期间 overwrite 写入键名(去重按首次序)
 	writtenSeen  map[string]bool
-	collectWrite bool // keys.set 拦截收集开关
+	collectWrite bool        // overwrite 写入键名收集开关(keySubmit)
+	stx          *StorageTx  // storage 事务视图(执行期缓冲;成功归并/失败丢弃)
 }
 
 // 任务文件缺省路径
@@ -266,34 +267,40 @@ func normalizeDeps(deps HooksDeps) HooksDeps {
 // LoadTask 装载任务文件(目标文件 + require 闭包;ctx.settings/ctx.task 注入)
 func LoadTask(pkg *Package, tk HooksTask, deps HooksDeps, settings map[string]any) (*HooksRuntime, error) {
 	deps = normalizeDeps(deps)
+	tx := NewStorageTx(deps.Storage)
+	deps.Storage = tx // storage 事务化:执行期写缓冲,成功归并/失败丢弃
 	env := newHooksEnv(pkg, deps, true)
 	exp, err := env.load("", taskEntry(tk))
 	if err != nil {
 		return nil, err
 	}
-	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, settings: settings, taskName: tk.Name}, nil
+	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, settings: settings, taskName: tk.Name, stx: tx}, nil
 }
 
 // LoadInit 装载 init.js(onLoad;previous 注入经 ctx)
 func LoadInit(pkg *Package, deps HooksDeps, settings map[string]any) (*HooksRuntime, error) {
 	deps = normalizeDeps(deps)
+	tx := NewStorageTx(deps.Storage)
+	deps.Storage = tx
 	env := newHooksEnv(pkg, deps, true)
 	exp, err := env.load("", "init.js")
 	if err != nil {
 		return nil, err
 	}
-	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, settings: settings}, nil
+	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, settings: settings, stx: tx}, nil
 }
 
 // LoadKeys 装载 keys.js(五钩子探测载体;setting 全局注入——keyForm 函数体运行期需要)
 func LoadKeys(pkg *Package, deps HooksDeps) (*HooksRuntime, error) {
 	deps = normalizeDeps(deps)
+	tx := NewStorageTx(deps.Storage)
+	deps.Storage = tx
 	env := newHooksEnv(pkg, deps, true)
 	exp, err := env.load("", "keys.js")
 	if err != nil {
 		return nil, err
 	}
-	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps}, nil
+	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, stx: tx}, nil
 }
 
 // handler 取导出函数(非函数 = 未实现)
@@ -331,7 +338,18 @@ func (h *HooksRuntime) RunTask(tk HooksTask, at time.Time) error {
 	if budget > TaskTimeoutMax {
 		budget = TaskTimeoutMax
 	}
-	return h.call("task "+tk.Name, fn, budget, h.newCtx(budget, at, nil, &tk))
+	// storage 事务:Begin→执行→成功归并/失败丢弃(超时中断走 err 分支丢弃)
+	if h.stx != nil {
+		h.stx.Begin()
+	}
+	err := h.call("task "+tk.Name, fn, budget, h.newCtx(budget, at, nil, &tk, true))
+	if err != nil {
+		if h.stx != nil {
+			h.stx.Drop()
+		}
+		return err
+	}
+	return h.commitStorage()
 }
 
 // RunOnLoad 加载钩子(exports 即处理器;previous = 热加载旧包 keys 快照,启停/首载 nil)
@@ -343,7 +361,24 @@ func (h *HooksRuntime) RunOnLoad(previous map[string]any) error {
 	if fn == nil {
 		return nil
 	}
-	return h.call("onLoad", fn, OnLoadTimeout, h.newCtx(OnLoadTimeout, time.Time{}, previous, nil))
+	if h.stx != nil {
+		h.stx.Begin()
+	}
+	if err := h.call("onLoad", fn, OnLoadTimeout, h.newCtx(OnLoadTimeout, time.Time{}, previous, nil, false)); err != nil {
+		if h.stx != nil {
+			h.stx.Drop()
+		}
+		return err
+	}
+	return h.commitStorage()
+}
+
+// commitStorage 归并 storage 事务(stx 为空 = 无存储注入)
+func (h *HooksRuntime) commitStorage() error {
+	if h.stx == nil {
+		return nil
+	}
+	return h.stx.Commit()
 }
 
 // RunNext next 形态自调度查询(exports.next(ctx) → unix ms | null)
@@ -352,8 +387,17 @@ func (h *HooksRuntime) RunNext() (int64, bool, error) {
 	if fn == nil {
 		return 0, false, fmt.Errorf("next form: next not exported in %s", h.pkg)
 	}
-	v, err := h.callValue("next", fn, NextTimeoutMs, h.newCtx(NextTimeoutMs, time.Time{}, nil, nil))
+	if h.stx != nil {
+		h.stx.Begin()
+	}
+	v, err := h.callValue("next", fn, NextTimeoutMs, h.newCtx(NextTimeoutMs, time.Time{}, nil, nil, true))
 	if err != nil {
+		if h.stx != nil {
+			h.stx.Drop()
+		}
+		return 0, false, err
+	}
+	if err := h.commitStorage(); err != nil {
 		return 0, false, err
 	}
 	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
@@ -366,14 +410,26 @@ func (h *HooksRuntime) RunNext() (int64, bool, error) {
 	return n, true, nil
 }
 
-// keyHook keys.js 钩子调用基座
+// keyHook keys.js 钩子调用基座(only keySubmit 可写 keys;其余钩子 ctx 无 overwrite 能力;storage 事务随钩子成败)
 func (h *HooksRuntime) keyHook(name string, budgetMs int64, args ...goja.Value) (goja.Value, error) {
 	fn := h.handler(name)
 	if fn == nil {
 		return nil, errKeyHookMissing
 	}
-	v, err := h.callValue(name, fn, budgetMs, h.newCtx(budgetMs, time.Time{}, nil, nil), args...)
-	return v, err
+	if h.stx != nil {
+		h.stx.Begin()
+	}
+	v, err := h.callValue(name, fn, budgetMs, h.newCtx(budgetMs, time.Time{}, nil, nil, name == "keySubmit"), args...)
+	if err != nil {
+		if h.stx != nil {
+			h.stx.Drop()
+		}
+		return nil, err
+	}
+	if cErr := h.commitStorage(); cErr != nil {
+		return nil, cErr
+	}
+	return v, nil
 }
 
 // CallKeyWrite 键写入归一化(undefined/null 返回 = 透传原值)
@@ -474,7 +530,7 @@ var errKeyHookMissing = fmt.Errorf("hook not implemented")
 func (h *HooksRuntime) HasExport(name string) bool { return h.handler(name) != nil }
 
 // newCtx 构造本次调用的 ctx(http/keys/settings/task/cron)
-func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]any, tk *HooksTask) *goja.Object {
+func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]any, tk *HooksTask, canWriteKeys bool) *goja.Object {
 	ctx := h.vm.NewObject()
 	httpObj := h.vm.NewObject()
 	_ = httpObj.Set("run", func(opts map[string]any) (map[string]any, error) {
@@ -492,20 +548,23 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 		}
 		return v, nil
 	})
-	_ = keysObj.Set("overwrite", func(values map[string]any) error {
-		if h.deps.Keys == nil {
-			return fmt.Errorf("keys unavailable (package %s)", h.pkg)
-		}
-		if h.collectWrite {
-			for k := range values {
-				if !h.writtenSeen[k] {
-					h.writtenSeen[k] = true
-					h.written = append(h.written, k)
+	// overwrite 仅在写入窗口挂载(任务执行/keySubmit);其余钩子 ctx.keys 上无此能力(阉割即权限)
+	if canWriteKeys {
+		_ = keysObj.Set("overwrite", func(values map[string]any) error {
+			if h.deps.Keys == nil {
+				return fmt.Errorf("keys unavailable (package %s)", h.pkg)
+			}
+			if h.collectWrite {
+				for k := range values {
+					if !h.writtenSeen[k] {
+						h.writtenSeen[k] = true
+						h.written = append(h.written, k)
+					}
 				}
 			}
-		}
-		return h.deps.Keys.Overwrite(h.pkg, values)
-	})
+			return h.deps.Keys.Overwrite(h.pkg, values)
+		})
+	}
 	_ = keysObj.Set("previous", func(name string) (any, error) {
 		if h.deps.Keys == nil {
 			return nil, fmt.Errorf("keys unavailable (package %s)", h.pkg)

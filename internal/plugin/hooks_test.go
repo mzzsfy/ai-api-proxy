@@ -539,3 +539,32 @@ func TestValidate_ReservedPrefixRejected(t *testing.T) {
 		t.Fatalf("reserved prefix accepted: %v", err)
 	}
 }
+
+func TestStorage_TxCommitOnSuccessRollbackOnFailure(t *testing.T) {
+	// Given 任务写 storage When 成功 Then 归并落库;失败(抛错/超时)Then 缓冲丢弃持久层不变
+	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}
+	pkg := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("k","v");}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
+	rt, err := LoadTask(pkg, HooksTask{Name: "a", Cron: "* * * * *"}, deps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.RunTask(HooksTask{Name: "a", Cron: "* * * * *"}, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := deps.Storage.Get("k"); !ok {
+		t.Fatal("commit missing")
+	}
+
+	// 失败任务:先写后抛错 → 回滚
+	pkg2 := hooksPkg(t, map[string]string{"tasks/b.js": `module.exports={handler:function(ctx){storage.set("k2","v2"); throw new Error("boom");}}`}, HooksTask{Name: "b", Cron: "* * * * *"})
+	rt2, err := LoadTask(pkg2, HooksTask{Name: "b", Cron: "* * * * *"}, deps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt2.RunTask(HooksTask{Name: "b", Cron: "* * * * *"}, time.Unix(0, 0)); err == nil {
+		t.Fatal("task should fail")
+	}
+	if _, ok := deps.Storage.Get("k2"); ok {
+		t.Fatal("rollback missing: failed task persisted storage")
+	}
+}

@@ -89,7 +89,8 @@ module.exports = {
 | 字段 | 说明 | 可用性 |
 |---|---|---|
 | `ctx.http.run(req)` | 出站请求;`{url, method?, headers?, body?, timeoutMs?}` → `{status, headers, body}`;body >1MB 截断;timeoutMs 缺省 min(30s, 外层剩余) | 全部 hooks 钩子 |
-| `ctx.keys` | `get(name)` / `set(values)` / `previous(name)` | 全部;set 写整包凭据文档(previous 仅热升级提供旧快照) |
+| `ctx.keys` | `get(name)` / `previous(name)` / `list()` 只读;`overwrite(values)` **仅任务执行与 keySubmit 挂载**(其余钩子上无此方法——阉割即权限);合并覆写:给定键覆盖,未提及保留 | 全部(overwrite 见窗口) |
+| `storage` | 包级 KV `get/set/delete`;**事务语义**:执行期写进私有缓冲,本次执行成功才归并持久化,抛错/超时全部丢弃 | 全部 |
 | `ctx.settings` | 参数快照(只读),见 03 | 全部 |
 | `ctx.task` | 本次任务行名 | 仅任务 |
 | `ctx.cron.runAt` | 触发时刻 | 仅任务 |

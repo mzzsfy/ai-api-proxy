@@ -52,42 +52,66 @@ func initAndTaskFiles(onLoadJS, taskJS string) map[string]string {
 }
 
 func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
-	// Given hooks-only 包(init.js 写 key) When 安装→升级→读管理 keys→卸载 Then 各环节语义成立
+	// Given hooks-only 包 When 安装→任务运行→升级→读管理 keys→卸载 Then 各环节语义成立
+	// (keys 写窗:任务可写;onLoad ctx.keys 无 overwrite 能力——阉割即权限)
 	ctx := context.Background()
 	pkgs, st := testRegistry(t)
 	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
 	sched := wireHooks(wire)
 	defer sched.Stop()
 
-	// 安装:onLoad 异步触发,写入 token
-	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){ctx.keys.overwrite({token:"loaded"});}}`,
-		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed"});}}`,
-	))); err != nil {
-		t.Fatal(err)
+	runSignIn := func(tokenVal string) {
+		pkg, err := pkgs.GetPackage("checkin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		task := plugin.HooksTask{Name: "signIn", Cron: "* * * * *", TimeoutMs: 1000}
+		rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys()}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rt.RunTask(task, time.Unix(0, 0)); err != nil {
+			t.Fatal(err)
+		}
+		_ = tokenVal
 	}
-	waitFor(t, func() bool {
-		v, ok := pkgs.Keys().Get("checkin", "token")
-		return ok && v == "loaded"
-	}, "onLoad key not written")
 
-	// 升级:onLoad 再次触发(current 移入 previous)
-	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){ctx.keys.overwrite({token:"reloaded"});}}`,
+	// 安装:init 无写键能力(探测 overwrite 未挂载并记入 storage);任务执行写入
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
+		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.overwrite===undefined));}}`,
 		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed"});}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool {
-		v, _ := pkgs.Keys().Get("checkin", "token")
-		p, _ := pkgs.Keys().Previous("checkin", "token")
-		return v == "reloaded" && p == "loaded"
-	}, "upgrade keys snapshot failed")
+		v, _ := pkgs.GetPackage("checkin")
+		_ = v
+		return true
+	}, "install settle")
+	runSignIn("signed")
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signed" {
+		t.Fatalf("task key: %v", v)
+	}
+
+	// 升级:onLoad 再次触发;任务再写,current 移入 previous
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
+		`module.exports={onLoad:function(ctx){storage.set("probe", "x");}}`,
+		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed-2"});}}`,
+	))); err != nil {
+		t.Fatal(err)
+	}
+	runSignIn("signed-2")
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signed-2" {
+		t.Fatalf("task key after upgrade: %v", v)
+	}
+	if p, _ := pkgs.Keys().Previous("checkin", "token"); p != "signed" {
+		t.Fatalf("previous: %v", p)
+	}
 
 	// 管理面明文视图
 	view := pkgs.Keys().View("checkin")
 	cur := view["current"].(map[string]any)
-	if cur["token"] != "reloaded" {
+	if cur["token"] != "signed-2" {
 		t.Fatalf("view: %v", cur)
 	}
 

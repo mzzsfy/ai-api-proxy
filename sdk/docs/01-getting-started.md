@@ -112,7 +112,7 @@ const hooks = loadPackage(__dirname + "/..", { config: {}, secrets: { api_key: "
 |---|---|
 | `util` | 工具集:b64/sha256/hmac/uuid/now/template/deepMerge/get/set/pick/omit/inspect/secret(ref)/key(name 只读)/evict |
 | `log` | info/warn/error,进宿主日志 |
-| `storage` | 包级 KV(get/set/delete,单值 ≤64KB,ns=包名) |
+| `storage` | 包级 KV(get/set/delete,单值 ≤64KB,ns=包名);**事务语义**:执行期写私有缓冲,成功归并持久化,失败/超时丢弃 |
 | `setting` | 仅 hooks 族文件求值期 + keyForm 运行期;参数声明构建器(见 03 文档) |
 | `require` / `module` / `exports` | CommonJS,包内相对解析 |
 
