@@ -14,7 +14,7 @@ type ProviderCfg struct {
 	URL string
 	// Options 供给方私有配置(各实现自行解析;yaml 展开后的 map)
 	Options map[string]any
-	// StateDir 状态目录(data_dir 下;warp 实例 state/mihomo 配置缓存等)
+	// StateDir 状态目录(data_dir 下;供给方状态缓存)
 	StateDir string
 }
 

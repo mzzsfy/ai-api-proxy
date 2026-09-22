@@ -1,4 +1,4 @@
-// Package ipprovider IP 供给方契约:proxy 层与出口 IP 供给方(warp 池/clash 单出口/
+// Package ipprovider IP 供给方契约:proxy 层与出口 IP 供给方(clash 单出口/
 // 远程代理 API/mihomo 内核)的稳定交互面。契约语义见 docs/ai-api-proxy/feat/ipprovider.md。
 //
 // 执行模型边界(恰一次):请求字节一经发往上游绝不重发;连接建立失败(零字节触达)
@@ -44,7 +44,7 @@ type Lease interface {
 	EgressIP() string
 	// Release 归还租约;幂等;实现须在 RoundTrip 结束时被调用
 	Release()
-	// Capabilities lease 级能力(warp/clash 与 Provider 一致;remote 以服务端为准);
+	// Capabilities lease 级能力(clash 与 Provider 一致;remote 以服务端为准);
 	// 重试判定以本值为准
 	Capabilities() Capabilities
 }

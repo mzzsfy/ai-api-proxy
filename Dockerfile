@@ -2,12 +2,7 @@
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-# replace 指向本地同级 checkout(开发机布局),镜像构建上下文不存在 → 剥掉;
-# plugin-proxy 的 require 为替身版本(默认构建不 import,但 download 全量解析)→ 一并剥掉;
-# 默认形态真正拉取的依赖均公开可达
-RUN go mod edit -dropreplace=github.com/mzzsfy/warp-pool -dropreplace=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider \
-                -droprequire=github.com/mzzsfy/ai-api-proxy-plugin-proxy/mihomoprovider \
- && go mod download
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ai-api-proxy ./cmd/ai-api-proxy
 

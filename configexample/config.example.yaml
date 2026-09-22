@@ -27,14 +27,6 @@ transports: []
 #      affinity_ttl: 86400         # 亲和 TTL 秒(默认 86400)
 #
 # ── IP 供给方传输(ipp+ 前缀;出口 IP 池管理,见 docs/ai-api-proxy/feat/ipprovider.md)──
-#  - name: warp-out                # WARP 实例池(进程内,状态落 data_dir/ipp/<name>;需 -tags withwarp 构建)
-#    url: "ipp+warp://warp"
-#    options:
-#      min: 1                      # 实例数下限(>0)
-#      max: 3                      # 实例数上限
-#      listen_base: "127.0.0.1:51367"  # 实例 listener 端口起点(可选)
-#      dial_transport: "socks5"    # socks5(默认)| http
-#
 #  - name: clash-out               # 既有 clash/mihomo 混合端口(单出口,不可轮换)
 #    url: "ipp+clash://clash"
 #    options:
@@ -48,17 +40,3 @@ transports: []
 #      api_key: "sk-..."
 #      can_rotate_ip: true         # 配置静态声明;服务端 lease 级不一致时以服务端为准
 #      session_affinity: true
-#
-#  - name: mihomo-out              # mihomo 内核进程内集成(vless/vmess 等,需 -tags withproxy 构建)
-#    url: "ipp+mihomo://mihomo"
-#    options:
-#      config: |                   # mihomo 配置片段(proxies,原生 clash 语法)
-#        proxies:
-#          - name: vless-1
-#            type: vless
-#            server: 1.2.3.4
-#            port: 443
-#            uuid: 9c0c15c8-...
-#            tls: true
-#            network: ws
-#            ws-opts: { path: /ws }
