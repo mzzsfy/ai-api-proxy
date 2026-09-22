@@ -37,27 +37,15 @@ type Vars struct {
 	EntryStream bool
 }
 
-// UpstreamInfo 上游轻量快照(hook 可读)
+// UpstreamInfo 模型行轻量快照(hook 可读;v2 行即模型,无 models 列表)
 type UpstreamInfo struct {
-	Name   string
-	Models []string
+	Name string
 }
 
-// Target 上游目标(SecretsRef=凭据存储键;Weight 加权随机权重,≤0 视为 1)
-type Target struct {
-	ID         string
-	Name       string
-	BaseURL    string
-	Transport  string
-	SecretsRef string
-	Weight     int
-}
-
-// PipelineContext 管道请求上下文
+// PipelineContext 管道请求上下文(v2:无目标概念,连接信息归适配器)
 type PipelineContext struct {
 	RequestID string
 	Upstream  UpstreamInfo
-	Target    Target
 	State     map[string]any
 	Vars      Vars
 }
@@ -105,13 +93,14 @@ type Declarer interface {
 
 // Request 上游请求载体(传输由 host 执行)
 type Request struct {
-	URL     string
-	Method  string
-	Headers map[string]string
-	Body    []byte
-	Stream  bool   // 双声明分发意图
-	Model   string // 会话亲和素材(ipp 供给方传输消费;非 ipp 忽略)
-	APIKey  string // 目标凭据(会话亲和素材之一;非 ipp 忽略)
+	URL       string
+	Method    string
+	Headers   map[string]string
+	Body      []byte
+	Stream    bool   // 双声明分发意图
+	Model     string // 会话亲和素材(ipp 供给方传输消费;非 ipp 忽略)
+	APIKey    string // 目标凭据(会话亲和素材之一;非 ipp 忽略)
+	Transport string // 传输实例名(空 = direct;适配器经参数槽决定)
 }
 
 // Protocol 协议适配层(恰一;声明式单协议;hook 全同步)

@@ -14,14 +14,23 @@ import (
 
 // ─── 黄金对照:js-openai-full 包(JS 版)与内置 Go 版同输入同产物 ───
 
-// goldenCtx 构造一致上下文
+// goldenCtx 构造一致上下文(v2:无目标概念)
 func goldenCtx() *pipeline.PipelineContext {
-	ctx := pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u", Models: []string{"m"}}, pipeline.Vars{Model: "m", EntryStream: true})
-	ctx.Target = pipeline.Target{ID: "1/t1", Name: "t1", BaseURL: "https://api.x.com/", SecretsRef: "u/t1"}
-	return ctx
+	return pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
 }
 
 const goldenKey = "sk-golden"
+
+// goldenPackageKey 包级 key 读值(JS/Go 两侧同源)
+func goldenPackageKey(name string) (any, bool) {
+	if name == "api_key" {
+		return goldenKey, true
+	}
+	return nil, false
+}
+
+// goldenBaseURL 对拍用包参数值(两侧一致)
+const goldenBaseURL = "https://api.x.com"
 
 // loadJSPackage 从 js-openai-full 测试夹具实例化协议(与主库同级的 plugins-repo);夹具缺失则跳过
 func loadJSPackage(t *testing.T) pipeline.Protocol {
@@ -49,14 +58,7 @@ func loadJSPackage(t *testing.T) pipeline.Protocol {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secrets := func(target, key string) (string, bool) {
-		if key == "api_key" {
-			return goldenKey, true
-		}
-		return "", false
-	}
-	secretValues := map[string]map[string]string{"t1": {"api_key": goldenKey}}
-	p, err := plugin.NewProtocol(pkg, nil, secrets, func(string) map[string]string { return secretValues["t1"] }, nil, nil, nil)
+	p, err := plugin.NewProtocol(pkg, map[string]any{"base_url": goldenBaseURL}, nil, goldenPackageKey, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +108,10 @@ func findRepoRoot(t *testing.T) string {
 
 // TestGolden_JSvsBuiltin_BuildRequest JS 版与内置版 BuildRequest 产物一致
 func TestGolden_JSvsBuiltin_BuildRequest(t *testing.T) {
-	goProto := &Protocol{TargetSecrets: func(target, key string) (string, bool) { return goldenKey, true }}
+	goProto := &Protocol{
+		Config:     map[string]any{BaseURLParam: goldenBaseURL},
+		PackageKey: goldenPackageKey,
+	}
 	jsProto := loadJSPackage(t)
 	cases := []struct {
 		name  string

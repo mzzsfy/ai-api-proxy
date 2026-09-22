@@ -171,26 +171,29 @@ func aapZip(t *testing.T, manifest string, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-const jsProtoManifest = `{"manifestVersion":1,"name":"js-openai","version":"1.0.0",
-	"parts":{"protocol":{"protocol":"openai-completions","features":["tools","vision"],"secretRefs":["api_key"]}}}`
+const jsProtoManifest = `{"manifestVersion":1,"name":"js-openai","version":"2.0.0",
+	"parts":{"protocol":{"protocol":"openai-completions","features":["tools","vision"]},
+	"filters":[{"name":"rewrite"}]}}`
 
 // jsProtoAnthropicManifest 同一部件源码的另一协议声明(anthropic-messages)
-const jsProtoAnthropicManifest = `{"manifestVersion":1,"name":"js-anthropic","version":"1.0.0",
-	"parts":{"protocol":{"protocol":"anthropic-messages","features":["tools","vision"],"secretRefs":["api_key"]}}}`
+const jsProtoAnthropicManifest = `{"manifestVersion":1,"name":"js-anthropic","version":"2.0.0",
+	"parts":{"protocol":{"protocol":"anthropic-messages","features":["tools","vision"]}}}`
 
 // jsProtoSrc 真实 JS 协议部件:构造请求/帧解包(声明协议事件数组)/响应透传
-// 协议由工厂 config 注入(部件声明的协议名随 config.protocol 下发)
+// v2:连接=包参数(config.base_url/protocol/transport 槽),密钥=包级 keys(util.key);
+// rewrite filter 并入本包(filters/rewrite.js),其参数槽 model 同包声明
 const jsProtoSrc = `module.exports = function (config) {
 	var DECLARED = (config && config.protocol) || "openai-completions";
 	return {
 	buildRequest: function (ctx, entry) {
 		var ant = DECLARED === "anthropic-messages";
 		return {
-			url: ctx.target.baseUrl + (ant ? "/v1/messages" : "/v1/chat/completions"),
+			url: config.base_url + (ant ? "/v1/messages" : "/v1/chat/completions"),
 			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.secret("api_key") },
+			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key("api_key") },
 			body: entry,
-			stream: ctx.vars.entryStream
+			stream: ctx.vars.entryStream,
+			transport: (config.transport && config.transport !== "direct") ? config.transport : null
 		};
 	},
 	mapEvent: function (ctx, e) {
@@ -210,12 +213,17 @@ const jsProtoSrc = `module.exports = function (config) {
 	},
 	mapResponse: function (ctx, body) { return body; }
 	};
+};
+module.exports.settings = {
+	base_url: setting.string({ description: "上游地址", required: true }),
+	protocol: setting.string({ description: "协议名", required: true }),
+	transport: setting.string({ description: "出站传输实例名(direct=内置直连;命名实例在 config.yaml transports 配置)" })
 };`
 
-const rewriteManifest = `{"manifestVersion":1,"name":"rewrite-model","version":"1.0.0","parts":{
-	"filters":[{"name":"rewrite","configSchema":{"type":"object","properties":{"model":{"type":"string"}},"required":["model"]}}]}}`
+const rewriteManifest = `{"manifestVersion":1,"name":"rewrite-model","version":"2.0.0","parts":{
+	"filters":[{"name":"rewrite"}]}}`
 
-// rewriteSrc 真实 JS 修改部件:改写请求模型名
+// rewriteSrc 真实 JS 修改部件:改写请求模型名(参数槽由同文件 settings 片段声明)
 const rewriteSrc = `module.exports = function (config) {
 	var target = (config && config.model) || "";
 	return {
@@ -228,6 +236,9 @@ const rewriteSrc = `module.exports = function (config) {
 		mapChunk: function (ctx, c) { return c; },
 		mapResponse: function (ctx, r) { return r; }
 	};
+};
+module.exports.settings = {
+	model: setting.string({ description: "目标模型名" })
 };`
 
 // fourGroupsFixture 4 组环境:真实网关服务 + 假上游 + forward 代理 + 2 真实插件包 + 4 上游实例
@@ -277,40 +288,46 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = app.Close() })
-	// 安装 2 个真实插件包
+	// 安装 2 个真实插件包(v2:协议包内含 rewrite filter 源,独立 rewrite 包仅用于包粒度装包验证)
 	ctx := context.Background()
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{
+		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	// 同源码的 anthropic 协议声明包(声明式单协议:入口 anthropic 需上游声明 anthropic-messages)
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
+	// 同源码的 anthropic 协议声明包(声明式单协议:入口 anthropic 需行绑 anthropic-messages 包)
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{
+		plugin.ProtocolEntry: jsProtoSrc})); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	// mkUpstream 按入口协议装组:anthropic 入口组用 anthropic 声明包
-	mkUpstream := func(name, model, base, transport string, withFilter bool) {
-		u := &upstream.Upstream{
-			Name: name, Enabled: true,
-			Base:   upstream.PackageRef{Package: base},
-			Models: []string{model},
-			Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: transport, Enabled: true,
-				Secrets: map[string]string{"api_key": upstreamAPIKey}}},
+	// 包级密钥 + 包参数(v2 连接信息归属包;行 params 仅覆盖差异槽)
+	for _, pkg := range []string{"js-openai", "js-anthropic"} {
+		if err := app.AdminDeps.Packages.Keys().Merge(pkg, map[string]any{"api_key": upstreamAPIKey}); err != nil {
+			t.Fatal(err)
 		}
-		if withFilter {
-			u.Extras = []upstream.PackageRef{{Package: "rewrite-model"}}
-			u.FilterParams = map[string]map[string]any{"rewrite-model/rewrite": {"model": upstreamRewriteM}}
+		proto := "openai-completions"
+		if pkg == "js-anthropic" {
+			proto = "anthropic-messages"
 		}
-		if err := app.Registry.Save(ctx, u); err != nil {
+		if _, err := app.AdminDeps.Packages.Settings().Put(pkg, plugin.PutInput{Config: map[string]any{
+			"base_url": upSrv.URL, "protocol": proto}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// mkRow 建模型行:行名即模型名;transport/rewrite 目标模型以行 params 覆盖
+	mkRow := func(name, pkg string, params map[string]any) {
+		m := &upstream.Model{Name: name, Plugin: pkg, Enabled: true, Params: params}
+		if err := app.Registry.Save(ctx, m); err != nil {
 			t.Fatalf("save %s: %v", name, err)
 		}
 	}
-	mkUpstream("g1-direct-nofilter", "m-direct", "js-openai", "", false)
-	mkUpstream("g2-proxy-nofilter", "m-proxy", "js-openai", "px", false)
-	mkUpstream("g3-direct-filter", "mf-direct", "js-openai", "", true)
-	mkUpstream("g4-proxy-filter", "mf-proxy", "js-openai", "px", true)
-	mkUpstream("g5-anthropic", "m-anthropic", "js-anthropic", "", false)
+	mkRow("m-direct", "js-openai", nil)
+	mkRow("m-proxy", "js-openai", map[string]any{"transport": "px"})
+	mkRow("mf-direct", "js-openai", map[string]any{"model": upstreamRewriteM})
+	mkRow("mf-proxy", "js-openai", map[string]any{"transport": "px", "model": upstreamRewriteM})
+	mkRow("m-anthropic", "js-anthropic", nil)
 	gateway := httptest.NewServer(app.Mux)
 	t.Cleanup(gateway.Close)
 	return &fourGroupsFixture{

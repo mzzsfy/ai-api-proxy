@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,7 +71,7 @@ func writePackageDir(t *testing.T, root, name, version, protocol, js string) str
 func mustManifest(t *testing.T, raw string) *plugin.Manifest {
 	t.Helper()
 	m := &plugin.Manifest{}
-	if err := jsonUnmarshal([]byte(raw), m); err != nil {
+	if err := json.Unmarshal([]byte(raw), m); err != nil {
 		t.Fatal(err)
 	}
 	return m

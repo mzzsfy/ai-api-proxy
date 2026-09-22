@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// ─── 单目标直发引擎测试:无重试/无切目标/无熔断,失败即终局 ───
+// ─── 直发引擎测试(v2:无目标概念;无重试/无熔断,失败即终局) ───
 
 // recordingFilter 记录调用序的假 filter
 type recordingFilter struct {
@@ -47,13 +46,15 @@ func (f *failFilter) MapRequest(ctx *PipelineContext, entry []byte) ([]byte, err
 func (f *failFilter) MapChunk(ctx *PipelineContext, c []byte) ([]byte, error)    { return nil, nil }
 func (f *failFilter) MapResponse(ctx *PipelineContext, r []byte) ([]byte, error) { return nil, nil }
 
-// fakeProtocol 记录 BuildRequest 目标序列
+// fakeProtocol 记录 BuildRequest 序列与请求载体
 type fakeProtocol struct {
 	mu        sync.Mutex
 	builds    []string
+	requests  []Request
 	respBody  string
 	forms     []string
 	flagSSE   bool
+	transport string
 	roundtrip int
 }
 
@@ -69,10 +70,12 @@ func (p *fakeProtocol) Supports() Supports {
 }
 func (p *fakeProtocol) BuildRequest(ctx *PipelineContext, entry []byte) (Request, error) {
 	p.mu.Lock()
-	p.builds = append(p.builds, ctx.Target.Name)
+	p.builds = append(p.builds, ctx.Upstream.Name)
 	p.roundtrip++
+	req := Request{URL: "http://t/up", Method: "POST", Stream: p.flagSSE, Transport: p.transport}
+	p.requests = append(p.requests, req)
 	p.mu.Unlock()
-	return Request{URL: "http://t/" + ctx.Target.Name, Method: "POST", Stream: p.flagSSE}, nil
+	return req, nil
 }
 func (p *fakeProtocol) MapEvent(ctx *PipelineContext, event []byte) ([]byte, error) {
 	return event, nil
@@ -111,13 +114,8 @@ func (p *fakeProtocol) count() int {
 	return len(p.builds)
 }
 
-func testUpstream(proto Protocol, filters []Filter, targets []Target) Resolved {
-	return Resolved{Filters: filters, Protocol: proto, Targets: targets}
-}
-
-func mkTarget(name string) Target {
-	// 测试目标 Transport 引用与目标同名,便于按名分流假传输
-	return Target{ID: name, Name: name, BaseURL: "http://" + name, Transport: name, SecretsRef: "ref-" + name}
+func resolved(proto Protocol, filters []Filter) Resolved {
+	return Resolved{Filters: filters, Protocol: proto}
 }
 
 // chunkFailFilter MapChunk 恒失败的 filter
@@ -142,10 +140,10 @@ func TestRun_MapChunkFailureDegradesRaw(t *testing.T) {
 		Headers: map[string]string{"Content-Type": "text/event-stream"},
 		Events:  events,
 	}
-	tr := &fakeTransport{name: "a", fixed: sse}
+	tr := &fakeTransport{name: TransportRef, fixed: sse}
 	ex := &Executor{Transports: func(string) (Transport, bool) { return tr, true }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{EntryStream: true})
-	resp, err := ex.Run(context.Background(), pctx, testUpstream(proto, []Filter{&chunkFailFilter{name: "bad"}}, []Target{mkTarget("a")}), []byte(`{}`))
+	resp, err := ex.Run(context.Background(), pctx, resolved(proto, []Filter{&chunkFailFilter{name: "bad"}}), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,18 +168,18 @@ func TestRun_MapChunkFailureDegradesRaw(t *testing.T) {
 }
 
 func TestRun_FilterChainOrder(t *testing.T) {
-	// Given extras→base 两个 filter When Run Then MapRequest 正序,MapResponse 逆序
+	// Given 两个 filter When Run Then MapRequest 正序,MapResponse 逆序
 	var log []string
 	f1 := &recordingFilter{name: "f1", log: &log}
 	f2 := &recordingFilter{name: "f2", log: &log}
 	proto := &fakeProtocol{respBody: `{"ok":true}`}
 	ex := &Executor{
 		Transports: func(string) (Transport, bool) {
-			return &fakeTransport{name: "direct"}, true
+			return &fakeTransport{name: TransportRef}, true
 		},
 	}
 	pctx := NewContext("r1", UpstreamInfo{Name: "u"}, Vars{})
-	resp, err := ex.Run(context.Background(), pctx, testUpstream(proto, []Filter{f1, f2}, []Target{mkTarget("a")}), []byte(`{}`))
+	resp, err := ex.Run(context.Background(), pctx, resolved(proto, []Filter{f1, f2}), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +196,7 @@ func TestRun_MapRequestFail502WithPartName(t *testing.T) {
 	// Given filter 失败 When Run Then 错误含部件名
 	ex := &Executor{Transports: func(string) (Transport, bool) { return nil, false }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	_, err := ex.Run(context.Background(), pctx, testUpstream(&fakeProtocol{}, []Filter{&failFilter{name: "bad-f"}}, []Target{mkTarget("a")}), []byte(`{}`))
+	_, err := ex.Run(context.Background(), pctx, resolved(&fakeProtocol{}, []Filter{&failFilter{name: "bad-f"}}), []byte(`{}`))
 	var be *BuildError
 	if err == nil || !errors.As(err, &be) || !strings.Contains(err.Error(), "bad-f") {
 		t.Fatalf("want part name in error: %v", err)
@@ -206,12 +204,12 @@ func TestRun_MapRequestFail502WithPartName(t *testing.T) {
 }
 
 func TestRun_SingleShot_NoFailoverOnTransportError(t *testing.T) {
-	// Given 传输失败 When Run Then 不切目标直接失败(重试归下游)
-	tr := &fakeTransport{name: "a", err: fmt.Errorf("conn refused")}
+	// Given 传输失败 When Run Then 直接失败(重试归下游)
+	tr := &fakeTransport{name: TransportRef, err: fmt.Errorf("conn refused")}
 	ex := &Executor{Transports: func(string) (Transport, bool) { return tr, true }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
 	proto := &fakeProtocol{}
-	_, err := ex.Run(context.Background(), pctx, testUpstream(proto, nil, []Target{mkTarget("a"), mkTarget("b")}), []byte(`{}`))
+	_, err := ex.Run(context.Background(), pctx, resolved(proto, nil), []byte(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "conn refused") {
 		t.Fatalf("transport error: %v", err)
 	}
@@ -222,10 +220,10 @@ func TestRun_SingleShot_NoFailoverOnTransportError(t *testing.T) {
 
 func TestRun_SingleShot_NoRefreshOn401(t *testing.T) {
 	// Given 上游 401 When Run Then 原样透传 401,不发第二次请求(刷新归下游)
-	tr := &fakeTransport{name: "a", fixed: TransportResponse{Status: 401, Body: []byte(`{"error":"auth"}`)}}
+	tr := &fakeTransport{name: TransportRef, fixed: TransportResponse{Status: 401, Body: []byte(`{"error":"auth"}`)}}
 	ex := &Executor{Transports: func(string) (Transport, bool) { return tr, true }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	resp, err := ex.Run(context.Background(), pctx, testUpstream(&fakeProtocol{}, nil, []Target{mkTarget("a")}), []byte(`{}`))
+	resp, err := ex.Run(context.Background(), pctx, resolved(&fakeProtocol{}, nil), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,20 +235,13 @@ func TestRun_SingleShot_NoRefreshOn401(t *testing.T) {
 	}
 }
 
-func TestRun_SingleShot_5xxPassthroughNoFailover(t *testing.T) {
-	// Given 首目标 503 When Run Then 透传 503 且不试第二目标
-	trA := &fakeTransport{name: "a", fixed: TransportResponse{Status: 503, Body: []byte(`overloaded`)}}
-	trB := &fakeTransport{name: "b", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
-	// 注入固定随机源(seed=2 首个 Intn(2)=0 先命中 a):全局 rand 自动播种下 50% 先选 b,透传断言须确定命中 a
-	ex := &Executor{Rand: rand.New(rand.NewSource(2)), Transports: func(name string) (Transport, bool) {
-		if name == "a" {
-			return trA, true
-		}
-		return trB, true
-	}}
+func TestRun_SingleShot_5xxPassthroughNoRetry(t *testing.T) {
+	// Given 上游 503 When Run Then 透传 503 且仅一次请求
+	tr := &fakeTransport{name: TransportRef, fixed: TransportResponse{Status: 503, Body: []byte(`overloaded`)}}
+	ex := &Executor{Transports: func(string) (Transport, bool) { return tr, true }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
 	proto := &fakeProtocol{}
-	resp, err := ex.Run(context.Background(), pctx, testUpstream(proto, nil, []Target{mkTarget("a"), mkTarget("b")}), []byte(`{}`))
+	resp, err := ex.Run(context.Background(), pctx, resolved(proto, nil), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,102 +249,68 @@ func TestRun_SingleShot_5xxPassthroughNoFailover(t *testing.T) {
 		t.Fatalf("passthrough: %d %s", resp.Status, resp.Body)
 	}
 	if proto.count() != 1 {
-		t.Fatalf("must not failover: %v", proto.builds)
+		t.Fatalf("must be single shot: %v", proto.builds)
 	}
 }
 
-func TestRun_EnabledTargetsOnly(t *testing.T) {
-	// Given 多目标(disabled 已在 Resolve 过滤)When Run Then 恰调用一个目标,失败不切换
-	tr := &fakeTransport{name: "first", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
-	calls := map[string]int{}
-	ex := &Executor{Rand: rand.New(rand.NewSource(1)), Transports: func(name string) (Transport, bool) {
-		calls[name]++
-		if name == "first" {
-			return tr, true
-		}
-		return &fakeTransport{name: name}, true
-	}}
-	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	proto := &fakeProtocol{respBody: `ok`}
-	t1 := mkTarget("first")
-	_, err := ex.Run(context.Background(), pctx, testUpstream(proto, nil, []Target{t1, mkTarget("second")}), []byte(`{}`))
-	if err != nil {
+func TestRun_OnDoneCallback(t *testing.T) {
+	// Given OnDone 注入 When 成功/失败 Then 回调按 (upstream, failed) 触发恰一次
+	type rec struct {
+		name   string
+		failed bool
+	}
+	var log []rec
+	newEx := func(tr Transport) *Executor {
+		return &Executor{Transports: func(string) (Transport, bool) { return tr, true },
+			OnDone: func(upstream string, failed bool) { log = append(log, rec{upstream, failed}) }}
+	}
+	pctx := NewContext("r", UpstreamInfo{Name: "m1"}, Vars{})
+	ok := newEx(&fakeTransport{name: TransportRef, fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}})
+	if _, err := ok.Run(context.Background(), pctx, resolved(&fakeProtocol{respBody: `ok`}, nil), []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	sum := calls["first"] + calls["second"]
-	if sum != 1 {
-		t.Fatalf("exactly one target call expected: %v", calls)
+	if len(log) != 1 || log[0].name != "m1" || log[0].failed {
+		t.Fatalf("onDone ok: %v", log)
+	}
+	log = nil
+	bad := newEx(&fakeTransport{name: TransportRef, err: fmt.Errorf("boom")})
+	if _, err := bad.Run(context.Background(), pctx, resolved(&fakeProtocol{}, nil), []byte(`{}`)); err == nil {
+		t.Fatal("expect error")
+	}
+	if len(log) != 1 || !log[0].failed {
+		t.Fatalf("onDone failed: %v", log)
 	}
 }
 
-func TestWeightedPick_Distribution(t *testing.T) {
-	// Given 权重 1/1/2 When 按脚本随机值选择 Then 命中区间与权重边界一致
-	targets := []Target{mkTarget("a"), mkTarget("b"), mkTarget("c")}
-	targets[2].Weight = 2
-	seq := []int{0, 1, 2, 3}
-	i := 0
-	rnd := func(total int) int {
-		if total != 4 {
-			t.Fatalf("total weight: %d", total)
-		}
-		v := seq[i%len(seq)]
-		i++
-		return v
-	}
-	got := []string{}
-	for range seq {
-		got = append(got, weightedPick(targets, rnd).Name)
-	}
-	want := []string{"a", "b", "c", "c"}
-	for j := range want {
-		if got[j] != want[j] {
-			t.Fatalf("pick %d: got %v want %v", j, got, want)
-		}
-	}
-}
-
-func TestWeightedPick_NonPositiveWeightAsOne(t *testing.T) {
-	// Given weight ≤0 与缺省混合 When 选择 Then 全部按 weight=1 参与且总数=3
-	targets := []Target{mkTarget("a"), mkTarget("b"), mkTarget("c")}
-	targets[0].Weight = -5
-	total := 0
-	weightedPick(targets, func(n int) int { total = n; return 0 })
-	if total != 3 {
-		t.Fatalf("total: %d", total)
-	}
-}
-
-func TestRun_WeightedSelectionCallsExactlyOne(t *testing.T) {
-	// Given 多候选目标 When Run Then 恰一个目标被调用且传输按选中名分流
-	tr := &fakeTransport{name: "small", fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}
+func TestRun_TransportSlotFromRequest(t *testing.T) {
+	// Given 请求载体声明 transport=slow When Run Then 按该名取传输;空 = direct
 	calls := map[string]int{}
-	ex := &Executor{Rand: rand.New(rand.NewSource(1)), Transports: func(name string) (Transport, bool) {
+	ex := &Executor{Transports: func(name string) (Transport, bool) {
 		calls[name]++
-		if name == "small" {
-			return tr, true
-		}
-		return &fakeTransport{name: name}, true
+		return &fakeTransport{name: name, fixed: TransportResponse{Status: 200, Body: []byte(`ok`)}}, true
 	}}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	big := mkTarget("disabled-big")
-	big.Weight = 1000
-	small := mkTarget("small")
-	small.Weight = 1
-	u := testUpstream(&fakeProtocol{respBody: `ok`}, nil, []Target{big, small})
-	if _, err := ex.Run(context.Background(), pctx, u, []byte(`{}`)); err != nil {
+	proto := &fakeProtocol{respBody: `ok`, transport: "slow"}
+	if _, err := ex.Run(context.Background(), pctx, resolved(proto, nil), []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	sum := calls["disabled-big"] + calls["small"]
-	if sum != 1 {
-		t.Fatalf("exactly one target must be called: %v", calls)
+	if calls["slow"] != 1 || calls[TransportRef] != 0 {
+		t.Fatalf("transport routing: %v", calls)
+	}
+	proto2 := &fakeProtocol{respBody: `ok`}
+	if _, err := ex.Run(context.Background(), pctx, resolved(proto2, nil), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if calls[TransportRef] != 1 {
+		t.Fatalf("empty transport defaults to direct: %v", calls)
 	}
 }
 
 func TestRun_TransportMissing(t *testing.T) {
-	// Given 目标传输不存在 When Run Then 502 错误
+	// Given 传输不存在 When Run Then 502 错误
 	ex := &Executor{Transports: func(string) (Transport, bool) { return nil, false }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	_, err := ex.Run(context.Background(), pctx, testUpstream(&fakeProtocol{}, nil, []Target{mkTarget("a")}), []byte(`{}`))
+	_, err := ex.Run(context.Background(), pctx, resolved(&fakeProtocol{}, nil), []byte(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "transport") {
 		t.Fatalf("transport missing: %v", err)
 	}
@@ -362,10 +319,10 @@ func TestRun_TransportMissing(t *testing.T) {
 func TestRun_MapErrorHook(t *testing.T) {
 	// Given 实现 MapError 且 4xx 终局 When Run Then 产物为 mapError 输出与状态
 	proto := &fakeProtocol{}
-	tr := &fakeTransport{name: "a", fixed: TransportResponse{Status: 400, Body: []byte(`bad`)}}
+	tr := &fakeTransport{name: TransportRef, fixed: TransportResponse{Status: 400, Body: []byte(`bad`)}}
 	ex := &Executor{Transports: func(string) (Transport, bool) { return tr, true }}
 	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	u := testUpstream(proto, nil, []Target{mkTarget("a")})
+	u := resolved(proto, nil)
 	u.Protocol = &mapErrorProto{inner: proto}
 	resp, err := ex.Run(context.Background(), pctx, u, []byte(`{}`))
 	if err != nil {
@@ -393,16 +350,6 @@ func (m *mapErrorProto) MapResponse(ctx *PipelineContext, b []byte) ([]byte, err
 }
 func (m *mapErrorProto) MapError(ctx *PipelineContext, status int, body []byte) ([]byte, error) {
 	return []byte(`{"error":{"type":"api_error","status":400}}`), nil
-}
-
-func TestRun_ZeroTargets(t *testing.T) {
-	// Given 零目标 When Run Then 报错
-	ex := &Executor{Transports: func(string) (Transport, bool) { return nil, false }}
-	pctx := NewContext("r", UpstreamInfo{}, Vars{})
-	_, err := ex.Run(context.Background(), pctx, testUpstream(&fakeProtocol{}, nil, nil), []byte(`{}`))
-	if err == nil || !strings.Contains(err.Error(), "no enabled targets") {
-		t.Fatalf("zero targets: %v", err)
-	}
 }
 
 func TestDecideStream_DeclarationRules(t *testing.T) {

@@ -412,12 +412,12 @@ func TestHooks_TimeoutInterrupts(t *testing.T) {
 }
 
 func TestHooks_ExtractDeclaration(t *testing.T) {
-	// Given 族文件多处挂 settings 片段 When ExtractDeclaration Then 固定序合并(tasks 覆盖 settings.js)
+	// Given 族文件多处挂 settings 片段 When ExtractDeclaration Then 固定序合并(同名槽拒装,v2)
 	files := map[string]string{
-		"settings.js":  `module.exports.settings={a:1, shared:"from-settings"}`,
-		"init.js":      `module.exports.settings={b:2}`,
-		"keys.js":      `module.exports={keyWrite:function(ctx,k,v){return v;}}; module.exports.settings={c:3}`,
-		"tasks/a.js":   `module.exports.settings={shared:"from-task"}; module.exports.handler=function(ctx){}`,
+		"settings.js": `module.exports.settings={a:1}`,
+		"init.js":     `module.exports.settings={b:2}`,
+		"keys.js":     `module.exports={keyWrite:function(ctx,k,v){return v;}}; module.exports.settings={c:3}`,
+		"tasks/a.js":  `module.exports.settings={d:4}; module.exports.handler=function(ctx){}`,
 	}
 	pkg := hooksPkg(t, files, HooksTask{Name: "a", Cron: "* * * * *"})
 	decl, err := ExtractDeclaration(pkg, HooksDeps{})
@@ -430,8 +430,8 @@ func TestHooks_ExtractDeclaration(t *testing.T) {
 	if n, _ := numericField(decl["b"]); n != 2 || func() bool { n, _ = numericField(decl["c"]); return n != 3 }() {
 		t.Fatalf("merged decl: %v", decl)
 	}
-	if decl["shared"] != "from-task" {
-		t.Fatalf("merge order (tasks last): %v", decl["shared"])
+	if _, ok := decl["d"]; !ok {
+		t.Fatalf("task slot missing: %v", decl)
 	}
 	// 语法错误拒装
 	bad := hooksPkg(t, map[string]string{"init.js": `module.exports={`}, HooksTask{Name: "a", Cron: "* * * * *"})
@@ -442,6 +442,41 @@ func TestHooks_ExtractDeclaration(t *testing.T) {
 	bad2 := hooksPkg(t, map[string]string{"init.js": `module.exports.settings=42; module.exports=function(){}`}, HooksTask{Name: "a", Cron: "* * * * *"})
 	if _, err := ExtractDeclaration(bad2, HooksDeps{}); err == nil {
 		t.Fatal("non-object settings accepted")
+	}
+}
+
+func TestHooks_DeclarationSlotConflict(t *testing.T) {
+	// Given 两个族文件声明同名槽 When ExtractDeclaration Then 拒装并注明槽名(v2 冲突拒装)
+	files := map[string]string{
+		"settings.js": `module.exports.settings={mode:1}`,
+		"init.js":     `module.exports.settings={mode:2}`,
+	}
+	pkg := hooksPkg(t, files, HooksTask{Name: "a", Cron: "* * * * *"})
+	_, err := ExtractDeclaration(pkg, HooksDeps{})
+	if err == nil {
+		t.Fatal("slot conflict accepted")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("conflict error missing slot name: %v", err)
+	}
+}
+
+func TestHooks_DeclarationIncludesProtocolAndFilters(t *testing.T) {
+	// Given protocol.js 与 filter 文件各挂 settings 片段 When ExtractDeclaration Then 求值序纳入两者(v2 声明统一)
+	files := map[string]string{
+		"protocol.js":       `module.exports=function(){}; module.exports.settings={fromProtocol:true}`,
+		"filters/redact.js": `module.exports=function(){}; module.exports.settings={fromFilter:true}`,
+	}
+	pkg := hooksPkg(t, files)
+	pkg.Manifest.Parts.Hooks = nil
+	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
+	pkg.Manifest.Parts.Filters = []FilterPart{{Name: "redact"}}
+	decl, err := ExtractDeclaration(pkg, HooksDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decl["fromProtocol"] != true || decl["fromFilter"] != true {
+		t.Fatalf("protocol/filter slots missing: %v", decl)
 	}
 }
 
@@ -483,7 +518,7 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
 	ks := NewKeysStore(testKeysDB(t))
 	_ = ks.Merge("kp", map[string]any{"endpoint": "https://a"})
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil)
+	proto, err := NewProtocol(pkg, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +548,7 @@ func TestHooks_UtilNoListInProtocol(t *testing.T) {
 		Files:    map[string][]byte{ProtocolEntry: []byte(protoSrc)},
 	}
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return nil, false }, nil)
+	proto, err := NewProtocol(pkg, nil, nil, func(name string) (any, bool) { return nil, false }, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

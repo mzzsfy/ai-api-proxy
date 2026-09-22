@@ -74,8 +74,8 @@ function inspect(obj) {
   return s;
 }
 
-// secret:由测试用例提供目标凭据(缺省抛错,与 host 缺键行为一致)
-let secretStore = {};
+// keys:由测试用例提供包级密钥(util.key 直读;缺省无值返回 undefined,与 host 一致)
+let keyStore = {};
 
 // ─── log / storage mock ───
 
@@ -100,9 +100,9 @@ const storage = makeStorage("default");
 // ─── 部件装载(与 host CommonJS 包装一致) ───
 
 // loadPart 装载部件源码;hooks=对象(无参)或 factory(config)
-// secrets:可选 {api_key: "..."} 注入 util.secret
-function loadPart(src, config, secrets) {
-  secretStore = secrets || {};
+// keys:可选 {api_key: "..."} 注入 util.key(v2 唯一凭据出口)
+function loadPart(src, config, keys) {
+  keyStore = keys || {};
   const mod = { exports: {} };
   const fn = new Function("module", "exports", "util", "log", "storage", src);
   fn(mod, mod.exports, util, log, storage);
@@ -111,34 +111,30 @@ function loadPart(src, config, secrets) {
 }
 
 // loadPackage 直接装载包目录(免去各测试文件的读文件样板)
-// dir 为包含 manifest.json 的目录;entry 缺省取协议部件入口,可用 config/secrets 覆盖
+// dir 为包含 manifest.json 的目录;entry 缺省取协议部件入口,可用 config/keys 覆盖
 function loadPackage(dir, opts) {
   const o = opts || {};
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
   const entry = o.entry || (manifest.parts && manifest.parts.protocol && manifest.parts.protocol.entry);
   if (!entry) throw new Error(`package ${dir}: no part entry declared`);
   const src = fs.readFileSync(path.join(dir, entry), "utf8");
-  return loadPart(src, o.config, o.secrets);
+  return loadPart(src, o.config, o.keys);
 }
 
 const util = {
   deepMerge, deepClone, get, set, pick, omit,
   b64encode, b64decode, b64urlEncode, b64urlDecode,
   sha256hex, hmacSha256hex, uuid, now, isoNow, template, inspect,
-  secret: (ref) => {
-    if (!(ref in secretStore)) throw new Error(`secret not found: ${ref}`);
-    return secretStore[ref];
-  },
+  key: (name) => keyStore[name],
 };
 
 // mockCtx 请求上下文(host PipelineContext 子集)
 function mockCtx(over) {
   return Object.assign({
     requestId: "test-req",
-    upstream: { name: "test-upstream", models: ["m"] },
-    target: { id: "t", name: "t1", baseUrl: "https://upstream.test" },
+    upstream: { name: "test-model" },
     state: {},
-    vars: { model: "m", entryStream: false },
+    vars: { model: "test-model", entryStream: false },
   }, over);
 }
 
@@ -171,14 +167,14 @@ if (require.main === module) {
     assert.equal(template("/v1/{model}", { model: "gpt" }), "/v1/gpt");
   });
 
-  test("loadPart honors factory config and secret", () => {
+  test("loadPart honors factory config and key", () => {
     const hooks = loadPart(
-      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: ctx.target.baseUrl + '/' + config.p, headers: { Authorization: 'Bearer ' + util.secret('api_key') } }; } }; };",
-      { p: "v1" },
+      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + config.p, headers: { Authorization: 'Bearer ' + util.key('api_key') } }; } }; };",
+      { base_url: "https://upstream.test", p: "v2" },
       { api_key: "sk-1" }
     );
     const req = hooks.buildRequest(mockCtx());
-    assert.equal(req.url, "https://upstream.test/v1");
+    assert.equal(req.url, "https://upstream.test/v2");
     assert.equal(req.headers.Authorization, "Bearer sk-1");
   });
 
@@ -190,22 +186,21 @@ if (require.main === module) {
     );
     fs.writeFileSync(
       path.join(dir, "protocol.js"),
-      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: ctx.target.baseUrl + '/' + (config.p || 'd'), headers: { k: util.secret('api_key') } }; } }; };"
+      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + (config.p || 'd'), headers: { k: util.key('api_key') } }; } }; };"
     );
-    const hooks = loadPackage(dir, { config: { p: "v2" }, secrets: { api_key: "sk-9" } });
+    const hooks = loadPackage(dir, { config: { base_url: "https://upstream.test", p: "v3" }, keys: { api_key: "sk-9" } });
     const req = hooks.buildRequest(mockCtx());
-    assert.equal(req.url, "https://upstream.test/v2");
+    assert.equal(req.url, "https://upstream.test/v3");
     assert.equal(req.headers.k, "sk-9");
     assert.throws(() => loadPackage(path.join(dir, "nope")), /manifest/);
   });
 
-  test("secret missing throws", () => {
-    assert.throws(() =>
-      loadPart(
-        "module.exports = { buildRequest: function(){ util.secret('nope'); return {}; } };",
-        {},
-        {}
-      ).buildRequest(mockCtx())
+  test("key missing returns undefined", () => {
+    const hooks = loadPart(
+      "module.exports = { buildRequest: function(){ return { v: util.key('nope') }; } };",
+      {},
+      {}
     );
+    assert.equal(hooks.buildRequest(mockCtx()).v, undefined);
   });
 }

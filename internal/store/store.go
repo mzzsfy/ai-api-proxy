@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -16,16 +18,21 @@ var migrationsFS embed.FS
 
 // Store 数据库门面
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string // 主库文件路径(破坏性迁移前备份用)
 }
+
+// modelRowsMigrationVersion 模型行 v2 迁移版本(改表+清 kv 的破坏性迁移,前置整库备份)
+const modelRowsMigrationVersion = 4
 
 // Open 打开主库并设置 pragma
 func Open(dataDir string) (*Store, error) {
-	db, err := OpenDB(dataDir + "/app.db")
+	dbPath := dataDir + "/app.db"
+	db, err := OpenDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, dbPath: dbPath}, nil
 }
 
 // OpenDB 打开独立 SQLite 连接并设置 pragma(主库之外的单独库共用此出口)
@@ -64,6 +71,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if version <= current {
 			continue
+		}
+		// 004(模型行 v2)前的破坏性迁移:先 VACUUM INTO 快照备份,迁移失败可整库回退
+		if version == modelRowsMigrationVersion {
+			if err := s.backupBeforeV2(ctx, modelRowsMigrationVersion); err != nil {
+				return fmt.Errorf("pre-migration backup: %w", err)
+			}
 		}
 		body, err := migrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
@@ -130,14 +143,47 @@ func (s *Store) KVDelete(ctx context.Context, ns, key string) error {
 // Close 关闭连接
 func (s *Store) Close() error { return s.db.Close() }
 
-// splitSQL 按 语句分隔符拆分迁移脚本(迁移文件内禁止在字符串字面量中使用分号)
+// splitSQL 按语句分隔符拆分迁移脚本(注释行整行剥离——其内分号不代表语句边界;迁移文件内禁止在字符串字面量中使用分号)
 func splitSQL(body string) []string {
-	parts := strings.Split(body, ";")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if strings.TrimSpace(p) != "" {
-			out = append(out, p)
+	var out []string
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			joined := strings.Join(cur, "\n")
+			for _, part := range strings.Split(joined, ";") {
+				if strings.TrimSpace(part) != "" {
+					out = append(out, part)
+				}
+			}
+			cur = nil
 		}
 	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		cur = append(cur, line)
+		if strings.HasSuffix(strings.TrimSpace(line), ";") {
+			flush()
+		}
+	}
+	flush()
 	return out
+}
+
+// backupBeforeV2 破坏性迁移前置备份(VACUUM INTO 单文件快照;已存在则跳过——保留最早一次 v1 态)
+// 触发于 004 应用前,此刻 v1 表尚未改名(upstreams_v1 由迁移自身创建),不能以表名探测——无条件备份,
+// 空库快照成本可忽略;是否真有 v1 数据由 migrateV1 自行判定
+func (s *Store) backupBeforeV2(ctx context.Context, version int) error {
+	backupPath := fmt.Sprintf("%s.bak-v%d", s.dbPath, version)
+	if _, err := os.Stat(backupPath); err == nil {
+		log.Printf("[migrate-v2] backup %s already exists; keeping earliest snapshot", backupPath)
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
+		_ = os.Remove(backupPath) // 半途失败残留截断文件会被后续 Stat 当作有效快照,必须清理
+		return fmt.Errorf("vacuum into %s: %w", backupPath, err)
+	}
+	log.Printf("[migrate-v2] database backed up to %s", backupPath)
+	return nil
 }

@@ -1,6 +1,7 @@
 // gemini 协议包:Google Gemini GenerateContent 上游适配(声明槽 openai-completions;entry ↔ gemini 双向翻译)
 // 协议来源:GenerateContent REST(POST {base}/{v}/models/{model}:generateContent | :streamGenerateContent?alt=sse)
 // 恰一次直发,无重试(归下游);纯文本面(features:[] 由能力协商挡 tools/vision)
+// v2:连接=包参数(config.base_url/api_version),密钥=包级 keys(util.key("api_key"))
 "use strict";
 // @ts-check
 /// <reference path="../../ai-api-proxy.d.ts" />
@@ -10,7 +11,8 @@
  */
 module.exports = function (config) {
   const cfg = config || {};
-  const apiVersion = typeof cfg.apiVersion === "string" && cfg.apiVersion ? cfg.apiVersion : "v1beta";
+  const apiVersion = typeof cfg.api_version === "string" && cfg.api_version ? cfg.api_version : "v1beta";
+  if (typeof cfg.base_url !== "string" || !cfg.base_url) throw new Error("package param base_url unset");
 
   // openai content(string | text 块数组)→ 单文本;非文本块丢弃(vision/tools 未声明)
   /**
@@ -106,7 +108,6 @@ module.exports = function (config) {
      * @returns {import("../../ai-api-proxy.d.ts").UpstreamRequest}
      */
     buildRequest: function (ctx, entry) {
-      if (!ctx.target.baseUrl) throw new Error("target base url empty");
       const req = JSON.parse(entry); // 入口非法原文抛错 → host 502 注明部件原因
       /** @type {{ role: string, parts: { text: string }[]}[]} */
       const contents = [];
@@ -144,10 +145,10 @@ module.exports = function (config) {
       const stream = ctx.vars.entryStream === true;
       const action = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
       return {
-        url: ctx.target.baseUrl.replace(/\/+$/, "") + "/" + encodeURIComponent(apiVersion) + "/models/" +
+        url: cfg.base_url.replace(/\/+$/, "") + "/" + encodeURIComponent(apiVersion) + "/models/" +
           encodeURIComponent(ctx.vars.model) + action,
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": util.secret("api_key") },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": util.key("api_key") },
         body: JSON.stringify(body),
         stream: stream
       };
@@ -250,4 +251,10 @@ module.exports = function (config) {
       return JSON.stringify(out);
     }
   };
+};
+
+// 包参数声明(v2 settings 片段):连接与版本槽;密钥 api_key 走包级 keys 表单
+module.exports.settings = {
+  base_url: setting.string({ description: "Gemini API 地址", required: true }),
+  api_version: setting.string({ description: "API 版本路径段(默认 v1beta;写死单版本会随上游弃用失效)" })
 };

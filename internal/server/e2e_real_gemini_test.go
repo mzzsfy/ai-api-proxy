@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
@@ -27,7 +28,6 @@ import (
 const (
 	geminiTestModelDefault = "gemini-3.6-flash"
 	geminiBaseURL          = "https://generativelanguage.googleapis.com"
-	geminiUpstreamName     = "real-gemini"
 	geminiEchoPrompt       = "reply with exactly: pong"
 	// 网关客户端等待上限:真实上游跨区往返 + 模型思考耗时,本地假上游的上限不适用
 	geminiClientTimeout = 90 * time.Second
@@ -103,7 +103,7 @@ func geminiEgressFromEnv(t *testing.T) geminiEgress {
 	}
 }
 
-// newGeminiFixture 安装 gemini 包并实例化真实 Gemini 上游
+// newGeminiFixture 安装 gemini 包并实例化真实 Gemini 模型行(v2:连接=包参数,密钥=包级 keys)
 func newGeminiFixture(t *testing.T, apiKey, model string, egress geminiEgress) *fourGroupsFixture {
 	t.Helper()
 	manifest, src := mustGeminiFiles(t)
@@ -114,17 +114,20 @@ func newGeminiFixture(t *testing.T, apiKey, model string, egress geminiEgress) *
 	if egress.transport != "" {
 		t.Logf("gemini egress via named transport %q", egress.transport)
 	}
-	u := &upstream.Upstream{
-		Name: geminiUpstreamName, Enabled: true,
-		Base:   upstream.PackageRef{Package: "gemini"},
-		Models: []string{model},
-		Params: map[string]any{},
-		Targets: []upstream.Target{{Name: "t1",
-			BaseURL: geminiBaseURL, Transport: egress.transport, Enabled: true,
-			Secrets: map[string]string{"api_key": apiKey}}},
+	if err := f.app.AdminDeps.Packages.Keys().Merge("gemini", map[string]any{"api_key": apiKey}); err != nil {
+		t.Fatalf("merge gemini key: %v", err)
 	}
-	if err := f.app.Registry.Save(t.Context(), u); err != nil {
-		t.Fatalf("save upstream: %v", err)
+	cfg := map[string]any{"base_url": geminiBaseURL}
+	if egress.transport != "" {
+		cfg["transport"] = egress.transport
+	}
+	if _, err := f.app.AdminDeps.Packages.Settings().Put("gemini", plugin.PutInput{Config: cfg}); err != nil {
+		t.Fatalf("put gemini params: %v", err)
+	}
+	if err := f.app.Registry.Save(t.Context(), &upstream.Model{
+		Name: model, Plugin: "gemini", Enabled: true,
+	}); err != nil {
+		t.Fatalf("save gemini row: %v", err)
 	}
 	return f
 }
@@ -266,14 +269,14 @@ func TestRealGemini_AdminTestEndpoint(t *testing.T) {
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
 	var id int64
 	for _, u := range f.app.Registry.List() {
-		if u.Name == geminiUpstreamName {
+		if u.Name == model {
 			id = u.ID
 		}
 	}
 	if id == 0 {
-		t.Fatal("upstream not found")
+		t.Fatal("model row not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", id), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		geminiTransient(t, http.StatusTooManyRequests, body)
 		geminiTransient(t, http.StatusServiceUnavailable, body)

@@ -132,7 +132,6 @@ type App struct {
 	AdminSvc  *admin.Service
 	AdminDeps *admin.Deps
 	Recorder  *metrics.Recorder
-	Secrets   upstream.SecretsStore
 	Registry  *upstream.Registry
 	Mux       *http.ServeMux
 	History   *history.Store
@@ -179,7 +178,7 @@ func Build(cfg *Config) (*App, error) {
 	// 插件:注册中心 + 内置协议 + 目录导入
 	pkgs := plugin.NewRegistry(st.DB())
 	pkgs.RegisterBuiltin(builtin.Name, func(deps plugin.BuiltinDeps) (pipeline.Protocol, error) {
-		return &builtin.Protocol{TargetSecrets: deps.TargetSecrets}, nil
+		return &builtin.Protocol{Config: deps.Config, PackageKey: deps.PackageKey}, nil
 	})
 	if err := pkgs.LoadFromDB(ctx); err != nil {
 		_ = st.Close()
@@ -201,11 +200,10 @@ func Build(cfg *Config) (*App, error) {
 	if histErr != nil {
 		log.Printf("history open: %v (recording disabled)", histErr)
 	}
-	secrets := &storeSecrets{st: st}
-	reg := upstream.NewRegistry(st.DB(), pkgs, secrets)
+	reg := upstream.NewRegistry(st.DB(), pkgs)
 	if err := reg.LoadFromDB(ctx); err != nil {
 		_ = st.Close()
-		return nil, fmt.Errorf("load upstreams: %w", err)
+		return nil, fmt.Errorf("load models: %w", err)
 	}
 	gw := &gateway.Gateway{
 		OpenAI: gateway.Entry{
@@ -222,13 +220,9 @@ func Build(cfg *Config) (*App, error) {
 		},
 		Executor: &pipeline.Executor{
 			Transports: trMgr.Get,
-			OnTargetExit: func(up, tg string, failed bool) {
-				recorder.EnterTarget(up, tg)(failed)
-			},
 		},
 		Registry: reg,
 		Metrics:  recorder,
-		Secrets:  secrets,
 		History:  hist,
 	}
 	// 管理服务
@@ -246,7 +240,6 @@ func Build(cfg *Config) (*App, error) {
 		Upstream: reg,
 		Metrics:  recorder,
 		History:  hist,
-		Secrets:  secrets,
 		KeysFunc: func(pkg string) map[string]any { return pkgs.Keys().View(pkg) },
 	}
 	mux := http.NewServeMux()
@@ -266,21 +259,23 @@ func Build(cfg *Config) (*App, error) {
 	mux.Handle("/admin/", adminweb.Handler())
 	// 包骨架模板(静态无敏感信息,免会话;GUI "新建包"下载入口)
 	mux.HandleFunc("GET /packages/template", adminDeps.PackageTemplate)
-	// 连通性测试:最小请求走完整管道(经 executor,指标照常计数)
+	// 连通性测试:最小请求走完整管道(经 executor,指标照常计数;上游挂起不阻塞管理面——上限对齐传输探测)
 	adminDeps.TestFunc = func(id int64) (int64, string) {
 		u, err := reg.Get(id)
 		if err != nil {
 			return 0, err.Error()
 		}
-		return gw.TestUpstream(context.Background(), u)
+		ctx, cancel := context.WithTimeout(context.Background(), transportProbeTimeout)
+		defer cancel()
+		return gw.TestUpstream(ctx, u)
 	}
-	// 对话测试:指定模型与消息走完整管道(非流式;上游+包双维度计数)
-	adminDeps.ChatTestFunc = func(ctx context.Context, id int64, model, message string) (int64, int, []byte, string) {
+	// 对话测试:行名即模型名,走完整管道(非流式;模型行+包双维度计数)
+	adminDeps.ChatTestFunc = func(ctx context.Context, id int64, message string) (int64, int, []byte, string) {
 		u, err := reg.Get(id)
 		if err != nil {
 			return 0, 0, nil, err.Error()
 		}
-		return gw.ChatTest(ctx, u, model, message)
+		return gw.ChatTest(ctx, u, message)
 	}
 	// 监控时序:metrics_minutely 最近 n 分钟(老到新)
 	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {
@@ -336,7 +331,7 @@ func Build(cfg *Config) (*App, error) {
 	})
 	return &App{
 		Cfg: cfg, St: st, Gateway: gw, AdminSvc: adminSvc, AdminDeps: adminDeps,
-		Recorder: recorder, Secrets: secrets, Registry: reg, Mux: mux, trMgr: trMgr,
+		Recorder: recorder, Registry: reg, Mux: mux, trMgr: trMgr,
 		History: hist, pluginEvictGate: gate,
 	}, nil
 }
@@ -533,38 +528,6 @@ func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, sc
 	}
 }
 
-// utilNowRFC3339 当前时间(测试确定性无关,直接格式化)
-func utilNowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
-
-// storeSecrets 凭据存储实现(kv 表 ns=upstream/target 键)
-type storeSecrets struct{ st *store.Store }
-
-// secretsKey kv 键
-func secretsKey(upstream, target string) string { return "secrets:" + upstream + "/" + target }
-
-func (s *storeSecrets) UpsertTargetSecrets(upstream, target string, secrets map[string]string) error {
-	b, err := jsonMarshal(secrets)
-	if err != nil {
-		return err
-	}
-	return s.st.KVSet(context.Background(), "upstream:"+upstream, secretsKey(upstream, target), string(b))
-}
-
-func (s *storeSecrets) GetTargetSecrets(upstream, target string) (map[string]string, bool) {
-	v, ok, err := s.st.KVGet(context.Background(), "upstream:"+upstream, secretsKey(upstream, target))
-	if err != nil || !ok {
-		return nil, false
-	}
-	var m map[string]string
-	if jsonUnmarshal([]byte(v), &m) != nil {
-		return nil, false
-	}
-	return m, true
-}
-
-func (s *storeSecrets) DeleteTargetSecrets(upstream, target string) {
-	_ = s.st.KVDelete(context.Background(), "upstream:"+upstream, secretsKey(upstream, target))
-}
 
 // Run 启动 HTTP 服务,阻塞至退出信号;优雅排空(30s 上限);PackDir 非空时只打包
 func Run(cfg *Config) error {
@@ -673,13 +636,23 @@ func cleanupHistory(app *App) {
 	}
 }
 
-// ensureBuiltinPackage 内置协议实体包缺失时自动安装(哑 manifest,实现走 Go 工厂)
+// builtinProtocolJS 内置包哑 protocol.js:实现走 Go 工厂;settings 片段声明参数槽(声明统一入口)
+// transport = 命名传输实例名(direct = 内置直连;命名实例在 config.yaml transports 配置),自由串非枚举
+const builtinProtocolJS = `// builtin protocol implemented in Go
+module.exports.settings = {
+  base_url: setting.string({ description: "上游地址(如 https://api.example.com)", required: true }),
+  transport: setting.string({ description: "传输实例名(direct=内置直连;命名实例在 config.yaml transports 配置)" }),
+};
+`
+
+// ensureBuiltinPackage 内置协议实体包缺失或版本不符时自动安装(哑 manifest,实现走 Go 工厂;v2:版本不符强制原位升级)
 func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
-	if _, err := pkgs.GetPackage(builtin.Name); err == nil {
+	builtinVersion := "2.0.0"
+	if pkg, err := pkgs.GetPackage(builtin.Name); err == nil && pkg.Manifest.Version == builtinVersion {
 		return nil
 	}
-	manifest := `{"manifestVersion":1,"name":"` + builtin.Name + `","version":"1.0.0","parts":{
-		"protocol":{"protocol":"` + builtin.DeclaredProtocol + `","features":["tools","vision"],"secretRefs":["api_key"]}}}`
+	manifest := `{"manifestVersion":1,"name":"` + builtin.Name + `","version":"` + builtinVersion + `","parts":{
+		"protocol":{"protocol":"` + builtin.DeclaredProtocol + `","features":["tools","vision"]}}}`
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	mf, err := zw.Create("manifest.json")
@@ -689,12 +662,12 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 	if _, err := mf.Write([]byte(manifest)); err != nil {
 		return err
 	}
-	// 哑 entry(约定路径 protocol.js):实现走 Go 工厂,但包校验要求文件存在
+	// 哑 entry(约定路径 protocol.js):实现走 Go 工厂,但包校验要求文件存在;settings 片段声明参数槽
 	ef, err := zw.Create(plugin.ProtocolEntry)
 	if err != nil {
 		return err
 	}
-	if _, err := ef.Write([]byte("// builtin protocol implemented in Go\n")); err != nil {
+	if _, err := ef.Write([]byte(builtinProtocolJS)); err != nil {
 		return err
 	}
 	if err := zw.Close(); err != nil {
@@ -795,6 +768,3 @@ func persistSnapshot(app *App, now time.Time) {
 	}
 }
 
-// jsonMarshal / jsonUnmarshal 局部引用
-func jsonMarshal(v any) ([]byte, error)   { return json.Marshal(v) }
-func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

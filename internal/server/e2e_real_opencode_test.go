@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
@@ -60,7 +61,7 @@ func opencodeTestEnv(t *testing.T) (key, model string) {
 	return key, model
 }
 
-// newOpencodeFixture 安装 opencode 包并实例化 OpenRouter 上游(真实网关 HTTP 服务)
+// newOpencodeFixture 安装 opencode 包并建 OpenRouter 模型行(v2:连接=包参数,密钥=包级 keys)
 func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 	t.Helper()
 	manifest, src := mustOpencodeFiles(t)
@@ -69,18 +70,17 @@ func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
-	u := &upstream.Upstream{
-		Name: "real-openrouter", Enabled: true,
-		Base:   upstream.PackageRef{Package: "opencode"},
-		Models: []string{model},
-		Params: map[string]any{},
-		Targets: []upstream.Target{{Name: "t1",
-			BaseURL:   "https://openrouter.ai/api",
-			Transport: "", Enabled: true,
-			Secrets: map[string]string{"api_key": apiKey}}},
+	if err := f.app.AdminDeps.Packages.Keys().Merge("opencode", map[string]any{"api_key": apiKey}); err != nil {
+		t.Fatalf("merge opencode key: %v", err)
 	}
-	if err := f.app.Registry.Save(ctx, u); err != nil {
-		t.Fatalf("save upstream: %v", err)
+	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
+		"base_url": "https://openrouter.ai/api"}}); err != nil {
+		t.Fatalf("put opencode params: %v", err)
+	}
+	if err := f.app.Registry.Save(ctx, &upstream.Model{
+		Name: model, Plugin: "opencode", Enabled: true,
+	}); err != nil {
+		t.Fatalf("save opencode row: %v", err)
 	}
 	return f
 }
@@ -168,14 +168,14 @@ func TestRealOpencode_AdminTestEndpoint(t *testing.T) {
 	f := newOpencodeFixture(t, key, model)
 	var id int64
 	for _, u := range f.app.Registry.List() {
-		if u.Name == "real-openrouter" {
+		if u.Name == model {
 			id = u.ID
 		}
 	}
 	if id == 0 {
-		t.Fatal("upstream not found")
+		t.Fatal("model row not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", id), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("admin test: %d %s", status, body)
 	}
@@ -197,7 +197,7 @@ func TestRealOpencode_UpstreamErrorPassthrough(t *testing.T) {
 	}
 }
 
-// TestRealOpencode_KeyPoolProbes 逐 key 建上游并测连通(可选;OPENCODE_TEST_KEYS=逗号分隔)
+// TestRealOpencode_KeyPoolProbes 逐 key 建行并测连通(可选;OPENCODE_TEST_KEYS=逗号分隔)
 // 预期:被封/无效 key 上报 ok=false 与原因;仅用于部署期 key 池盘点
 func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 	pool := os.Getenv("OPENCODE_TEST_KEYS")
@@ -211,28 +211,33 @@ func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
+		"base_url": "https://openrouter.ai/api"}}); err != nil {
+		t.Fatal(err)
+	}
 	for i, key := range strings.Split(pool, ",") {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		u := &upstream.Upstream{
-			Name: fmt.Sprintf("probe-%d", i), Enabled: true,
-			Base: upstream.PackageRef{Package: "opencode"}, Models: []string{model},
-			Targets: []upstream.Target{{Name: "t1", BaseURL: "https://openrouter.ai/api", Enabled: true,
-				Secrets: map[string]string{"api_key": key}}},
+		name := fmt.Sprintf("probe-%s", model)
+		if err := f.app.Registry.Save(ctx, &upstream.Model{
+			Name: name, Plugin: "opencode", Enabled: true,
+		}); err != nil {
+			t.Fatal(err)
 		}
-		if err := f.app.Registry.Save(ctx, u); err != nil {
+		// 逐 key 换包密钥后测(v2 密钥在包级,改名行会撞唯一键)
+		if err := f.app.AdminDeps.Packages.Keys().Merge("opencode", map[string]any{"api_key": key}); err != nil {
 			t.Fatal(err)
 		}
 		var id int64
 		for _, x := range f.app.Registry.List() {
-			if x.Name == u.Name {
+			if x.Name == name {
 				id = x.ID
 			}
 		}
 		start := time.Now()
-		status, body := f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", id), "")
+		status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
 		latency := time.Since(start).Milliseconds()
 		t.Logf("key[%d] => http %d body %s (%dms)", i, status, body, latency)
 	}

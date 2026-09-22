@@ -17,12 +17,11 @@ var errPoolClosed = errors.New("runtime pool closed")
 // ErrPoolTimeout 借用排队超时(适配层映射 pipeline.ErrPoolBusy)
 var ErrPoolTimeout = errors.New("runtime pool queue timeout")
 
-// hookInstance 单个 runtime 实例(独立 module/cursor,池内并行,实例内串行)
+// hookInstance 单个 runtime 实例(独立 module,池内并行,实例内串行)
 type hookInstance struct {
-	id     int64 // 工厂序号(测试观测补建)
-	vm     *goja.Runtime
-	hooks  *Hooks
-	cursor *TargetCursor
+	id    int64 // 工厂序号(测试观测补建)
+	vm    *goja.Runtime
+	hooks *Hooks
 }
 
 // runtimePool hook 粒度借还池;poisoned 实例归还时丢弃,懒补建

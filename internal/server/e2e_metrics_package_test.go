@@ -23,7 +23,7 @@ func dimCount(t *testing.T, dim any, key string) (int64, int64) {
 	return int64(reqs), int64(errs)
 }
 
-// postOneTraffic 经网关打一次真实请求(主包 js-openai,上游 g1-direct-nofilter)
+// postOneTraffic 经网关打一次真实请求(主包 js-openai,上游 m-direct)
 func postOneTraffic(t *testing.T, f *fourGroupsFixture) {
 	t.Helper()
 	status, _ := f.post(t, "/v1/chat/completions", map[string]string{
@@ -35,7 +35,7 @@ func postOneTraffic(t *testing.T, f *fourGroupsFixture) {
 }
 
 func TestMetrics_LiveByPackage(t *testing.T) {
-	// Given 请求经上游 g1-direct-nofilter(主包 js-openai) When 查询 live 指标 Then by_package 与 by_upstream 同步计数
+	// Given 请求经上游 m-direct(主包 js-openai) When 查询 live 指标 Then by_package 与 by_upstream 同步计数
 	f := newFourGroups(t)
 	postOneTraffic(t, f)
 	code, body := f.adminGet(t, "/admin/api/metrics/live")
@@ -47,12 +47,12 @@ func TestMetrics_LiveByPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	pkgReqs, pkgErrs := dimCount(t, live["by_package"], "js-openai")
-	upReqs, _ := dimCount(t, live["by_upstream"], "g1-direct-nofilter")
+	upReqs, _ := dimCount(t, live["by_upstream"], "m-direct")
 	if pkgReqs != 1 || pkgErrs != 0 {
 		t.Fatalf("by_package[js-openai] = (%d,%d), want (1,0)", pkgReqs, pkgErrs)
 	}
 	if upReqs != 1 {
-		t.Fatalf("by_upstream[g1-direct-nofilter].requests = %d, want 1", upReqs)
+		t.Fatalf("by_upstream[m-direct].requests = %d, want 1", upReqs)
 	}
 }
 

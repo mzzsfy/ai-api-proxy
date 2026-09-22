@@ -26,10 +26,9 @@ type Deps struct {
 	Upstream *upstream.Registry
 	Metrics  *metrics.Recorder
 	History  *history.Store                                          // 请求历史(nil = 未装配,对应路由 501)
-	Secrets  upstream.SecretsStore                                   // "***" 回读合并的旧值来源(kv 唯一存储)
-	TestFunc func(upstreamID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
-	// ChatTestFunc 对话测试(走完整管道,非流式;返回延迟/状态码/响应体/错误说明)
-	ChatTestFunc func(ctx context.Context, upstreamID int64, model, message string) (latencyMS int64, status int, body []byte, errMsg string)
+	TestFunc func(modelID int64) (latencyMS int64, errMsg string)    // 连通性测试(走完整管道)
+	// ChatTestFunc 对话测试(走完整管道,非流式;行名即模型名;返回延迟/状态码/响应体/错误说明)
+	ChatTestFunc func(ctx context.Context, modelID int64, message string) (latencyMS int64, status int, body []byte, errMsg string)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
 	SeriesFunc func(minutes int) ([]map[string]any, error)
 	// TransportsFunc 命名传输实例清单(只读;名称+URL)
@@ -83,13 +82,13 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-submit", d.packageKeyFormSubmit)
 	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
-	mux.HandleFunc("GET /admin/api/upstreams", d.listUpstreams)
-	mux.HandleFunc("POST /admin/api/upstreams", d.saveUpstream)
-	mux.HandleFunc("GET /admin/api/upstreams/{id}", d.getUpstream)
-	mux.HandleFunc("PUT /admin/api/upstreams/{id}", d.saveUpstreamByID)
-	mux.HandleFunc("DELETE /admin/api/upstreams/{id}", d.deleteUpstream)
-	mux.HandleFunc("POST /admin/api/upstreams/{id}/test", d.testUpstream)
-	mux.HandleFunc("POST /admin/api/upstreams/{id}/chat-test", d.chatTestUpstream)
+	mux.HandleFunc("GET /admin/api/models", d.listUpstreams)
+	mux.HandleFunc("POST /admin/api/models", d.saveUpstream)
+	mux.HandleFunc("GET /admin/api/models/{id}", d.getUpstream)
+	mux.HandleFunc("PUT /admin/api/models/{id}", d.saveUpstreamByID)
+	mux.HandleFunc("DELETE /admin/api/models/{id}", d.deleteUpstream)
+	mux.HandleFunc("POST /admin/api/models/{id}/test", d.testUpstream)
+	mux.HandleFunc("POST /admin/api/models/{id}/chat-test", d.chatTestUpstream)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/history", d.listHistory)
@@ -115,7 +114,6 @@ func (d *Deps) listPackages(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"name": n, "version": p.Manifest.Version, "revision": p.Revision,
 			"hasProtocol": p.HasProtocol(), "filters": filterNames,
-			"secretRefs":  p.SecretRefsUnion(),
 			"protocol":    protocolName(p),
 			"hasHooks":    p.Manifest.Parts.Hooks != nil,
 			"enabled":     d.Packages.IsEnabled(n),
@@ -328,19 +326,13 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// deletePackage 卸载包(被上游引用拒绝;内置包拒绝)
+// deletePackage 卸载包(被模型行引用拒绝;内置包拒绝)
 func (d *Deps) deletePackage(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var refs []string
 	for _, u := range d.Upstream.List() {
-		if u.Base.Package == name {
-			refs = append(refs, u.Name+"(base)")
-			continue
-		}
-		for _, ex := range u.Extras {
-			if ex.Package == name {
-				refs = append(refs, u.Name+"(extra)")
-			}
+		if u.Plugin == name {
+			refs = append(refs, u.Name)
 		}
 	}
 	if len(refs) > 0 {
@@ -382,7 +374,7 @@ func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	tpl.Parts.Protocol = &plugin.ProtocolPart{
 		Protocol: string(plugin.ProtocolOpenAICompletions),
-		Features: []string{"tools"}, SecretRefs: []string{"api_key"},
+		Features: []string{"tools"},
 	}
 	tpl.Parts.Filters = []plugin.FilterPart{{Name: "log-request"}}
 	tpl.Parts.Hooks = &plugin.HooksPart{Tasks: []plugin.HooksTask{
@@ -390,20 +382,26 @@ func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 	}}
 	files := map[string][]byte{
 		"protocol.js": []byte(`// openai-completions 起步模板:按需改造(路径约定 protocol.js;流式=导出 mapEvent,非流式=导出 mapResponse)
-module.exports = {
-  buildRequest: function (ctx, entry) {
-    return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + util.secret("api_key") },
-      body: entry, stream: ctx.vars.entryStream };
-  },
-  mapEvent: function (ctx, e) {
-    var f = JSON.parse(e);
-    if (f.data === "[DONE]") return null;
-    return JSON.stringify([JSON.parse(f.data)]);
-  },
-  mapResponse: function (ctx, body) { return body; }
+// v2:连接信息=包参数(config.base_url,本文件末尾声明);密钥=包级 keys(util.key)
+module.exports = function (config) {
+  return {
+    buildRequest: function (ctx, entry) {
+      return { url: config.base_url + "/v1/chat/completions", method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + util.key("api_key") },
+        body: entry, stream: ctx.vars.entryStream };
+    },
+    mapEvent: function (ctx, e) {
+      var f = JSON.parse(e);
+      if (f.data === "[DONE]") return null;
+      return JSON.stringify([JSON.parse(f.data)]);
+    },
+    mapResponse: function (ctx, body) { return body; }
+  };
+};
+module.exports.settings = {
+  base_url: setting.string({ description: "上游地址", required: true }),
 };`),
-		"filters/log-request.js": []byte(`// filter 起步模板:透传(路径约定 filters/<name>.js)
+		"filters/log-request.js": []byte(`// filter 起步模板:透传(路径约定 filters/<name>.js;参数槽=本文件 settings 片段声明)
 module.exports = {
   mapRequest: function (ctx, p) { return p; },
   mapChunk: function (ctx, c) { return c; },
@@ -431,16 +429,12 @@ module.exports = {
 	_, _ = w.Write(data)
 }
 
-// packageSettings GET 展开视图:声明 ⊕ overrides + 乐观锁 version(禁用包放行;无 hooks 包 400 键域)
+// packageSettings GET 展开视图:声明 ⊕ overrides + 乐观锁 version(禁用包放行;参数表全包开放,v2 声明统一)
 func (d *Deps) packageSettings(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	pkg, err := d.Packages.GetPackage(name)
 	if err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if pkg.Manifest.Parts.Hooks == nil {
-		httpError(w, http.StatusBadRequest, "package has no settings (no hooks part)")
 		return
 	}
 	decl := pkg.Declaration
@@ -528,16 +522,12 @@ func sortedKeys(m map[string]any) []string {
 	return keys
 }
 
-// savePackageSettings PUT:version 最先校验(不匹配 409)→ 槽位校验(声明外剥离/类型校验)→ 剔除默认 → 等值跳写
+// savePackageSettings PUT:version 最先校验(不匹配 409)→ 槽位校验(声明外剥离/类型校验)→ 剔除默认 → 等值跳写(参数表全包开放)
 func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	pkg, err := d.Packages.GetPackage(name)
 	if err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if pkg.Manifest.Parts.Hooks == nil {
-		httpError(w, http.StatusBadRequest, "package has no settings (no hooks part)")
 		return
 	}
 	var req struct {
@@ -566,7 +556,7 @@ func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue // 声明外键剥离
 		}
-		if err := checkSettingType(k, schema, v); err != nil {
+		if err := plugin.CheckSettingType(k, schema, v); err != nil {
 			httpError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -607,54 +597,14 @@ func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 插件参数烘焙进部件闭包:改值后失效引用该包的模型行缓存(Upstream 未装配时无行可失效)
+	if d.Upstream != nil {
+		d.Upstream.EvictPackageSettings(name)
+	}
 	writeJSON(w, map[string]any{"ok": true, "version": view.Version})
 }
 
-// checkSettingType 类型粗校验(string/int/number/bool/enum)
-func checkSettingType(name string, schema map[string]any, v any) error {
-	typ, _ := schema["type"].(string)
-	switch typ {
-	case "string", "":
-		if _, ok := v.(string); !ok && v != nil {
-			return fmt.Errorf("setting %s: want string", name)
-		}
-	case "int", "number":
-		switch v.(type) {
-		case float64, int64, int:
-		default:
-			return fmt.Errorf("setting %s: want %s", name, typ)
-		}
-	case "bool":
-		if _, ok := v.(bool); !ok {
-			return fmt.Errorf("setting %s: want bool", name)
-		}
-	case "enum":
-		if sv, ok := v.(string); ok {
-			for _, e := range toStrings(schema["values"]) {
-				if e == sv {
-					return nil
-				}
-			}
-			return fmt.Errorf("setting %s: %q not in enum values", name, sv)
-		}
-	}
-	return nil
-}
-
-// toStrings 枚举值表
-func toStrings(v any) []string {
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(arr))
-	for _, e := range arr {
-		if s, ok := e.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
+// 类型校验统一下沉 plugin.CheckSettingType(v2 参数解析唯一入口)
 
 // settingValueEqual JSON 语义等值(数值跨 int/float 形态)
 func settingValueEqual(a, b any) bool {
@@ -673,17 +623,11 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 		req.Enabled = true
 	}
 	if !req.Enabled {
-		// 被引用禁用 = 拒绝并提示引用列表
+		// 被引用禁用 = 拒绝并提示引用列表(运行期兜底:Pick 报 package disabled)
 		var refs []string
 		for _, u := range d.Upstream.List() {
-			if u.Base.Package == name {
-				refs = append(refs, u.Name+"(base)")
-				continue
-			}
-			for _, ex := range u.Extras {
-				if ex.Package == name {
-					refs = append(refs, u.Name+"(extra)")
-				}
+			if u.Plugin == name {
+				refs = append(refs, u.Name)
 			}
 		}
 		if len(refs) > 0 {
@@ -695,6 +639,7 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 启停影响引用行的路由可用性;部件缓存无需失效(包 revision 未变,路由层 IsEnabled 实时判定)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -885,7 +830,7 @@ func writeKeyErr(w http.ResponseWriter, err error) {
 }
 
 func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {
-	// List 返回深拷贝且 Secrets 剥离(输出即脱敏)
+	// 模型行列表(v2:无 secrets 概念;行 params 与包 keys 分层)
 	writeJSON(w, d.Upstream.List())
 }
 
@@ -917,40 +862,21 @@ func (d *Deps) saveUpstreamByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) saveUpstreamImpl(w http.ResponseWriter, r *http.Request, id int64) {
-	u := &upstream.Upstream{ID: id}
+	u := &upstream.Model{ID: id}
 	if err := json.NewDecoder(r.Body).Decode(u); err != nil {
 		httpError(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	// 实例名是存储主键:改名=删除重建,by-id 保存拒绝改名(防重复实例与凭据孤儿)
+	// (name, plugin) 是存储唯一键:改键 = 删除重建,by-id 保存拒绝改键(防路由键漂移)
 	if id != 0 {
 		old, err := d.Upstream.Get(id)
 		if err != nil {
 			httpError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		if old.Name != u.Name {
-			httpError(w, http.StatusBadRequest, "upstream 名不可修改:删除后重建")
+		if old.Name != u.Name || old.Plugin != u.Plugin {
+			httpError(w, http.StatusBadRequest, "name/plugin 不可修改:删除后重建")
 			return
-		}
-	}
-	// "***" 回读值从 kv 唯一存储合并旧凭据(实例快照不持明文);改名行以 rename_from 为旧凭据身份
-	// (新名可能已被其他目标的旧键占用,不可作身份依据)
-	for i, t := range u.Targets {
-		lookup := t.Name
-		if t.RenameFrom != "" && t.RenameFrom != t.Name {
-			lookup = t.RenameFrom
-		}
-		old, _ := d.Secrets.GetTargetSecrets(u.Name, lookup)
-		for k, v := range t.Secrets {
-			if v != secretMask {
-				continue
-			}
-			if val, has := old[k]; has {
-				u.Targets[i].Secrets[k] = val
-				continue
-			}
-			delete(u.Targets[i].Secrets, k)
 		}
 	}
 	if err := d.Upstream.Save(r.Context(), u); err != nil {
@@ -991,7 +917,7 @@ func (d *Deps) testUpstream(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// chatTestUpstream 对话测试:模型必填,消息缺省 "ping";错误路径 501 未装配/404 id 不存在/400 参数
+// chatTestUpstream 对话测试:行名即模型名,消息缺省 "ping";错误路径 501 未装配/404 id 不存在/400 参数
 func (d *Deps) chatTestUpstream(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -1003,22 +929,17 @@ func (d *Deps) chatTestUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model   string `json:"model"`
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil && err != io.EOF {
 		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())
-		return
-	}
-	if req.Model == "" {
-		httpError(w, http.StatusBadRequest, "model required")
 		return
 	}
 	if req.Message == "" {
 		req.Message = "ping"
 	}
-	latency, status, body, errMsg := d.ChatTestFunc(r.Context(), id, req.Model, req.Message)
-	// 装配层 reg.Get 失败即 id 不存在 → 404(与其余 upstream 路由的 404 语义一致)
+	latency, status, body, errMsg := d.ChatTestFunc(r.Context(), id, req.Message)
+	// 装配层 reg.Get 失败即 id 不存在 → 404(与其余模型路由的 404 语义一致)
 	if strings.Contains(errMsg, "not found") {
 		httpError(w, http.StatusNotFound, errMsg)
 		return

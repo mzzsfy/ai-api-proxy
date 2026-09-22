@@ -32,7 +32,7 @@ func mustProto(t *testing.T, name, src, poolSize string) *gojaProtocol {
 	if poolSize != "" {
 		t.Setenv(PoolEnvVar, poolSize)
 	}
-	p, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
+	p, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 	var factoryCalls atomic.Int64
 	p, err := newRuntimePool(1, QueueTimeout, func() (*hookInstance, error) {
 		n := factoryCalls.Add(1)
-		return &hookInstance{id: n, hooks: &Hooks{}, cursor: &TargetCursor{}}, nil
+		return &hookInstance{id: n, hooks: &Hooks{}}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 func TestPool_CloseWaitsInFlight(t *testing.T) {
 	// Given 在途借用 When Close Then 阻塞至归还后才完成;关闭后借用拒绝
 	p, err := newRuntimePool(1, QueueTimeout, func() (*hookInstance, error) {
-		return &hookInstance{hooks: &Hooks{}, cursor: &TargetCursor{}}, nil
+		return &hookInstance{hooks: &Hooks{}}, nil
 	})
 	if err != nil {
 		t.Fatal(err)

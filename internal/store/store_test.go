@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"sync"
 	"testing"
 )
@@ -132,5 +134,56 @@ func TestKV_ConcurrentWriteNoBusy(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatalf("concurrent kv: %v", err)
+	}
+}
+
+func TestMigrate_BackupBeforeModelRows(t *testing.T) {
+	// Given 001-003 形态的库含 v1 数据 When 首次 Migrate(触发 004)Then .bak-v4 生成且含迁移前数据
+	dir := t.TempDir()
+	dbPath := dir + "/app.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 手工构造 003 版本态:schema_migrations 记 3 + v1 形态 upstreams 表含数据
+	pre := []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO schema_migrations (version) VALUES (1),(2),(3)`,
+		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
+			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
+			params_json TEXT NOT NULL DEFAULT '{}', filter_params_json TEXT NOT NULL DEFAULT '{}', filters_enabled_json TEXT NOT NULL DEFAULT '{}',
+			strategy_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT)`,
+		`INSERT INTO upstreams (name, base_package, models_json, targets_json) VALUES ('old', 'pkg',
+			'["m1"]', '[]')`,
+	}
+	for _, stmt := range pre {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	bak, err := os.Open(dbPath + ".bak-v4")
+	if err != nil {
+		t.Fatalf("backup file: %v", err)
+	}
+	defer bak.Close()
+	// 备份是自足 SQLite 库:直接开它验证 v1 数据在
+	bdb, err := sql.Open("sqlite", "file:"+dbPath+".bak-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bdb.Close()
+	var name string
+	if err := bdb.QueryRow(`SELECT name FROM upstreams WHERE id=1`).Scan(&name); err != nil || name != "old" {
+		t.Fatalf("backup content: %q err=%v", name, err)
 	}
 }

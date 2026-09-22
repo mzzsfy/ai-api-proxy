@@ -177,16 +177,11 @@ func TestPackageLoop_TemplateInstallExportReimport(t *testing.T) {
 		t.Fatalf("revision after import-url: %d", f.app.AdminDeps.Packages.Revision("my-package"))
 	}
 
-	// ⑦ 用模板包的 filter 实例化一个上游(过滤=透传)+ js-openai 主包 → 真实 E2E 连通
-	if err := f.app.Registry.Save(ctx, &upstream.Upstream{
-		Name: "g6-loop", Enabled: true,
-		Base:   upstream.PackageRef{Package: "js-openai"},
-		Extras: []upstream.PackageRef{{Package: "my-package"}},
-		Models: []string{"m-loop"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: f.upstreamBase, Transport: "", Enabled: true,
-			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
+	// ⑦ 模板包 filter 为透传形态;v2 行单包绑定 → 直连 js-openai 行真实 E2E 连通
+	if err := f.app.Registry.Save(ctx, &upstream.Model{
+		Name: "m-loop", Plugin: "js-openai", Enabled: true,
 	}); err != nil {
-		t.Fatalf("save loop upstream: %v", err)
+		t.Fatalf("save loop model row: %v", err)
 	}
 	payload := `{"model":"m-loop","messages":[{"role":"user","content":"hello"}],"stream":false}`
 	code, respBody := f.post(t, "/v1/chat/completions", map[string]string{

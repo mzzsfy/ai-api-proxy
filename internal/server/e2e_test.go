@@ -9,10 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
-// buildTestApp 全装配 + 假上游 + 注册一条内置协议上游
+// buildTestApp 全装配 + 假上游 + 注册一条内置协议模型行(v2:连接=包参数,密钥=包级 keys)
 func buildTestApp(t *testing.T, upstreamCT, upstreamBody string) (*App, *httptest.Server, *int) {
 	t.Helper()
 	cfg := &Config{
@@ -34,12 +35,16 @@ func buildTestApp(t *testing.T, upstreamCT, upstreamBody string) (*App, *httptes
 		_, _ = w.Write([]byte(upstreamBody))
 	}))
 	t.Cleanup(upSrv.Close)
-	if err := app.Registry.Save(context.Background(), &upstream.Upstream{
-		Name: "e2e", Enabled: true,
-		Base:   upstream.PackageRef{Package: "openai-compatible"},
-		Models: []string{"gpt-e2e"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Enabled: true,
-			Secrets: map[string]string{"api_key": "sk-upstream"}}},
+	// 包级密钥 + 包参数 base_url(v2 连接信息归属包)
+	if err := app.AdminDeps.Packages.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AdminDeps.Packages.Settings().Put("openai-compatible",
+		plugin.PutInput{Config: map[string]any{"base_url": upSrv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Registry.Save(context.Background(), &upstream.Model{
+		Name: "gpt-e2e", Enabled: true, Plugin: "openai-compatible",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +125,7 @@ func TestE2E_HealthzAndAdminAuth(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("healthz: %d", resp.StatusCode)
 	}
-	resp2, err := http.Get(srv.URL + "/admin/api/upstreams")
+	resp2, err := http.Get(srv.URL + "/admin/api/models")
 	if err != nil {
 		t.Fatal(err)
 	}

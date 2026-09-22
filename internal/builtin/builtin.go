@@ -16,13 +16,25 @@ const Name = "openai-compatible"
 const DeclaredProtocol = pipeline.ProtocolOpenAICompletions
 
 // Protocol 内置协议:入口原文 1:1 透传(声明 openai-completions),凭据注入授权头
+// v2:连接信息 = 包参数 base_url/transport;密钥 = 包级 keys api_key(与 JS 包同语义)
 type Protocol struct {
-	// TargetSecrets 按 (target 名, 键) 解析凭据(Resolve 时注入,与 JS 部件同机制)
-	TargetSecrets func(target, key string) (string, bool)
+	// Config 解析后的包参数(base_url 必填;transport 可空 = direct)
+	Config map[string]any
+	// PackageKey 包级 key 只读(实时)
+	PackageKey func(name string) (any, bool)
 }
 
 // New 构造
 func New() *Protocol { return &Protocol{} }
+
+// configString 参数读值(字符串形态)
+func (p *Protocol) configString(name string) string {
+	if p.Config == nil {
+		return ""
+	}
+	s, _ := p.Config[name].(string)
+	return s
+}
 
 // Name 实现 pipeline.Protocol
 func (p *Protocol) Name() string { return Name }
@@ -41,21 +53,35 @@ func (p *Protocol) Supports() pipeline.Supports {
 // BearerPrefix 授权头 scheme
 const BearerPrefix = "Bearer "
 
-// BuildRequest 组请求:URL=目标 BaseURL + /v1/chat/completions;鉴权 = 目标 secrets 的 api_key
-// secretsRef 读值即 key(无 scheme,前缀在此拼接);stream 标志透传入口意图
+// BaseURLParam 连接地址参数槽名
+const BaseURLParam = "base_url"
+
+// TransportParam 传输实例参数槽名
+const TransportParam = "transport"
+
+// APIKeyParam 密钥键名
+const APIKeyParam = "api_key"
+
+// BuildRequest 组请求:URL=包参数 base_url + /v1/chat/completions;鉴权 = 包级 key api_key
+// stream 标志透传入口意图;transport 槽随请求载体下传(空 = direct)
 func (p *Protocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pipeline.Request, error) {
-	if ctx == nil || ctx.Target.BaseURL == "" {
-		return pipeline.Request{}, fmt.Errorf("builtin: target base url empty")
+	base := p.configString(BaseURLParam)
+	if base == "" {
+		return pipeline.Request{}, fmt.Errorf("builtin: package param %s missing", BaseURLParam)
 	}
-	if p.TargetSecrets == nil {
-		return pipeline.Request{}, fmt.Errorf("builtin: secrets reader not wired")
+	if p.PackageKey == nil {
+		return pipeline.Request{}, fmt.Errorf("builtin: keys reader not wired")
 	}
-	key, ok := p.TargetSecrets(ctx.Target.Name, "api_key")
-	if !ok || key == "" {
-		return pipeline.Request{}, fmt.Errorf("builtin: api_key secret missing for target %s", ctx.Target.Name)
+	keyVal, ok := p.PackageKey(APIKeyParam)
+	if !ok || keyVal == nil {
+		return pipeline.Request{}, fmt.Errorf("builtin: package key %s missing", APIKeyParam)
+	}
+	key, _ := keyVal.(string)
+	if key == "" {
+		return pipeline.Request{}, fmt.Errorf("builtin: package key %s empty", APIKeyParam)
 	}
 	body := entry
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(ctx.Target.BaseURL, "/"))
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(base, "/"))
 	return pipeline.Request{
 		URL:    url,
 		Method: "POST",
@@ -63,10 +89,11 @@ func (p *Protocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pi
 			"Content-Type":  "application/json",
 			"Authorization": BearerPrefix + key,
 		},
-		Body:   body,
-		Stream: ctx.Vars.EntryStream,
-		Model:  ctx.Vars.Model,
-		APIKey: key, // 会话亲和素材
+		Body:      body,
+		Stream:    ctx.Vars.EntryStream,
+		Model:     ctx.Vars.Model,
+		APIKey:    key, // 会话亲和素材
+		Transport: p.configString(TransportParam),
 	}, nil
 }
 

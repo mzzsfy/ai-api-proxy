@@ -317,56 +317,49 @@ function show(page) {
   shell(page, `<h2>${PAGE_NAMES[page]}</h2><div class="muted">载入中…</div>`);
   PAGES[page]();
 }
-/* ─── 模型管理(上游) ─── */
+/* ─── 模型管理(v2:行名即模型名,单包绑定,参数=行 params 覆盖包参数) ─── */
 async function showUpstreams() {
-  const [ups, pkgs, transports] = await Promise.all([api.get("/upstreams"), api.get("/packages"), api.get("/transports")]);
+  const [ups, pkgs, transports] = await Promise.all([api.get("/models"), api.get("/packages"), api.get("/transports")]);
   const basePkgs = pkgs.filter(p => p.hasProtocol);
   $("#main").innerHTML = `
     <h2>模型管理</h2>
-    <div class="row"><button class="pri" id="newu">新建上游</button></div>
+    <div class="row"><button class="pri" id="newu">新建模型行</button></div>
     ${ups.length ? `<table>
-      <tr><th>ID</th><th>名称</th><th>主包</th><th>附加</th><th>模型</th><th>目标</th><th>启用</th><th></th></tr>
+      <tr><th>ID</th><th>模型名</th><th>插件包</th><th>参数</th><th>启用</th><th></th></tr>
       ${ups.map(u => `<tr>
-        <td class="num">${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.base.package)}</td>
-        <td>${(u.extras || []).map(e => esc(e.package)).join(",") || '<span class="muted">—</span>'}</td>
-        <td>${esc((u.models || []).join(","))}</td>
-        <td>${(u.targets || []).map(t => esc(t.name) + (t.enabled === false ? '<span class="muted">(停)</span>' : "")).join("<br>")}</td>
+        <td class="num">${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.plugin)}</td>
+        <td><code class="muted">${esc(JSON.stringify(u.params || {}))}</code></td>
         <td>${u.enabled ? '<span style="color:var(--ok)">✓</span>' : '<span class="muted">✗</span>'}</td>
         <td style="white-space:nowrap">
           <button data-e="${u.id}">编辑</button>
-          <button data-c="${u.id}">对话测试</button>
+          <button data-c="${u.id}" data-n="${esc(u.name)}">对话测试</button>
           <button data-t="${u.id}">测试</button>
           <button class="danger" data-d="${u.id}">删除</button>
         </td></tr>`).join("")}</table>`
-      : `<div class="empty">还没有上游。点"新建上游"添加第一个实例:选主包、填模型与目标地址。</div>`}
+      : `<div class="empty">还没有模型行。点"新建模型行"添加:模型名 + 插件包;连接信息(地址/密钥)配置在插件的参数与密钥里。</div>`}
     <div id="editor"></div>`;
-  $("#newu").onclick = () => editUpstream(null, basePkgs, pkgs, transports);
-  document.querySelectorAll("[data-e]").forEach(b => b.onclick = () => editUpstream(ups.find(u => u.id == b.dataset.e), basePkgs, pkgs, transports));
+  $("#newu").onclick = () => editModel(basePkgs, transports);
+  document.querySelectorAll("[data-e]").forEach(b => b.onclick = () => editModel(basePkgs, transports, ups.find(u => u.id == b.dataset.e)));
   document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => openChatTest(ups.find(u => u.id == b.dataset.c)));
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = async () => {
-    try { const r = await api.post(`/upstreams/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${r.latency_ms}ms` : ("失败: " + r.error)); }
+    try { const r = await api.post(`/models/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${r.latency_ms}ms` : ("失败: " + r.error)); }
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
-    if (!(await uiConfirm("删除上游", `删除该上游(${b.dataset.d})?删除后该模型的调用立即失败。`))) return;
-    try { await api.del(`/upstreams/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
+    if (!(await uiConfirm("删除模型行", `删除该模型行(${b.dataset.d})?删除后该模型的调用立即失败。`))) return;
+    try { await api.del(`/models/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
     catch (err) { msg(false, err.message); }
   });
 }
 
-/* 对话测试面板:模型自由输入+datalist 提示;响应区展示状态/延迟/响应体 */
+/* 对话测试面板:行名即模型名;消息留空发送 "ping" */
 function openChatTest(u) {
   const main = $("#editor");
-  const models = (u.models || []);
   main.innerHTML = `
     <div class="card" id="chatpanel">
       <h3 style="margin-top:0">对话测试 <span class="muted">${esc(u.name)}</span></h3>
       <div class="chatbox">
-        <div class="row" style="margin:0">
-          模型 <input id="chat-model" list="chat-models" value="${esc(models[0] || "")}" style="width:280px">
-          <datalist id="chat-models">${models.map(m => `<option value="${esc(m)}">`).join("")}</datalist>
-          <span class="muted">消息留空发送 "ping"</span>
-        </div>
+        <div class="row" style="margin:0"><span class="muted">消息留空发送 "ping"</span></div>
         <textarea id="chat-msg" rows="3" placeholder="输入测试消息"></textarea>
         <div class="row" style="margin:0">
           <button class="pri" id="chat-send">发送</button>
@@ -377,13 +370,11 @@ function openChatTest(u) {
     </div>`;
   $("#chat-close").onclick = () => main.innerHTML = "";
   $("#chat-send").onclick = async () => {
-    const model = $("#chat-model").value.trim();
     const message = $("#chat-msg").value;
-    if (!model) { msg(false, "模型必填"); return; }
     const out = $("#chat-out");
     out.textContent = "请求中…";
     try {
-      const r = await api.post(`/upstreams/${u.id}/chat-test`, { model, message });
+      const r = await api.post(`/models/${u.id}/chat-test`, { message });
       const head = `${r.ok ? "成功" : "失败"} · status ${r.status ?? "-"} · ${r.latency_ms}ms`;
       out.textContent = head + "\n\n" + (r.body ? JSON.stringify(r.body, null, 2) : (r.error || ""));
       out.style.color = r.ok ? "var(--ink)" : "var(--err)";
@@ -394,107 +385,40 @@ function openChatTest(u) {
   };
 }
 
-async function editUpstream(u, basePkgs, allPkgs, transports) {
+/* 模型行编辑:v2 单包绑定;插件参数(base_url/transport/filter 参数等声明槽)以行 params JSON 覆盖 */
+function editModel(basePkgs, transports, u) {
   const isNew = !u;
-  u = u || { name: "", enabled: true, base: {}, extras: [], models: [], targets: [{ enabled: true, secrets: {} }], filterParams: {}, filtersEnabled: {}, params: {} };
+  u = u || { name: "", plugin: "", enabled: true, params: {} };
   const main = $("#editor");
-  const filterPkgs = allPkgs.filter(p => !p.hasProtocol && (p.filters || []).length > 0);
-  const trOpts = ['<option value="">direct</option>']
+  const trOpts = ['<option value="">direct(内置直连)</option>']
     .concat((transports || []).map(t => `<option value="${esc(t.name)}">${esc(t.name)}</option>`)).join("");
+  const curTransport = (u.params && u.params.transport) || "";
   main.innerHTML = `
-    <h3>${isNew ? "新建上游" : "编辑上游 " + esc(u.name)}</h3>
+    <h3>${isNew ? "新建模型行" : "编辑模型行 " + esc(u.name)}</h3>
     <div class="row">
-      名称 <input id="un" value="${esc(u.name)}" ${isNew ? "" : "readonly"} title="${isNew ? "" : "实例名不可改;如需改名请删除后重建"}">
-      主包 <select id="ub">${basePkgs.map(p => `<option ${u.base && u.base.package === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+      模型名 <input id="un" value="${esc(u.name)}" ${isNew ? "" : "readonly"} title="${isNew ? "" : "name/plugin 不可改;如需修改请删除后重建"}" style="width:260px">
+      插件包 <select id="up">${basePkgs.map(p => `<option ${u.plugin === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
       启用 <input id="ue" type="checkbox" ${u.enabled ? "checked" : ""}>
     </div>
-    <div class="row">模型(逗号分隔)<br><input id="um" value="${esc((u.models || []).join(","))}" style="width:420px"></div>
-    <h3>目标</h3>
-    <table id="ut"><tr><th>名称</th><th>BaseURL</th><th>传输</th><th>api_key</th><th>权重</th><th>启用</th></tr></table>
-    <button id="addt">+ 目标</button>
-    <h3>附加包(filters)</h3>
-    <div class="row">添加
-      <select id="exsel">${filterPkgs.map(p => `<option>${esc(p.name)}</option>`).join("") || "<option value=''>无可选 filters 包</option>"}</select>
-      <button id="addex">+ 附加包</button>
-    </div>
-    <table id="ext"><tr><th>包</th><th>filter</th><th>启用</th><th>参数(JSON)</th><th></th></tr></table>
+    <div class="muted" style="margin:6px 0">连接信息(地址/密钥)配置在插件包的「参数 / 密钥」里;下方参数按行覆盖,transport 可选命名传输实例:</div>
+    <div class="row">transport(行覆盖)<select id="utr">${trOpts}</select></div>
+    <div class="row">参数 JSON(行覆盖,如 filter 参数/自定义槽)<br><textarea id="uparams" rows="4" style="width:420px;font-family:monospace" placeholder='{"model":"rewritten-name"}'>${esc(JSON.stringify(Object.fromEntries(Object.entries(u.params || {}).filter(([k]) => k !== "transport")), null, 2))}</textarea></div>
     <div class="row"><button class="pri" id="saveu">保存</button> <button id="cancelu">取消</button></div>`;
-  const tb = $("#ut");
-  const addRow = t => {
-    const tr = document.createElement("tr");
-    if (t && t.name) tr.dataset.prev = t.name; // 行对应旧目标名(改名迁移凭据用)
-    tr.innerHTML = `<td><input class="tn" value="${esc(t.name || "")}"></td>
-      <td><input class="tb" value="${esc(t.base_url || "")}" style="width:280px"></td>
-      <td><select class="tt">${trOpts}</select></td>
-      <td><input class="ts" type="password" value="${esc((t.secrets && t.secrets.api_key) || "")}" placeholder="留空保留旧值"></td>
-      <td><input class="tw num" type="number" min="1" value="${t.weight > 0 ? t.weight : 1}" style="width:70px" title="加权随机权重"></td>
-      <td><input class="te" type="checkbox" ${t.enabled !== false ? "checked" : ""}></td>`;
-    tr.querySelector(".tt").value = t.transport || "";
-    tb.appendChild(tr);
-  };
-  (u.targets || []).forEach(addRow);
-  $("#addt").onclick = () => addRow({});
-  const ext = $("#ext");
-  const paramsOf = key => (u.filterParams && u.filterParams[key]) || {};
-  const addExRow = (pkgName, filterName, on) => {
-    const key = pkgName + "/" + filterName;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(pkgName)}</td><td>${esc(filterName)}</td>
-      <td><input class="xe" type="checkbox" ${on ? "checked" : ""}></td>
-      <td><input class="xp" style="width:280px" placeholder='{"model":"..."}' value='${esc(JSON.stringify(paramsOf(key)))}'></td>
-      <td><button class="danger">移除</button></td>`;
-    tr.querySelector("button").onclick = () => tr.remove();
-    ext.appendChild(tr);
-  };
-  for (const ex of u.extras || []) {
-    const pkg = allPkgs.find(p => p.name === ex.package);
-    for (const fn of (pkg && pkg.filters) || []) {
-      const key = ex.package + "/" + fn;
-      addExRow(ex.package, fn, u.filtersEnabled ? u.filtersEnabled[key] !== false : true);
-    }
-  }
-  $("#addex").onclick = () => {
-    const pkgName = $("#exsel").value;
-    if (!pkgName) return;
-    const pkg = allPkgs.find(p => p.name === pkgName);
-    for (const fn of (pkg && pkg.filters) || []) addExRow(pkgName, fn, true);
-  };
+  $("#utr").value = curTransport;
   $("#cancelu").onclick = () => main.innerHTML = "";
   $("#saveu").onclick = async () => {
-    const targets = [...tb.querySelectorAll("tr")].slice(1).map(tr => {
-      const key = tr.querySelector(".ts").value;
-      const name = tr.querySelector(".tn").value;
-      const renamed = !isNew && tr.dataset.prev && tr.dataset.prev !== name;
-      return {
-        name,
-        base_url: tr.querySelector(".tb").value,
-        transport: tr.querySelector(".tt").value,
-        enabled: tr.querySelector(".te").checked,
-        weight: Math.max(1, parseInt(tr.querySelector(".tw").value, 10) || 1),
-        // 编辑态留空 = 保留旧凭据,按后端契约发掩码;改名行附原名供迁移
-        secrets: { api_key: !isNew && !key ? "***" : key },
-        ...(renamed ? { rename_from: tr.dataset.prev } : {}),
-      };
-    });
-    const extras = [], filtersEnabled = {}, filterParams = {};
-    const seen = new Set();
-    for (const tr of [...ext.querySelectorAll("tr")].slice(1)) {
-      const cells = tr.querySelectorAll("td");
-      const pkgName = cells[0].textContent, filterName = cells[1].textContent;
-      const key = pkgName + "/" + filterName;
-      if (!seen.has(pkgName)) { extras.push({ package: pkgName }); seen.add(pkgName); }
-      filtersEnabled[key] = tr.querySelector(".xe").checked;
-      try { filterParams[key] = JSON.parse(tr.querySelector(".xp").value || "{}"); }
-      catch (e) { msg(false, `参数 JSON 非法: ${key}`); return; }
-    }
+    let extra = {};
+    try { extra = JSON.parse($("#uparams").value || "{}"); }
+    catch (e) { msg(false, "参数 JSON 非法"); return; }
+    const params = { ...extra };
+    if ($("#utr").value) params.transport = $("#utr").value;
     const body = {
-      id: u.id || 0, name: $("#un").value, enabled: $("#ue").checked,
-      base: { package: $("#ub").value }, extras,
-      models: $("#um").value.split(",").map(s => s.trim()).filter(Boolean),
-      targets, params: u.params || {}, filterParams, filtersEnabled,
+      id: u.id || 0, name: $("#un").value.trim(), plugin: $("#up").value,
+      enabled: $("#ue").checked, params,
     };
+    if (!body.name) { msg(false, "模型名必填"); return; }
     try {
-      await api.call(isNew ? "POST" : "PUT", isNew ? "/upstreams" : `/upstreams/${u.id}`, body);
+      await api.call(isNew ? "POST" : "PUT", isNew ? "/models" : `/models/${u.id}`, body);
       msg(true, "已保存"); main.innerHTML = ""; showUpstreams();
     } catch (err) { msg(false, err.message); }
   };

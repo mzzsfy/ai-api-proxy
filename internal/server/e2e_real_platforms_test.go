@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
@@ -80,7 +81,7 @@ func (f *fourGroupsFixture) adminCookieOr(t *testing.T) *http.Cookie {
 
 const pollinationsModel = "openai-fast"
 
-// newPlatformFixture 指定平台+模型的标准 opencode 包实例(Pollinations 类 chat-completions 兼容网关)
+// newPlatformFixture 指定平台+模型的标准 opencode 包实例(Pollinations 类 chat-completions 兼容网关;匿名层无 key)
 func newPlatformFixture(t *testing.T, name, baseUrl, model string) *fourGroupsFixture {
 	t.Helper()
 	manifest, src := mustOpencodeFiles(t)
@@ -88,15 +89,14 @@ func newPlatformFixture(t *testing.T, name, baseUrl, model string) *fourGroupsFi
 	if err := f.app.AdminDeps.Packages.Install(context.Background(), aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
-	u := &upstream.Upstream{
-		Name: name, Enabled: true,
-		Base:   upstream.PackageRef{Package: "opencode"},
-		Models: []string{model},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: baseUrl, Transport: "", Enabled: true,
-			Secrets: map[string]string{"api_key": ""}}},
+	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
+		"base_url": baseUrl}}); err != nil {
+		t.Fatalf("put opencode params: %v", err)
 	}
-	if err := f.app.Registry.Save(context.Background(), u); err != nil {
-		t.Fatalf("save upstream: %v", err)
+	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
+		Name: model, Plugin: "opencode", Enabled: true,
+	}); err != nil {
+		t.Fatalf("save model row: %v", err)
 	}
 	return f
 }

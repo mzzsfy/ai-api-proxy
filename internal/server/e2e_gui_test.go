@@ -103,48 +103,46 @@ func TestGUI_PartCodeEditRemoved(t *testing.T) {
 	}
 }
 
-func TestGUI_UpstreamTestEndpoint(t *testing.T) {
-	// Given 已装配上游 When POST /upstreams/{id}/test Then ok=true 且延迟>0;坏上游 ok=false 带原因
+func TestGUI_ModelTestEndpoint(t *testing.T) {
+	// Given 已装配模型行 When POST /models/{id}/test Then ok=true 且延迟>0;坏行 ok=false 带原因
 	f := newFourGroups(t)
-	// ① 好上游:直连组(m-direct 的上游 id 查列表)
-	ups := f.app.Registry.List()
-	var goodID, badID int64
-	for _, u := range ups {
-		if u.Name == "g1-direct-nofilter" {
+	// ① 好行:直连组(m-direct 的行 id 查列表)
+	rows := f.app.Registry.List()
+	var goodID int64
+	for _, u := range rows {
+		if u.Name == "m-direct" {
 			goodID = u.ID
 		}
 	}
 	if goodID == 0 {
-		t.Fatal("good upstream not found")
+		t.Fatal("good model row not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", goodID), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", goodID), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("test good: %d %s", status, body)
 	}
 	if !strings.Contains(body, `"latency_ms":`) {
 		t.Fatalf("latency missing: %s", body)
 	}
-	// ② 坏上游:BaseURL 指向不可达端口
-	if err := f.app.Registry.Save(context.Background(), &upstream.Upstream{
-		Name: "g7-dead", Enabled: true,
-		Base:   upstream.PackageRef{Package: "js-openai"},
-		Models: []string{"m-dead"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: "http://127.0.0.1:1", Transport: "", Enabled: true,
-			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
+	// ② 坏行:params 覆盖 base_url 指向不可达端口(v2 覆盖层级:模型 > 插件)
+	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
+		Name: "m-dead", Plugin: "js-openai", Enabled: true,
+		Params: map[string]any{"base_url": "http://127.0.0.1:1"},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var badID int64
 	for _, u := range f.app.Registry.List() {
-		if u.Name == "g7-dead" {
+		if u.Name == "m-dead" {
 			badID = u.ID
 		}
 	}
-	status, body = f.adminPost(t, fmt.Sprintf("/admin/api/upstreams/%d/test", badID), "")
+	status, body = f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", badID), "")
 	if status != http.StatusOK {
 		t.Fatalf("test bad status: %d %s", status, body)
 	}
 	if !strings.Contains(body, `"ok":false`) {
-		t.Fatalf("bad upstream must report failure: %s", body)
+		t.Fatalf("bad model row must report failure: %s", body)
 	}
 }
 

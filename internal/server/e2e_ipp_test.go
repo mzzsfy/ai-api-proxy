@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/admin"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
@@ -132,15 +133,18 @@ func newIPPFixture(t *testing.T, tr TransportCfg) *ippFixture {
 	}))
 	t.Cleanup(up.Close)
 	ctx := context.Background()
-	if err := app.Registry.Save(ctx, &upstream.Upstream{
-		Name: "ipp-up", Enabled: true,
-		Base:   upstream.PackageRef{Package: "openai-compatible"},
-		Models: []string{"m-ipp"},
-		Targets: []upstream.Target{{Name: "t1",
-			BaseURL: up.URL, Transport: tr.Name, Enabled: true,
-			Secrets: map[string]string{"api_key": "sk-up"}}},
+	if err := app.AdminDeps.Packages.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-up"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AdminDeps.Packages.Settings().Put("openai-compatible",
+		plugin.PutInput{Config: map[string]any{"base_url": up.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Registry.Save(ctx, &upstream.Model{
+		Name: "m-ipp", Plugin: "openai-compatible", Enabled: true,
+		Params: map[string]any{"transport": tr.Name},
 	}); err != nil {
-		t.Fatalf("save upstream: %v", err)
+		t.Fatalf("save model row: %v", err)
 	}
 	gw := httptest.NewServer(app.Mux)
 	t.Cleanup(gw.Close)

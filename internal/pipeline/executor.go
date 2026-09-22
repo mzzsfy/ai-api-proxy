@@ -6,16 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
-// Resolved 上游解析产物(Resolve 组装:extras 引用序 → base 包内序)
+// Resolved 模型行解析产物(过滤器串行 + 协议适配;v2 无目标概念)
 type Resolved struct {
 	Filters  []Filter
 	Protocol Protocol
-	Targets  []Target
 }
 
 // BuildError 请求构造/传输失败(本地或部件原因;无上游状态,502)
@@ -24,23 +22,21 @@ type BuildError struct{ Err error }
 func (e *BuildError) Error() string { return e.Err.Error() }
 func (e *BuildError) Unwrap() error { return e.Err }
 
-// Executor 单目标直发引擎:修改链 → BuildRequest → 一次 RoundTrip → 响应映射。
-// 不重试、不切目标、不熔断——失败即终局,上游状态原样透传(重试归下游)
+// Executor 单路直发引擎:修改链 → BuildRequest → 一次 RoundTrip → 响应映射。
+// 不重试、不熔断——失败即终局,上游状态原样透传(重试归下游)
 type Executor struct {
 	Transports func(name string) (Transport, bool)
-	// OnTargetExit 目标尝试结束回调(failed=非 2xx/3xx 或内部错误;metrics 用,可空)
-	OnTargetExit func(upstream, target string, failed bool)
-	// Rand 随机源注入(目标加权随机选择;nil = 全局 rand,并发安全)
-	Rand *rand.Rand
+	// OnDone 模型请求结束回调(failed=非 2xx/3xx 或内部错误;metrics 用,可空)
+	OnDone func(upstream string, failed bool)
 }
 
-// Run 执行模型:①修改链 ②单目标直发 ③响应映射。entryReq = 入口协议请求体(声明协议与之恒等)
+// Run 执行模型:①修改链 ②直发 ③响应映射。entryReq = 入口协议请求体(声明协议与之恒等)
 func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, entryReq []byte) (*Response, error) {
 	// 入口形态把关:声明未覆盖 → 拒绝,不调用部件(不做任何转换)
 	if err := guardForm(u.Protocol, pctx.Vars.EntryStream); err != nil {
 		return nil, err
 	}
-	// ① 修改链:extras(引用序)→ base(包内序)已由 Resolve 排好
+	// ① 修改链:包内序已由 Resolve 排好
 	entry := entryReq
 	for _, f := range u.Filters {
 		out, err := f.MapRequest(pctx, entry)
@@ -51,15 +47,10 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, e
 			entry = out
 		}
 	}
-	// ② 单目标:enabled 候选内加权随机(Routing 多目标权重分布;失败不切换)
-	if len(u.Targets) == 0 {
-		return nil, &BuildError{Err: errors.New("no enabled targets")}
-	}
-	target := e.pickTarget(u.Targets)
-	pctx.Target = target
-	resp, req, failed, err := e.tryTarget(ctx, pctx, u, target, entry)
-	if e.OnTargetExit != nil {
-		e.OnTargetExit(pctx.Upstream.Name, target.Name, failed)
+	// ② 直发:传输由请求载体的 transport 槽决定(空 = direct)
+	resp, req, failed, err := e.dispatch(ctx, pctx, u, entry)
+	if e.OnDone != nil {
+		e.OnDone(pctx.Upstream.Name, failed)
 	}
 	if err != nil {
 		return nil, err
@@ -71,48 +62,8 @@ func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, e
 	return e.mapResponse(pctx, u, req.Stream, resp)
 }
 
-// PickTarget 目标加权随机选择导出入口(快速路径与引擎同源;weight ≤0 视为 1)
-func (e *Executor) PickTarget(targets []Target) Target {
-	return e.pickTarget(targets)
-}
-
-// pickTarget 目标加权随机选择(weight ≤0 视为 1)
-func (e *Executor) pickTarget(targets []Target) Target {
-	rnd := func(total int) int {
-		if e.Rand != nil {
-			return e.Rand.Intn(total)
-		}
-		return rand.Intn(total)
-	}
-	return weightedPick(targets, rnd)
-}
-
-// weightedPick 按权重区间选择;rnd 入参=总权重,返回 [0,total)
-func weightedPick(targets []Target, rnd func(int) int) Target {
-	total := 0
-	for _, t := range targets {
-		total += normalizeWeight(t)
-	}
-	x := rnd(total)
-	for _, t := range targets {
-		x -= normalizeWeight(t)
-		if x < 0 {
-			return t
-		}
-	}
-	return targets[len(targets)-1]
-}
-
-// normalizeWeight 非正权重归一为 1(缺省均匀参与)
-func normalizeWeight(t Target) int {
-	if t.Weight <= 0 {
-		return 1
-	}
-	return t.Weight
-}
-
-// tryTarget 单次请求:BuildRequest → RoundTrip;无重试语义
-func (e *Executor) tryTarget(ctx context.Context, pctx *PipelineContext, u Resolved, target Target, entry []byte) (tresp *TransportResponse, req Request, failed bool, err error) {
+// dispatch 单次请求:BuildRequest → RoundTrip;无重试语义
+func (e *Executor) dispatch(ctx context.Context, pctx *PipelineContext, u Resolved, entry []byte) (tresp *TransportResponse, req Request, failed bool, err error) {
 	req, err = u.Protocol.BuildRequest(pctx, entry)
 	if err != nil {
 		if errors.Is(err, ErrPoolBusy) {
@@ -120,9 +71,13 @@ func (e *Executor) tryTarget(ctx context.Context, pctx *PipelineContext, u Resol
 		}
 		return nil, req, true, &BuildError{Err: fmt.Errorf("buildRequest: %w", err)}
 	}
-	tr, ok := e.Transports(targetTransport(target))
+	name := req.Transport
+	if name == "" {
+		name = TransportRef
+	}
+	tr, ok := e.Transports(name)
 	if !ok {
-		return nil, req, true, &BuildError{Err: fmt.Errorf("transport %q not found", targetTransport(target))}
+		return nil, req, true, &BuildError{Err: fmt.Errorf("transport %q not found", name)}
 	}
 	out, terr := tr.RoundTrip(ctx, req)
 	if terr != nil {
@@ -144,10 +99,13 @@ func (e *MapRequestError) Error() string {
 	return fmt.Sprintf("filter %s: %v", e.Part, e.Err)
 }
 
-// terminalResponse 错误终局:mapError(一次)或原样透传
+// terminalResponse 错误终局:mapError(一次)或原样透传(mapError 失败不掩盖上游状态,记日志后回退)
 func terminalResponse(pctx *PipelineContext, u Resolved, status int, body []byte) *Response {
 	if em, ok := u.Protocol.(ErrorMapper); ok {
-		if out, err := em.MapError(pctx, status, body); err == nil && out != nil {
+		out, err := em.MapError(pctx, status, body)
+		if err != nil {
+			log.Printf("mapError %s failed (pass through): %v", u.Protocol.Name(), err)
+		} else if out != nil {
 			return &Response{Stream: false, Body: out, Status: status}
 		}
 	}
@@ -287,14 +245,6 @@ func trimSpace(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
-}
-
-// targetTransport 目标传输名(默认 direct)
-func targetTransport(t Target) string {
-	if t.Transport == "" {
-		return TransportRef
-	}
-	return t.Transport
 }
 
 // sseFrameJSON 帧 → mapEvent 入参形态 {"event": string, "data": string}

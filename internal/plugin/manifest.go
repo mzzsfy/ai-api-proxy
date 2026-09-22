@@ -51,16 +51,13 @@ func ProtocolEntryFor(kind, name string) string {
 
 // ProtocolPart protocol 部件声明(声明式单协议:一个包恰服务一种协议;路径约定 protocol.js)
 type ProtocolPart struct {
-	Protocol   string   `json:"protocol"`
-	Features   []string `json:"features,omitempty"`
-	SecretRefs []string `json:"secretRefs,omitempty"`
+	Protocol string   `json:"protocol"`
+	Features []string `json:"features,omitempty"`
 }
 
-// FilterPart filter 部件声明(路径约定 filters/<name>.js)
+// FilterPart filter 部件声明(路径约定 filters/<name>.js;参数槽 = settings 片段声明,v2)
 type FilterPart struct {
-	Name         string          `json:"name"`
-	ConfigSchema json.RawMessage `json:"configSchema,omitempty"`
-	SecretRefs   []string        `json:"secretRefs,omitempty"`
+	Name string `json:"name"`
 }
 
 // HooksTask 定时任务声明(crontab 心智模型:每行 = 一时刻 + 一命令;调度形态 cron/next 互斥)
@@ -94,7 +91,6 @@ type Manifest struct {
 		Hooks    *HooksPart    `json:"hooks,omitempty"`
 	} `json:"parts"`
 	UpstreamTemplate json.RawMessage            `json:"upstreamTemplate,omitempty"`
-	ConfigSchema     json.RawMessage            `json:"configSchema,omitempty"`
 	Extra            map[string]json.RawMessage `json:"-"`
 }
 
@@ -203,25 +199,4 @@ func (p *Package) Validate() error {
 		return fmt.Errorf("description too long (%d > 256)", l)
 	}
 	return nil
-}
-
-// SecretRefsUnion protocol ∪ filters 的 secretRefs 并集(实例 secrets 覆盖校验)
-func (p *Package) SecretRefsUnion() []string {
-	set := map[string]bool{}
-	var order []string
-	add := func(refs []string) {
-		for _, r := range refs {
-			if !set[r] {
-				set[r] = true
-				order = append(order, r)
-			}
-		}
-	}
-	if p.Manifest.Parts.Protocol != nil {
-		add(p.Manifest.Parts.Protocol.SecretRefs)
-	}
-	for _, f := range p.Manifest.Parts.Filters {
-		add(f.SecretRefs)
-	}
-	return order
 }

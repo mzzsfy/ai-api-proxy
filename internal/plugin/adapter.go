@@ -32,15 +32,12 @@ func poolSize() int {
 }
 
 // gojaProtocol JS protocol 部件适配
-// 并发模型:hook 粒度借还(池内并行,实例内串行);借出期间独占实例,
-// util.secret 经实例 cursor(借出时按 ctx 更新,调用全程有效)
+// 并发模型:hook 粒度借还(池内并行,实例内串行);借出期间独占实例
 type gojaProtocol struct {
 	name     string
 	declared string
 	support  pipeline.Supports
 	pool     *runtimePool
-	// secrets 读当前 target api_key(host 侧会话亲和素材;插件输出不携带)
-	targetKey func(target string) (string, bool)
 }
 
 // ClosePools 释放池(Reload 销毁;等待在途归零)
@@ -48,31 +45,23 @@ func (g *gojaProtocol) ClosePools() {
 	g.pool.Close()
 }
 
-// NewProtocol 从包实例化 protocol 部件(池预热;绑定校验用首实例)
-func NewProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error) (pipeline.Protocol, error) {
-	return buildProtocol(pkg, params, targetSecrets, targetSecretValues, storage, packageKey, transportEvict, true)
+// NewProtocol 从包实例化 protocol 部件(params 已由调用方 ResolveParams 预校验;池预热;绑定校验用首实例)
+func NewProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error) (pipeline.Protocol, error) {
+	return buildProtocol(pkg, params, storage, packageKey, packageKeyValues, transportEvict, true)
 }
 
-// buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(实例配置归上游,不阻塞安装)
-func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Protocol, error) {
+// buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(参数校验归调用方,v2 声明统一)
+func buildProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Protocol, error) {
 	part := pkg.Manifest.Parts.Protocol
 	src := pkg.Files[ProtocolEntry]
 	prog, err := Compile(src, ProtocolEntry)
 	if err != nil {
 		return nil, err
 	}
-	if enforceSchema {
-		// 漂移矩阵:required 缺 → 注明待补字段;未知键剥离
-		params, err = enforceConfig("protocol "+pkg.Manifest.Name, pkg.Manifest.Name, pkg.Manifest.ConfigSchema, params)
-		if err != nil {
-			return nil, err
-		}
-	}
 	newDeps := func() HostDeps {
 		return HostDeps{
-			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
-			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
-			TransportEvict: transportEvict,
+			PackageName: pkg.Manifest.Name, PackageKey: packageKey, PackageKeyValues: packageKeyValues,
+			Storage: storage, TransportEvict: transportEvict,
 		}
 	}
 	// 声明的协议全名并入实例配置:部件按协议名渲染请求/事件(config.protocol)
@@ -100,13 +89,7 @@ func buildProtocol(pkg *Package, params map[string]any, targetSecrets func(targe
 	if err != nil {
 		return nil, err
 	}
-	return &gojaProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool,
-		targetKey: func(t string) (string, bool) {
-			if targetSecrets == nil {
-				return "", false
-			}
-			return targetSecrets(t, "api_key")
-		}}, nil
+	return &gojaProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool}, nil
 }
 
 // mergeProtocol 声明协议名并入实例配置(不改写调用方 map;声明为准覆盖同名字段)
@@ -177,7 +160,6 @@ func (g *gojaProtocol) borrowWrap(fn func(inst *hookInstance) (any, bool, error)
 
 func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pipeline.Request, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.BuildRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
@@ -212,13 +194,15 @@ func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte)
 	if v, ok := m["stream"].(bool); ok {
 		req.Stream = v
 	}
+	if v, ok := m["transport"].(string); ok {
+		req.Transport = v
+	}
 	if req.URL == "" {
 		return pipeline.Request{}, fmt.Errorf("buildRequest: url empty")
 	}
 	// 会话亲和素材由 host 注入(插件输出不携带凭据)
 	if ctx != nil {
 		req.Model = ctx.Vars.Model
-		req.APIKey, _ = g.targetKey(targetName(ctx))
 	}
 	return req, nil
 }
@@ -229,7 +213,6 @@ func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]
 			// 未实现:声明缺 streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
 			return nil, false, errors.New("mapEvent not implemented")
 		}
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapEvent, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, event))
 		if err != nil {
 			return nil, broken, err
@@ -285,7 +268,6 @@ func (g *gojaProtocol) MapResponse(ctx *pipeline.PipelineContext, body []byte) (
 			// 未实现:声明缺 non_streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
 			return nil, false, errors.New("mapResponse not implemented")
 		}
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapResponse, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, body))
 		if err != nil {
 			return nil, broken, err
@@ -308,7 +290,6 @@ func (g *gojaProtocol) MapError(ctx *pipeline.PipelineContext, status int, body 
 		if inst.hooks.MapError == nil {
 			return nil, false, errNotImplemented
 		}
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapError,
 			ctxToValue(inst.vm, ctx), inst.vm.ToValue(status), vmBytes(inst.vm, body))
 		if err != nil {
@@ -333,14 +314,6 @@ func (g *gojaProtocol) MapError(ctx *pipeline.PipelineContext, status int, body 
 // errNotImplemented 可选 hook 未实现
 var errNotImplemented = errors.New("not implemented")
 
-// targetName 上下文目标名(nil 安全)
-func targetName(ctx *pipeline.PipelineContext) string {
-	if ctx == nil {
-		return ""
-	}
-	return ctx.Target.Name
-}
-
 // ─── filter 适配(池模型同 protocol)───
 
 type gojaFilter struct {
@@ -351,31 +324,23 @@ type gojaFilter struct {
 // ClosePools 释放池
 func (g *gojaFilter) ClosePools() { g.pool.Close() }
 
-// NewFilter 从包实例化 filter 部件
-func NewFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error) (pipeline.Filter, error) {
-	return buildFilter(pkg, part, params, targetSecrets, targetSecretValues, storage, packageKey, transportEvict, true)
+// NewFilter 从包实例化 filter 部件(params 已由调用方 ResolveParams 预校验)
+func NewFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error) (pipeline.Filter, error) {
+	return buildFilter(pkg, part, params, storage, packageKey, packageKeyValues, transportEvict, true)
 }
 
-// buildFilter 实例化主体;enforceSchema=false 供安装期结构校验
-func buildFilter(pkg *Package, part FilterPart, params map[string]any, targetSecrets func(target, key string) (string, bool), targetSecretValues func(target string) map[string]string, storage StorageKV, packageKey func(name string) (any, bool), transportEvict func(transport, scope, value string) error, enforceSchema bool) (pipeline.Filter, error) {
+// buildFilter 实例化主体;末位 bool 为历史签名占位(v2 参数校验归调用方)
+func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Filter, error) {
 	entry := ProtocolEntryFor("filter", part.Name)
 	src := pkg.Files[entry]
 	prog, err := Compile(src, entry)
 	if err != nil {
 		return nil, err
 	}
-	if enforceSchema {
-		// 漂移矩阵:required 缺 → 注明待补字段;未知键剥离
-		params, err = enforceConfig("filter "+pkg.Manifest.Name+"/"+part.Name, part.Name, part.ConfigSchema, params)
-		if err != nil {
-			return nil, err
-		}
-	}
 	newDeps := func() HostDeps {
 		return HostDeps{
-			PackageName: pkg.Manifest.Name, Cursor: &TargetCursor{},
-			TargetSecrets: targetSecrets, TargetSecretValues: targetSecretValues, PackageKey: packageKey, Storage: storage,
-			TransportEvict: transportEvict,
+			PackageName: pkg.Manifest.Name, PackageKey: packageKey, PackageKeyValues: packageKeyValues,
+			Storage: storage, TransportEvict: transportEvict,
 		}
 	}
 	factory := func() (*hookInstance, error) {
@@ -409,7 +374,6 @@ func (g *gojaFilter) borrowWrap(fn func(inst *hookInstance) (any, bool, error)) 
 
 func (g *gojaFilter) MapRequest(ctx *pipeline.PipelineContext, entry []byte) ([]byte, error) {
 	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
@@ -434,7 +398,6 @@ func (g *gojaFilter) MapChunk(ctx *pipeline.PipelineContext, chunk []byte) ([]by
 		if inst.hooks.MapChunk == nil {
 			return nil, false, nil
 		}
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapChunk, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, chunk))
 		if err != nil {
 			return nil, broken, err
@@ -462,7 +425,6 @@ func (g *gojaFilter) MapResponse(ctx *pipeline.PipelineContext, resp []byte) ([]
 		if inst.hooks.MapResponse == nil {
 			return nil, false, nil
 		}
-		inst.cursor.Set(targetName(ctx))
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapResponse, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, resp))
 		if err != nil {
 			return nil, broken, err
@@ -482,13 +444,12 @@ func (g *gojaFilter) MapResponse(ctx *pipeline.PipelineContext, resp []byte) ([]
 	return []byte(res.(string)), nil
 }
 
-// ctxToValue PipelineContext → JS 可读对象(upstream 快照/target/state/vars);nil 安全
+// ctxToValue PipelineContext → JS 可读对象(upstream 快照/state/vars;v2 无目标概念);nil 安全
 func ctxToValue(vm *goja.Runtime, ctx *pipeline.PipelineContext) goja.Value {
 	o := vm.NewObject()
 	if ctx == nil {
 		_ = o.Set("requestId", "")
 		_ = o.Set("state", map[string]any{})
-		_ = o.Set("target", vm.NewObject())
 		_ = o.Set("upstream", vm.NewObject())
 		_ = o.Set("vars", vm.NewObject())
 		return o
@@ -496,13 +457,7 @@ func ctxToValue(vm *goja.Runtime, ctx *pipeline.PipelineContext) goja.Value {
 	_ = o.Set("requestId", ctx.RequestID)
 	up := vm.NewObject()
 	_ = up.Set("name", ctx.Upstream.Name)
-	_ = up.Set("models", ctx.Upstream.Models)
 	_ = o.Set("upstream", up)
-	tg := vm.NewObject()
-	_ = tg.Set("id", ctx.Target.ID)
-	_ = tg.Set("name", ctx.Target.Name)
-	_ = tg.Set("baseUrl", ctx.Target.BaseURL)
-	_ = o.Set("target", tg)
 	_ = o.Set("state", ctx.State)
 	vars := vm.NewObject()
 	_ = vars.Set("model", ctx.Vars.Model)

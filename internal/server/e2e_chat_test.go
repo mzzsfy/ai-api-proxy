@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
-// chatTestUp 查上游 id
+// chatTestUp 查模型行 id
 func chatTestUp(t *testing.T, f *fourGroupsFixture, name string) int64 {
 	t.Helper()
 	for _, u := range f.app.Registry.List() {
@@ -18,7 +19,7 @@ func chatTestUp(t *testing.T, f *fourGroupsFixture, name string) int64 {
 			return u.ID
 		}
 	}
-	t.Fatalf("upstream %s not found", name)
+	t.Fatalf("model row %s not found", name)
 	return 0
 }
 
@@ -36,12 +37,22 @@ func liveOnce(t *testing.T, f *fourGroupsFixture) map[string]any {
 	return live
 }
 
+// saveRow 测试内快速建行(v2:行名即模型名,连接差异走行 params 覆盖)
+func saveRow(t *testing.T, f *fourGroupsFixture, name, pkg string, params map[string]any) {
+	t.Helper()
+	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
+		Name: name, Plugin: pkg, Enabled: true, Params: params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChatTest_Success(t *testing.T) {
-	// Given 上游有可用目标 When POST chat-test(合法模型+消息) Then 200 ok:true 返回 latency/status/body 且 by_package 计数+1
+	// Given 可用模型行 When POST chat-test(消息) Then 200 ok:true 返回 latency/status/body 且 模型行/包双维度计数+1
 	f := newFourGroups(t)
-	id := chatTestUp(t, f, "g1-direct-nofilter")
-	code, body := f.adminPost(t, "/admin/api/upstreams/"+strconv.FormatInt(id, 10)+"/chat-test",
-		`{"model":"m-direct","message":"你好"}`)
+	id := chatTestUp(t, f, "m-direct")
+	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+		`{"message":"你好"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
 	}
@@ -61,37 +72,25 @@ func TestChatTest_Success(t *testing.T) {
 	if out["status"] != float64(200) {
 		t.Fatalf("status: %v", out["status"])
 	}
-	// 目标维度计数(executor OnTargetExit 照常)
-	tgReqs, _ := dimCount(t, liveOnce(t, f)["by_target"], "g1-direct-nofilter/t1")
-	if tgReqs != 1 {
-		t.Fatalf("by_target requests = %d, want 1", tgReqs)
-	}
 	pkgReqs, _ := dimCount(t, liveOnce(t, f)["by_package"], "js-openai")
-	upReqs, _ := dimCount(t, liveOnce(t, f)["by_upstream"], "g1-direct-nofilter")
-	if pkgReqs != 1 || upReqs != 1 {
-		t.Fatalf("counters pkg=%d up=%d, want 1/1", pkgReqs, upReqs)
+	rowReqs, _ := dimCount(t, liveOnce(t, f)["by_upstream"], "m-direct")
+	if pkgReqs != 1 || rowReqs != 1 {
+		t.Fatalf("counters pkg=%d row=%d, want 1/1", pkgReqs, rowReqs)
 	}
 }
 
 func TestChatTest_UpstreamErrorCounts(t *testing.T) {
-	// Given 上游返回 500 When chat-test Then 200 ok:false status:500 且 by_package errors +1(>=400 计错误口径,body 透传)
+	// Given 行包参数覆盖 base_url 指向 500 上游 When chat-test Then 200 ok:false status:500 且 by_package errors +1
 	f := newFourGroups(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream exploded", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
-	if err := f.app.Registry.Save(t.Context(), &upstream.Upstream{
-		Name: "g8-e500", Enabled: true,
-		Base:   upstream.PackageRef{Package: "js-openai"},
-		Models: []string{"m-e500"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: srv.URL, Enabled: true,
-			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	id := chatTestUp(t, f, "g8-e500")
-	code, body := f.adminPost(t, "/admin/api/upstreams/"+strconv.FormatInt(id, 10)+"/chat-test",
-		`{"model":"m-e500","message":"ping"}`)
+	// 行 params 覆盖包参数 base_url(v2 覆盖层级:模型 > 插件)
+	saveRow(t, f, "m-e500", "js-openai", map[string]any{"base_url": srv.URL})
+	id := chatTestUp(t, f, "m-e500")
+	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+		`{"message":"ping"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
 	}
@@ -112,21 +111,13 @@ func TestChatTest_UpstreamErrorCounts(t *testing.T) {
 	}
 }
 
-func TestChatTest_UpstreamUnreachable(t *testing.T) {
-	// Given 目标连接被拒(执行错误) When chat-test Then 200 ok:false 且 by_package errors +1
+func TestChatTest_Unreachable(t *testing.T) {
+	// Given 行 params 指向不可达地址 When chat-test Then 200 ok:false 且 by_package errors +1
 	f := newFourGroups(t)
-	if err := f.app.Registry.Save(t.Context(), &upstream.Upstream{
-		Name: "g8-dead", Enabled: true,
-		Base:   upstream.PackageRef{Package: "js-openai"},
-		Models: []string{"m-dead"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: "http://127.0.0.1:1", Enabled: true,
-			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	id := chatTestUp(t, f, "g8-dead")
-	code, body := f.adminPost(t, "/admin/api/upstreams/"+strconv.FormatInt(id, 10)+"/chat-test",
-		`{"model":"m-dead","message":"ping"}`)
+	saveRow(t, f, "m-dead", "js-openai", map[string]any{"base_url": "http://127.0.0.1:1"})
+	id := chatTestUp(t, f, "m-dead")
+	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+		`{"message":"ping"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
 	}
@@ -135,35 +126,20 @@ func TestChatTest_UpstreamUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out["ok"] != false {
-		t.Fatalf("dead upstream must be ok:false: %s", body)
-	}
-}
-
-func TestChatTest_NoModels(t *testing.T) {
-	// Given 上游模型声明为空 When Registry.Save Then 拒绝(models required)
-	// 无模型上游在保存期即被拒,chat-test 的 400 无模型分支不可达(handler 保留为防御检查)
-	f := newFourGroups(t)
-	err := f.app.Registry.Save(t.Context(), &upstream.Upstream{
-		Name: "g9-nomodels", Enabled: true,
-		Base:    upstream.PackageRef{Package: "js-openai"},
-		Models:  []string{},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: f.upstreamBase, Enabled: true}},
-	})
-	if err == nil || err.Error() != "models required" {
-		t.Fatalf("empty models must be rejected at save: %v", err)
+		t.Fatalf("unreachable must be ok:false: %s", body)
 	}
 }
 
 func TestChatTest_NotFoundAndValidation(t *testing.T) {
-	// Given 不存在的上游 id / 空 model When chat-test Then 404 / 400
+	// Given 不存在的行 id When chat-test Then 404(行名即模型名,请求体仅消息)
 	f := newFourGroups(t)
-	code, _ := f.adminPost(t, "/admin/api/upstreams/99999/chat-test", `{"model":"m-direct"}`)
+	code, _ := f.adminPost(t, "/admin/api/models/99999/chat-test", `{"message":"hi"}`)
 	if code != http.StatusNotFound {
 		t.Fatalf("not found: %d", code)
 	}
-	id := chatTestUp(t, f, "g1-direct-nofilter")
-	code, body := f.adminPost(t, "/admin/api/upstreams/"+strconv.FormatInt(id, 10)+"/chat-test", `{"message":"hi"}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("empty model: %d %s", code, body)
+	id := chatTestUp(t, f, "m-direct")
+	code, _ = f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("default message ping: %d", code)
 	}
 }

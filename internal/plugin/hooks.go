@@ -63,18 +63,7 @@ func newHooksEnv(pkg *Package, deps HooksDeps, withSetting bool) *hooksEnv {
 	bindUtil(vm, HostDeps{PackageName: pkg.Manifest.Name, Storage: deps.Storage, Log: deps.Log, TransportEvict: deps.TransportEvict})
 	env := &hooksEnv{pkg: pkg, deps: deps, vm: vm, cache: map[string]*goja.Object{}, withSetting: withSetting}
 	if withSetting {
-		b := map[string]any{}
-		for _, typ := range []string{"string", "int", "number", "bool", "enum"} {
-			t := typ
-			b[t] = func(opts map[string]any) map[string]any {
-				out := map[string]any{"type": t}
-				for k, v := range opts {
-					out[k] = v
-				}
-				return out
-			}
-		}
-		_ = vm.Set("setting", b)
+		injectSettingBuilders(vm)
 	}
 	_ = vm.Set("require", func(call goja.FunctionCall) goja.Value {
 		// require 的引用方 = 栈顶文件
@@ -201,38 +190,48 @@ func taskEntry(tk HooksTask) string {
 	return "tasks/" + tk.Name + ".js"
 }
 
-// 族文件固定求值序(声明提取)
+// 族文件固定求值序(声明提取):settings.js → protocol.js → filters/<名>.js(包内序) → init.js → keys.js → tasks/<名>.js
+// protocol/filter 参与声明提取:适配器与过滤器的参数槽与读值代码同址声明
 func familyFiles(pkg *Package) []string {
 	out := []string{}
+	add := func(f string) {
+		for _, e := range out {
+			if e == f {
+				return
+			}
+		}
+		out = append(out, f)
+	}
 	if _, ok := pkg.Files["settings.js"]; ok {
-		out = append(out, "settings.js")
+		add("settings.js")
+	}
+	if p := pkg.Manifest.Parts.Protocol; p != nil {
+		if _, ok := pkg.Files[ProtocolEntry]; ok {
+			add(ProtocolEntry)
+		}
+	}
+	for _, fp := range pkg.Manifest.Parts.Filters {
+		e := ProtocolEntryFor("filter", fp.Name)
+		if _, ok := pkg.Files[e]; ok {
+			add(e)
+		}
 	}
 	if _, ok := pkg.Files["init.js"]; ok {
-		out = append(out, "init.js")
+		add("init.js")
 	}
 	if _, ok := pkg.Files["keys.js"]; ok {
-		out = append(out, "keys.js")
+		add("keys.js")
 	}
 	if h := pkg.Manifest.Parts.Hooks; h != nil {
 		for _, tk := range h.Tasks {
-			e := taskEntry(tk)
-			dup := false
-			for _, f := range out {
-				if f == e {
-					dup = true
-					break
-				}
-			}
-			if !dup {
-				out = append(out, e)
-			}
+			add(taskEntry(tk))
 		}
 	}
 	return out
 }
 
-// ExtractDeclaration 安装期求值全部族文件收集 settings 片段(固定序;后者覆盖前者同名键)。
-// 返回合并后的声明(settingsSchema 形态);失败 = 拒装(语法/求值/非法声明)。
+// ExtractDeclaration 安装期求值全部族文件收集 settings 片段(固定序;同名槽拒装,报文件+槽名)。
+// 返回合并后的声明(settingsSchema 形态);失败 = 拒装(语法/求值/非法声明/槽名冲突)。
 func ExtractDeclaration(pkg *Package, deps HooksDeps) (map[string]any, error) {
 	env := newHooksEnv(pkg, deps, true)
 	merged := map[string]any{}
@@ -250,6 +249,9 @@ func ExtractDeclaration(pkg *Package, deps HooksDeps) (map[string]any, error) {
 			return nil, fmt.Errorf("%s: settings export must be an object", f)
 		}
 		for k, v := range fm {
+			if _, dup := merged[k]; dup {
+				return nil, fmt.Errorf("%s: settings slot %q already declared by another family file", f, k)
+			}
 			merged[k] = v
 		}
 	}

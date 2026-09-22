@@ -11,13 +11,15 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
-// BuiltinFactory Go 内置协议工厂(secrets 与 JS 部件同机制注入)
+// BuiltinFactory Go 内置协议工厂(参数与密钥与 JS 部件同机制注入)
 type BuiltinFactory func(deps BuiltinDeps) (pipeline.Protocol, error)
 
-// BuiltinDeps 内置协议依赖
+// BuiltinDeps 内置协议依赖(v2:解析后包参数 + 包级密钥读值)
 type BuiltinDeps struct {
-	// TargetSecrets 按 (target 名, 键) 解析凭据
-	TargetSecrets func(target, key string) (string, bool)
+	// Config 解析后的包参数(default ⊕ 插件参数 ⊕ 模型覆盖)
+	Config map[string]any
+	// PackageKey 包级 key 只读(实时)
+	PackageKey func(name string) (any, bool)
 }
 
 // Registry 包注册中心(安装/升级/启停/列举)
@@ -31,6 +33,8 @@ type Registry struct {
 	keys     *KeysStore
 	settings *SettingsStore
 	deps     HooksDeps // 声明提取依赖(装配根注入;nil = 提取用空依赖)
+	// supportsCache 协议形态/能力探测缓存(值=条目携带探测所基于的 revision;Install/Delete/RegisterBuiltin 主动失效兜底)
+	supportsCache map[string]*supportsEntry
 	// OnLoad 包加载完成回调(导入/升级/启用;宿主注入执行 hooks.onLoad;previous=升级前 keys)
 	OnLoad func(pkg *Package, previous map[string]any)
 	// OnChange 任务声明变化回调(安装/启停/删除;宿主注入刷新调度)
@@ -42,13 +46,14 @@ type Registry struct {
 // NewRegistry 构造
 func NewRegistry(db *sql.DB) *Registry {
 	return &Registry{
-		db:       db,
-		pkgs:     map[string]*Package{},
-		disabled: map[string]bool{},
-		revs:     map[string]int64{},
-		builtins: map[string]BuiltinFactory{},
-		keys:     NewKeysStore(db),
-		settings: NewSettingsStore(db),
+		db:            db,
+		pkgs:          map[string]*Package{},
+		disabled:      map[string]bool{},
+		revs:          map[string]int64{},
+		builtins:      map[string]BuiltinFactory{},
+		supportsCache: map[string]*supportsEntry{},
+		keys:          NewKeysStore(db),
+		settings:      NewSettingsStore(db),
 	}
 }
 
@@ -64,6 +69,7 @@ func (r *Registry) RegisterBuiltin(name string, factory BuiltinFactory) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.builtins[name] = factory
+	delete(r.supportsCache, name)
 }
 
 // BuiltinFactory 取内置协议工厂
@@ -125,18 +131,15 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	if err := r.validateParts(pkg); err != nil {
 		return err
 	}
-	if pkg.Manifest.Parts.Hooks != nil {
-		r.mu.RLock()
-		deps := r.deps
-		r.mu.RUnlock()
-		decl, err := extractDeclaration(pkg, &deps)
-		if err != nil {
-			return fmt.Errorf("declaration: %w", err)
-		}
-		pkg.Declaration = decl
-	} else {
-		pkg.Declaration = map[string]any{}
+	// 声明提取对全部包执行(v2 声明统一:protocol/filter 文件的 settings 片段同样参与)
+	r.mu.RLock()
+	deps := r.deps
+	r.mu.RUnlock()
+	decl, err := extractDeclaration(pkg, &deps)
+	if err != nil {
+		return fmt.Errorf("declaration: %w", err)
 	}
+	pkg.Declaration = decl
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old, exists := r.pkgs[pkg.Manifest.Name]
@@ -167,6 +170,7 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	r.pkgs[pkg.Manifest.Name] = pkg
 	r.revs[pkg.Manifest.Name] = pkg.Revision
 	delete(r.disabled, pkg.Manifest.Name)
+	delete(r.supportsCache, pkg.Manifest.Name)
 	if r.OnLoad != nil {
 		go r.OnLoad(pkg, previous)
 	}
@@ -195,7 +199,6 @@ func (r *Registry) Inspect(data []byte) (map[string]any, error) {
 		"description": m.Description,
 		"version":     m.Version,
 		"filters":     filterNames(m),
-		"secretRefs":  pkg.SecretRefsUnion(),
 	}
 	if p := m.Parts.Protocol; p != nil {
 		out["protocol"] = p.Protocol
@@ -228,18 +231,18 @@ func filterNames(m *Manifest) []string {
 	return names
 }
 
-// validateParts 逐部件实例化校验(结构/绑定;不查实例配置 schema——配置归上游,漂移按请求期 502)
+// validateParts 逐部件实例化校验(结构/绑定;参数校验归调用方 ResolveParams,漂移按请求期 502)
 func (r *Registry) validateParts(pkg *Package) error {
 	if _, builtin := r.builtins[pkg.Manifest.Name]; builtin {
 		return nil
 	}
 	if p := pkg.Manifest.Parts.Protocol; p != nil {
-		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
 	for _, fp := range pkg.Manifest.Parts.Filters {
-		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
@@ -311,14 +314,39 @@ func (r *Registry) DeclaredProtocol(name string) string {
 	return p.Manifest.Parts.Protocol.Protocol
 }
 
+// supportsEntry 形态缓存条目(pkg 指针判定防 Delete+重装 ABA(revision 可重置,指针恒新);rev 冗余校验)
+type supportsEntry struct {
+	pkg *Package
+	rev int64
+	s   *pipeline.Supports
+}
+
 // ProtocolSupports 包协议的形态/能力支持(内置走工厂实例;JS 包实现推导:mapEvent=流式 mapResponse=非流式;不可判定 nil)
+// 探测含 JS 编译+VM 求值,结果按包缓存;条目与当前包指针/revision 不符即重探(升级后自愈,不依赖失效钩子)
 func (r *Registry) ProtocolSupports(name string) *pipeline.Supports {
 	r.mu.RLock()
 	p, ok := r.pkgs[name]
-	r.mu.RUnlock()
+	curRev := r.revs[name]
 	if !ok || p.Manifest.Parts.Protocol == nil {
+		r.mu.RUnlock()
 		return nil
 	}
+	if e, hit := r.supportsCache[name]; hit && e.pkg == p && e.rev == curRev {
+		r.mu.RUnlock()
+		return e.s
+	}
+	r.mu.RUnlock()
+
+	rev := p.Revision // 锁外探测基于的版本;写回时携带
+	s := r.probeSupports(name, p)
+	r.mu.Lock()
+	r.supportsCache[name] = &supportsEntry{pkg: p, rev: rev, s: s}
+	r.mu.Unlock()
+	return s
+}
+
+// probeSupports 实际探测(锁外执行,避免 JS 求值持锁;内置注册仅装配期,直读 map 无竞争面)
+func (r *Registry) probeSupports(name string, p *Package) *pipeline.Supports {
 	if factory, isBuiltin := r.builtins[name]; isBuiltin {
 		proto, err := factory(BuiltinDeps{})
 		if err != nil {
@@ -376,6 +404,7 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	delete(r.pkgs, name)
 	delete(r.revs, name)
 	delete(r.disabled, name)
+	delete(r.supportsCache, name)
 	r.keys.Delete(name)
 	r.settings.Delete(name)
 	if r.OnChange != nil {

@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 1,
+  "name": "anthropic-compatible",
+  "version": "2.0.0",
+  "compat": { "host": ">=2.0.0" },
+  "title": "Anthropic Messages 兼容",
+  "description": "anthropic-messages 槽位部件:入口 Anthropic Messages 原文 1:1 透传到上游 /v1/messages。上游地址=包参数 base_url,密钥=包级 keys api_key,模型行只声明模型名",
+  "parts": {
+    "protocol": {
+      "protocol": "anthropic-messages",
+      "features": ["tools", "vision"]
+    }
+  }
+}

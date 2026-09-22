@@ -11,11 +11,11 @@ export type ProtocolSlot = "openai-completions" | "anthropic-messages";
 /** 请求形态(由实现推导:导出 mapEvent = 支持流式;导出 mapResponse = 支持非流式) */
 export type Form = "streaming" | "non_streaming";
 
-/** 管道请求上下文(部件只读;私有数据用 state) */
+/** 管道请求上下文(部件只读;私有数据用 state;v2:无 target——连接信息在 factory config,密钥经 util.key) */
 export interface Context {
   requestId: string;
-  upstream: { name: string; models: string[] };
-  target: { id: string; name: string; baseUrl: string };
+  /** 模型行名(= 路由命中的模型名) */
+  upstream: { name: string };
   state: Record<string, unknown>;
   vars: { model: string; entryStream: boolean };
 }
@@ -29,6 +29,8 @@ export interface UpstreamRequest {
   body: string;
   /** 声明分发意图;须 ∈ 本部件 manifest 的 forms */
   stream: boolean;
+  /** 出站传输实例名(v2;空/缺省 = 内置 direct;命名实例在 config.yaml transports 定义) */
+  transport?: string | null;
 }
 
 /** 流式单帧(host 分帧;入方向恒为 {"event","data"} 信封) */
@@ -70,13 +72,10 @@ export interface FilterHooks {
 }
 
 /**
- * 部件 configSchema 实例值(factory 闭包捕获,不经 ctx)
- * 注意:config 另含 host 注入的 protocol(即本部件声明的协议槽),不得在 configSchema 中重复声明该键,
- * 否则 key 剥离会把注入值删掉而看不到声明槽
+ * 部件参数闭包(v2:ResolveParams 产物 = 声明 default ⊕ 包参数 ⊕ 模型行覆盖;factory 闭包捕获,不经 ctx)
+ * 注意:参数槽在本文件 module.exports.settings 声明(与读值代码同址);未声明槽不进 config
  */
 export interface PartConfig {
-  /** host 注入的协议槽值(= manifest 声明的 protocol) */
-  protocol: ProtocolSlot;
   [key: string]: unknown;
 }
 
@@ -105,9 +104,7 @@ export interface Util {
   isoNow(): string;
   template(s: string, vars: Record<string, unknown>): string;
   inspect(obj: unknown): string;
-  /** 当前 target.secrets 的键(ref 必须 ∈ 部件 secretRefs);缺键抛错 */
-  secret(ref: string): string;
-  /** 读包级 key 当前值;无值 undefined(protocol/filter 侧只读;hooks 任务写入) */
+  /** 读包级 key 当前值;无值 undefined;唯一凭据出口(v2 删除 util.secret;配置经管理 GUI 或 hooks 写入) */
   key(name: string): unknown;
   /**
    * 主动失效上报:aap 传输失效命令转发(仅失效当前绑定,不触发重试)

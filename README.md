@@ -2,7 +2,7 @@
 
 插件化 LLM API 反向代理:把私有协议(opencode/zcode 等)的模型网关转换为标准 chat/message API 供主流客户端使用。
 
-**执行模型**:单目标直发,恰一次上游请求——失败即终局透传(上游状态原样返回),无重试/无熔断(重试策略由调用方实现)。多目标仅作手动启停管理。
+**执行模型**:单路直发,恰一次上游请求——失败即终局透传(上游状态原样返回),无重试/无切换/无熔断(重试策略由调用方实现)。
 
 ## 快速开始
 
@@ -17,11 +17,13 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 
 ## 核心概念
 
-- **插件包(.aap,zip)**:三层插槽的可选实现集合——protocol(协议适配,主包必须)/ filters(请求修改,串行)/ targets 预设
-- **上游 = 包的实例化**:主包 + 附加包(filters)+ 实例配置(模型列表/目标/参数/启停),经管理 GUI 或 API 创建
+- **插件包(.aap,zip)**:三层插槽的可选实现集合——protocol(协议适配,模型行绑定包必须)/ filters(请求修改,串行);
+  参数槽由包内族文件的 settings 片段统一声明(同名槽拒装)
+- **参数双层级**:插件参数(包级,一次配置)+ 模型行 params(行级稀疏覆盖,保存期白名单校验);密钥独立成包级 keys(util.key 直读,轮换立即生效)
+- **模型行 = {name, plugin, params, enabled}**:行名即模型名;唯一键 (name, plugin)——同名模型可跨协议插件复用
 - **声明式单协议**:协议部件在 manifest 声明唯一协议槽(`openai-completions`|`anthropic-messages`)与可处理形态;
-  入口协议或形态不符时主体直接 400 拒绝,不做转换、不做兜底。管道权威格式 = 声明协议格式,无中间格式
-- **快速路径**:openai 入口 ∧ 内置协议 ∧ 空 filter 链 → 字节透传(不重序列化)
+  入口协议或形态不符时路由直接 400 拒绝(逐行注明拒因),不做转换、不做兜底。管道权威格式 = 声明协议格式,无中间格式
+- **快速路径**:openai 入口 ∧ 内置协议工厂 ∧ 空 filter 链 → 字节直发(不重序列化)
 - **runtime 池**:JS hook 粒度借还(池 = GOMAXPROCS,env `API_PROXY_POOL_SIZE` 逃生),排队 5s 超时 → 503
 
 ## 配置
@@ -38,13 +40,13 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 | builtin_dir | 内置插件目录(随分发的预置包;只补缺,不覆盖用户同名包) | `./builtin-plugins` |
 | history_retention_days | 请求历史保留天数(独立库 `history.db`;管理 GUI"请求历史"页;<0 永久保留,0 视为未配置) | 7 |
 | pack_dir | 非空 = 只打包不服务:把上述两级目录打成 `<包名>.aap` 落到此目录 | 空(服务模式) |
-| transports | 命名传输实例(direct/http_proxy/socks5),target 按名引用 | direct |
+| transports | 命名传输实例(direct/http_proxy/socks5),请求载体 transport 槽按名引用 | direct |
 
 ## 插件开发
 
 - 类型与宿主面:`sdk/ai-api-proxy.d.ts`;本地测试宿主:`sdk/test.js`(与 Go host 语义一致)
 - 起步模板:管理 GUI → 包 → 下载模板包;或 `GET /packages/template`
-- 示例包:`sdk/examples/gemini`(四 hook 全实现 + 编写说明)
+- 示例包:`sdk/examples/gemini`(v2:factory 形态 + settings 片段声明 + util.key)
 - 测试:`node --test plugins/*/test/*.test.js`(插件库根执行)
 - 管理包:导入(文件或 URL)/ 导出 / 卸载
 - 目录热载:`config.plugins_dir` 内 `.aap` 或包目录启动时自动导入(幂等);`config.pack_dir` 非空则只打包不服务

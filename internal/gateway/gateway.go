@@ -47,7 +47,6 @@ type Gateway struct {
 	Executor  *pipeline.Executor
 	Registry  *upstream.Registry
 	Metrics   *metrics.Recorder
-	Secrets   upstream.SecretsStore
 	// History 请求历史存储(nil = 不记录;装配可选)
 	History *history.Store
 }
@@ -79,10 +78,10 @@ func chatBody(declared, model, message string) ([]byte, error) {
 	})
 }
 
-// recordUpstream 上游与主包双维度计数(failed 口径:执行错误或上游状态 >=400)
-func (g *Gateway) recordUpstream(u *upstream.Upstream, failed bool) {
-	g.Metrics.IncUpstream(u.Name, failed)
-	g.Metrics.IncPackage(u.Base.Package, failed)
+// recordUpstream 模型行与主包双维度计数(failed 口径:执行错误或上游状态 >=400)
+func (g *Gateway) recordUpstream(m *upstream.Model, failed bool) {
+	g.Metrics.IncUpstream(m.Name, failed)
+	g.Metrics.IncPackage(m.Plugin, failed)
 }
 
 // ChatCompletions POST /v1/chat/completions(openai 入口)
@@ -101,18 +100,17 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	defer exit()
 	start := time.Now()
 	status := http.StatusOK
-	detail := "" // 模型/上游/插件路径等上下文(请求日志)
+	detail := "" // 模型/插件路径等上下文(请求日志)
 	model := ""
-	upstreamName := ""
+	rowName := ""
 	var reqBody []byte
-	var pickedTarget string // fastPath 实际选中目标(管道路径经 pctx.Target)
 	sw := &statusWriter{ResponseWriter: w, code: &status}
 	w = sw
 	defer func() {
 		log.Printf("request %s %s %s status=%d duration=%s%s",
 			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond), levelMark(status))
 		// 已知局限:panic 请求(recoverMW 兜底前)状态捕获不到,历史与日志同记默认值 200
-		g.recordHistory(r, model, upstreamName, pickedTarget, status, time.Since(start), reqBody, sw)
+		g.recordHistory(r, model, rowName, status, time.Since(start), reqBody, sw)
 	}()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	reqBody = truncateBody(body)
@@ -142,33 +140,31 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		detail += " reason=" + pickErr.Error() + " plugins=-"
 		switch pickErr {
 		case upstream.PickNoModel:
-			writeErrorWithModels(w, entry, status, "no upstream for model", g.availableModels(entry.Protocol))
+			writeErrorWithModels(w, entry, status, "no model row for model", g.availableModels(entry.Protocol))
 		case upstream.PickCapability:
 			writeError(w, entry, status, err.Error()+"; declared by "+g.slotSummary(model))
-		default:
-			writeError(w, entry, status, "no healthy target")
 		}
 		return
 	}
-	u := candidates[0].Upstream
-	upstreamName = u.Name
+	u := candidates[0].Model
+	rowName = u.Name
 	resolved, release, err := g.Registry.Resolve(u)
 	if err != nil {
 		log.Printf("resolve %s: %v", u.Name, err)
 		status = http.StatusBadGateway
-		detail += " upstream=" + u.Name
-		writeError(w, entry, http.StatusBadGateway, "resolve failed")
+		detail += " row=" + u.Name
+		// 配置类失败(required 槽缺失)注明槽名,便于管理员定位;其余细节只进日志
+		writeError(w, entry, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
-	detail += " upstream=" + u.Name + " target=" + firstTarget(resolved) +
-		" plugins=" + pluginPath(u.Name, resolved)
-	// 快速路径:openai 入口 ∧ 内置协议 ∧ 有效 filter 链空
+	detail += " row=" + u.Name + " plugins=" + pluginPath(resolved)
+	// 快速路径:openai 入口 ∧ 内置协议 ∧ filter 链空(直发直传,不经 JS 编解码)
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
-		g.fastPath(w, r, u, resolved, body, model, &pickedTarget)
+		g.fastPath(w, r, u, resolved, body, model, entryStream, &rowName)
 		return
 	}
-	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
+	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
 	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
@@ -176,13 +172,11 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
-		pickedTarget = pctx.Target.Name
 		status = runErrorStatus(err)
 		detail += " error=" + err.Error()
 		g.writeRunError(w, entry, pctx, resolved, err)
 		return
 	}
-	pickedTarget = pctx.Target.Name
 	if resp.Status >= 400 {
 		// 终局错误(mapError 已在 executor 应用;未实现则原样透传)
 		g.recordUpstream(u, true)
@@ -202,8 +196,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	_, _ = w.Write(resp.Body)
 }
 
-// recordHistory 落一条请求历史(响应已完成,不阻塞输出;流式不存响应体)
-func (g *Gateway) recordHistory(r *http.Request, model, upstreamName, target string, status int, took time.Duration, reqBody []byte, sw *statusWriter) {
+// recordHistory 落一条请求历史(响应已完成,不阻塞输出;流式不存响应体;target 字段语义废弃记 "-")
+func (g *Gateway) recordHistory(r *http.Request, model, rowName string, status int, took time.Duration, reqBody []byte, sw *statusWriter) {
 	if g.History == nil {
 		return
 	}
@@ -214,7 +208,7 @@ func (g *Gateway) recordHistory(r *http.Request, model, upstreamName, target str
 	}
 	g.History.Record(history.Entry{
 		Method: r.Method, Path: r.URL.Path, Model: model,
-		Upstream: upstreamName, Target: target,
+		Upstream: rowName, Target: "-",
 		Status: status, DurationMS: took.Milliseconds(), Stream: stream,
 		RequestBody: string(reqBody), ResponseBody: respBody,
 	})
@@ -273,7 +267,7 @@ func (s *statusWriter) Flush() {
 }
 
 // pluginPath 插件路径描述:协议包 + filter 链(与请求路由/处理顺序一致)
-func pluginPath(upstreamName string, resolved pipeline.Resolved) string {
+func pluginPath(resolved pipeline.Resolved) string {
 	parts := make([]string, 0, 1+len(resolved.Filters))
 	parts = append(parts, resolved.Protocol.Name())
 	for _, f := range resolved.Filters {
@@ -282,23 +276,13 @@ func pluginPath(upstreamName string, resolved pipeline.Resolved) string {
 	return strings.Join(parts, "->")
 }
 
-// firstTarget 首个启用目标名(无目标时为 -)
-func firstTarget(resolved pipeline.Resolved) string {
-	if len(resolved.Targets) == 0 {
-		return "-"
-	}
-	return resolved.Targets[0].Name
-}
-
 // pickStatus 路由失败状态(与 serve 内错误分支一致)
 func pickStatus(pickErr upstream.PickError) int {
 	switch pickErr {
 	case upstream.PickNoModel:
 		return http.StatusNotFound
-	case upstream.PickCapability:
-		return http.StatusBadRequest
 	default:
-		return http.StatusServiceUnavailable
+		return http.StatusBadRequest
 	}
 }
 
@@ -333,23 +317,20 @@ func (g *Gateway) writeRunError(w http.ResponseWriter, entry Entry, pctx *pipeli
 	writeError(w, entry, http.StatusBadGateway, err.Error())
 }
 
-// TestUpstream 管理连通性测试:首个模型发最小请求走完整管道(非流式;经 executor,OnTargetExit 照常计数)
+// TestUpstream 管理连通性测试:行名即模型名发最小请求走完整管道(非流式;诊断请求不计 metrics)
 // 返回延迟毫秒与错误说明;上游错误状态视为测试失败但计入延迟
-func (g *Gateway) TestUpstream(ctx context.Context, u *upstream.Upstream) (int64, string) {
-	if len(u.Models) == 0 {
-		return 0, "upstream has no models"
-	}
-	resolved, release, err := g.Registry.Resolve(u)
+func (g *Gateway) TestUpstream(ctx context.Context, m *upstream.Model) (int64, string) {
+	resolved, release, err := g.Registry.Resolve(m)
 	if err != nil {
 		return 0, "resolve: " + err.Error()
 	}
 	defer release()
-	raw, err := testBody(g.Registry.DeclaredProtocol(u), u.Models[0])
+	raw, err := testBody(g.Registry.DeclaredProtocol(m), m.Name)
 	if err != nil {
 		return 0, "marshal test body: " + err.Error()
 	}
-	pctx := pipeline.NewContext("admin-test-"+u.Name, pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
-		pipeline.Vars{Model: u.Models[0], EntryStream: false})
+	pctx := pipeline.NewContext("admin-test-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
+		pipeline.Vars{Model: m.Name, EntryStream: false})
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -366,31 +347,31 @@ func (g *Gateway) TestUpstream(ctx context.Context, u *upstream.Upstream) (int64
 	return latency, ""
 }
 
-// ChatTest 管理对话测试:用户指定模型与消息,走完整 pipeline(非流式;经 executor,OnTargetExit 照常计数)
+// ChatTest 管理对话测试:行名即模型名,用户给消息,走完整 pipeline(非流式)
 // 返回延迟、状态码、响应体与错误说明。两个判定口径分离:
 // 响应失败 = 执行错误或 resp.Status >= 300(对齐 TestUpstream 测试判定);
 // metrics failed = 执行错误或 resp.Status >= 400(与 serve 常规流量同口径,3xx 不计错误)。
-// 与 TestUpstream 的差异:本方法经 recordUpstream 计上游+包维度(诊断即流量,如实呈现)
-func (g *Gateway) ChatTest(ctx context.Context, u *upstream.Upstream, model, message string) (int64, int, []byte, string) {
-	resolved, release, err := g.Registry.Resolve(u)
+// 与 TestUpstream 的差异:本方法经 recordUpstream 计模型行+包维度(诊断即流量,如实呈现)
+func (g *Gateway) ChatTest(ctx context.Context, m *upstream.Model, message string) (int64, int, []byte, string) {
+	resolved, release, err := g.Registry.Resolve(m)
 	if err != nil {
 		return 0, 0, nil, "resolve: " + err.Error()
 	}
 	defer release()
-	raw, err := chatBody(g.Registry.DeclaredProtocol(u), model, message)
+	raw, err := chatBody(g.Registry.DeclaredProtocol(m), m.Name, message)
 	if err != nil {
 		return 0, 0, nil, "marshal chat body: " + err.Error()
 	}
-	pctx := pipeline.NewContext("admin-chat-"+u.Name, pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
-		pipeline.Vars{Model: model, EntryStream: false})
+	pctx := pipeline.NewContext("admin-chat-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
+		pipeline.Vars{Model: m.Name, EntryStream: false})
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
 	// metrics 口径:执行错误或上游状态 >=400 计错误
 	if err != nil || resp.Status >= 400 {
-		g.recordUpstream(u, true)
+		g.recordUpstream(m, true)
 	} else {
-		g.recordUpstream(u, false)
+		g.recordUpstream(m, false)
 	}
 	if err != nil {
 		return latency, 0, nil, err.Error()
@@ -426,59 +407,36 @@ func writeRaw(w http.ResponseWriter, status int, body []byte) {
 
 // 声明式单协议下无 pivot 中转:入口原文经 filters 直达 buildRequest,回程帧直接来自 mapEvent
 
-// fastPath 透传:body 原样,目标 secrets 注入 Authorization,不切换不刷新
-// pickedTarget 回写实际选中目标名(历史记录用;候选为空时不写)
-func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.Upstream, resolved pipeline.Resolved, body []byte, model string, pickedTarget *string) {
-	// 目标选择与引擎同源:enabled 候选内加权随机(resolved.Targets 已滤 disabled)
-	if len(resolved.Targets) == 0 {
-		writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no enabled target")
-		return
-	}
-	picked := g.Executor.PickTarget(resolved.Targets)
-	*pickedTarget = picked.Name
-	exitTarget := g.Metrics.EnterTarget(u.Name, picked.Name)
-	failed := false
-	defer func() { exitTarget(failed) }()
-	secrets, _ := g.Secrets.GetTargetSecrets(u.Name, picked.Name)
-	key := secrets["api_key"]
-	if key == "" {
-		failed = true
-		g.recordUpstream(u, true)
+// fastPath 直发直传:body 原样,内置协议组请求(config+key),不经 JS 编解码,不切换不刷新
+// rowName 回写实际服务行名(历史记录用)
+func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, m *upstream.Model, resolved pipeline.Resolved, body []byte, model string, entryStream bool, rowName *string) {
+	*rowName = m.Name
+	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: m.Name},
+		pipeline.Vars{Model: model, EntryStream: entryStream})
+	req, err := resolved.Protocol.BuildRequest(pctx, body)
+	if err != nil {
+		g.recordUpstream(m, true)
 		g.Metrics.IncError()
-		writeError(w, g.OpenAI, http.StatusBadGateway, "target api_key missing")
+		writeError(w, g.OpenAI, http.StatusBadGateway, err.Error())
 		return
 	}
-	trName := picked.Transport
+	trName := req.Transport
 	if trName == "" {
 		trName = pipeline.TransportRef
 	}
 	tr, ok := g.Executor.Transports(trName)
 	if !ok {
-		failed = true
-		g.recordUpstream(u, true)
+		g.recordUpstream(m, true)
 		g.Metrics.IncError()
 		writeError(w, g.OpenAI, http.StatusBadGateway, "transport missing")
 		return
 	}
-	url := strings.TrimSuffix(picked.BaseURL, "/") + "/v1/chat/completions"
-	preq := pipeline.Request{
-		URL:    url,
-		Method: "POST",
-		Headers: map[string]string{
-			"Content-Type":  "application/json",
-			"Authorization": builtin.BearerPrefix + key,
-		},
-		Body:   body,  // 原样透传,不重序列化
-		Model:  model, // ipp 供给方会话亲和素材(非 ipp 传输忽略)
-		APIKey: key,   // 会话亲和素材之二
-	}
-	tresp, err := tr.RoundTrip(r.Context(), preq)
+	tresp, err := tr.RoundTrip(r.Context(), req)
 	if err != nil {
-		failed = true
-		g.recordUpstream(u, true)
+		g.recordUpstream(m, true)
 		if r.Context().Err() == nil {
 			g.Metrics.IncError()
-			// 供给方无可用出口/节点并发上限(rep=1/2):503(临时性,调用方可换 upstream 重试);其余上游不可达:502
+			// 供给方无可用出口/节点并发上限(rep=1/2):503(临时性,调用方可换模型重试);其余上游不可达:502
 			if errors.Is(err, ipprovider.ErrNoExits) || errors.Is(err, transport.ErrNoEgress503) {
 				writeError(w, g.OpenAI, http.StatusServiceUnavailable, "no available egress")
 				return
@@ -489,11 +447,10 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 		return // 客户端断开:Cancelled 不计 errors
 	}
 	if tresp.Status >= 400 {
-		failed = true
-		g.recordUpstream(u, true)
+		g.recordUpstream(m, true)
 		g.Metrics.IncError()
 	} else {
-		g.recordUpstream(u, false)
+		g.recordUpstream(m, false)
 	}
 	if isEventStreamCT(tresp.Headers["Content-Type"]) {
 		g.passthroughStream(w, tresp)
@@ -585,29 +542,24 @@ func (g *Gateway) ModelByID(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"type": "not_found", "message": "model not found"}})
 }
 
-// availableModels 聚合启用上游模型声明去重(稳定序;协议非空时仅计声明该协议的上游)
+// availableModels 聚合启用模型行名去重(稳定序;协议非空时仅计声明该协议的行)
 func (g *Gateway) availableModels(protocol string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, u := range g.Registry.List() {
-		if !u.Enabled {
+	for _, m := range g.Registry.List() {
+		if !m.Enabled {
 			continue
 		}
-		if protocol != "" && g.Registry.DeclaredProtocol(u) != protocol {
+		if protocol != "" && g.Registry.DeclaredProtocol(m) != protocol {
 			continue
 		}
-		for _, m := range u.Models {
-			if !seen[m] {
-				seen[m] = true
-				out = append(out, m)
-			}
+		if !seen[m.Name] {
+			seen[m.Name] = true
+			out = append(out, m.Name)
 		}
 	}
 	return out
 }
-
-// allModels 聚合启用上游模型声明去重(不分协议)
-func (g *Gateway) allModels() []string { return g.availableModels("") }
 
 // sseEventOut 输出事件(event 非空即写 event 行;done 仅 openai 收尾用)
 type sseEventOut struct {
@@ -643,15 +595,15 @@ func featsToStrings(feats []convert.Feature) []string {
 	return out
 }
 
-// slotSummary 声明该模型的启用上游所持协议槽(去重稳定序;诊断用)
+// slotSummary 声明该模型名的启用行所持协议槽(去重稳定序;诊断用)
 func (g *Gateway) slotSummary(model string) string {
 	seen := map[string]bool{}
 	out := ""
-	for _, u := range g.Registry.List() {
-		if !u.Enabled || !containsModel(u.Models, model) {
+	for _, m := range g.Registry.List() {
+		if !m.Enabled || m.Name != model {
 			continue
 		}
-		slot := u.Name + "(" + g.Registry.DeclaredProtocol(u) + ")"
+		slot := m.Name + "@" + m.Plugin + "(" + g.Registry.DeclaredProtocol(m) + ")"
 		if seen[slot] {
 			continue
 		}
@@ -665,16 +617,6 @@ func (g *Gateway) slotSummary(model string) string {
 		return "none"
 	}
 	return out
-}
-
-// containsModel 模型是否在该上游声明内
-func containsModel(models []string, model string) bool {
-	for _, m := range models {
-		if m == model {
-			return true
-		}
-	}
-	return false
 }
 
 // pipelineStatus 非流式响应状态(0 → 200)

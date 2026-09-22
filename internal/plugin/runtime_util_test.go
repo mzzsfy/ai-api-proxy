@@ -139,13 +139,13 @@ func TestUtil_Template(t *testing.T) {
 	}
 }
 
-func TestUtil_SecretMissingThrowsWithPart(t *testing.T) {
-	// 缺键抛错,错误注明包名与键名
+func TestUtil_KeyMissingThrowsWithPart(t *testing.T) {
+	// v2:util.secret 删除;key 无 keys 上下文时抛错,错误注明包名
 	vm := goja.New()
 	bindUtil(vm, HostDeps{PackageName: "pkg-a"})
-	_, err := vm.RunString(`util.secret("nope")`)
+	_, err := vm.RunString(`util.key("nope")`)
 	if err == nil || !strings.Contains(err.Error(), "pkg-a") || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("secret error: %v", err)
+		t.Fatalf("key error: %v", err)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestUtil_InspectMasksAndTruncates(t *testing.T) {
 	vm := goja.New()
 	bindUtil(vm, HostDeps{
 		PackageName: "p",
-		TargetSecretValues: func(string) map[string]string {
+		PackageKeyValues: func() map[string]string {
 			return map[string]string{"api_key": "sk-xyz"}
 		},
 	})

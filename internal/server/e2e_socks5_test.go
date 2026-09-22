@@ -166,17 +166,20 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = app.Close() })
 	ctx := context.Background()
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{
+		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	u := &upstream.Upstream{
-		Name: "g5-socks5", Enabled: true,
-		Base:   upstream.PackageRef{Package: "js-openai"},
-		Models: []string{"m-socks5"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: "sx", Enabled: true,
-			Secrets: map[string]string{"api_key": upstreamAPIKey}}},
+	if err := app.AdminDeps.Packages.Keys().Merge("js-openai", map[string]any{"api_key": upstreamAPIKey}); err != nil {
+		t.Fatal(err)
 	}
-	if err := app.Registry.Save(ctx, u); err != nil {
+	if _, err := app.AdminDeps.Packages.Settings().Put("js-openai", plugin.PutInput{Config: map[string]any{
+		"base_url": upSrv.URL, "protocol": "openai-completions", "transport": "sx"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Registry.Save(ctx, &upstream.Model{
+		Name: "m-socks5", Plugin: "js-openai", Enabled: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	gateway := httptest.NewServer(app.Mux)

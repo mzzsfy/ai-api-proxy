@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -20,40 +19,17 @@ import (
 // MaxStorageValue storage 单键上限
 const MaxStorageValue = 64 * 1024
 
-// TargetCursor 当前 target 跟踪(每部件实例一份,hook 调用时更新)
-type TargetCursor struct {
-	mu   sync.Mutex
-	name string
-}
-
-// Set 更新当前 target
-func (t *TargetCursor) Set(name string) { t.mu.Lock(); t.name = name; t.mu.Unlock() }
-
-// Get 读取当前 target
-func (t *TargetCursor) Get() string { t.mu.Lock(); defer t.mu.Unlock(); return t.name }
-
-// HostDeps 部件宿主依赖(注入 util)
+// HostDeps 部件宿主依赖(注入 util;v2:无目标凭据,密钥唯一出口 = util.key 包级)
 type HostDeps struct {
 	PackageName string
-	Cursor      *TargetCursor
-	// TargetSecrets 按 (target 名, 键) 解析凭据;"当前 target" 由 Cursor 承载
-	TargetSecrets func(target, key string) (string, bool)
-	// TargetSecretValues 当前 target 全量凭据值(inspect/log 脱敏用;可空)
-	TargetSecretValues func(target string) map[string]string
 	// PackageKey 包级 key 只读(实时;hooks 任务写入;可空=util.key 报错)
 	PackageKey func(name string) (any, bool)
+	// PackageKeyValues 包级 keys 全量值(inspect/log 脱敏用;可空)
+	PackageKeyValues func() map[string]string
 	// TransportEvict 主动失效上报(管理命令转发;仅失效,不触发重试;可空=util.evict 报错)
 	TransportEvict func(transport, scope, value string) error
 	Storage        StorageKV
 	Log            func(level, msg string)
-}
-
-// currentTarget 当前 target 名
-func (d *HostDeps) currentTarget() string {
-	if d.Cursor == nil {
-		return ""
-	}
-	return d.Cursor.Get()
 }
 
 // StorageKV 部件存储(ns=包名,由 host 固定)
@@ -179,18 +155,7 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		b, _ := json.Marshal(v.Export())
 		return maskSecrets(deps, string(b))
 	})
-	// secret:唯一凭据出口;键存在返回值(可为空串=显式匿名),键缺失抛错;"当前 target" 由 adapter 维护
-	_ = util.Set("secret", func(ref string) (string, error) {
-		if deps.TargetSecrets == nil {
-			return "", fmt.Errorf("secret %q: no target context (package %s)", ref, deps.PackageName)
-		}
-		v, ok := deps.TargetSecrets(deps.currentTarget(), ref)
-		if !ok {
-			return "", fmt.Errorf("secret %q missing in target secrets (package %s)", ref, deps.PackageName)
-		}
-		return v, nil
-	})
-	// key:包级 key 只读出口(hooks 任务写入)
+	// key:包级密钥唯一出口(v2;轮换语义 current/previous 由 keys 存储承载)
 	_ = util.Set("key", func(name string) (any, error) {
 		if deps.PackageKey == nil {
 			return nil, fmt.Errorf("key %q: no keys context (package %s)", name, deps.PackageName)
@@ -212,6 +177,7 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		return true, nil
 	})
 	_ = vm.Set("util", util)
+	injectSettingBuilders(vm)
 	// log(输出经 secrets 掩码)
 	logObj := vm.NewObject()
 	for _, lvl := range []string{"info", "warn", "error"} {
@@ -250,6 +216,22 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		_ = st.Set("delete", func(string) {})
 	}
 	_ = vm.Set("storage", st)
+}
+
+// injectSettingBuilders setting 声明构建器注入(统一求值环境:片段声明与工厂同文件,v2 声明统一)
+func injectSettingBuilders(vm *goja.Runtime) {
+	b := map[string]any{}
+	for _, typ := range []string{"string", "int", "number", "bool", "enum"} {
+		t := typ
+		b[t] = func(opts map[string]any) map[string]any {
+			out := map[string]any{"type": t}
+			for k, v := range opts {
+				out[k] = v
+			}
+			return out
+		}
+	}
+	_ = vm.Set("setting", b)
 }
 
 // instantiate 运行部件:CommonJS 包装 + factory 检测(config 闭包注入)
@@ -296,7 +278,7 @@ func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*
 	if err != nil {
 		return nil, err
 	}
-	return &hookInstance{vm: vm, hooks: hooks, cursor: deps.Cursor}, nil
+	return &hookInstance{vm: vm, hooks: hooks}, nil
 }
 
 // ProbeHooks 结构探测:求值一次取钩子存在性(不进池;对象导出形态可探测)
@@ -526,10 +508,10 @@ func renderTemplate(s string, vars map[string]any) string {
 // secretMaskOutput 凭据值在输出中的替换串
 const secretMaskOutput = "***"
 
-// maskSecrets inspect/log 输出统一处理:当前 target 凭据值替换 + 截断
+// maskSecrets inspect/log 输出统一处理:包级 keys 值替换 + 截断
 func maskSecrets(deps HostDeps, s string) string {
-	if deps.TargetSecretValues != nil {
-		for _, val := range deps.TargetSecretValues(deps.currentTarget()) {
+	if deps.PackageKeyValues != nil {
+		for _, val := range deps.PackageKeyValues() {
 			if val != "" {
 				s = strings.ReplaceAll(s, val, secretMaskOutput)
 			}

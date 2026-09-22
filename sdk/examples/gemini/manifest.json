@@ -1,23 +1,13 @@
 {
   "manifestVersion": 1,
   "name": "gemini",
-  "version": "0.1.0",
-  "compat": { "host": ">=0.1.0" },
+  "version": "2.0.0",
+  "compat": { "host": ">=2.0.0" },
   "description": "Google Gemini GenerateContent 上游适配:openai-completions 槽位部件(entry ↔ generateContent/streamGenerateContent 双向翻译;x-goog-api-key 鉴权 + systemInstruction 提升 + finishReason/usage 映射;纯文本面)",
   "parts": {
     "protocol": {
       "protocol": "openai-completions",
-      "features": [],
-      "secretRefs": ["api_key"],
-      "configSchema": {
-        "type": "object",
-        "properties": {
-          "apiVersion": {
-            "type": "string",
-            "description": "API 版本路径段(默认 v1beta;写死单版本会随上游弃用失效)"
-          }
-        }
-      }
+      "features": []
     }
   }
 }

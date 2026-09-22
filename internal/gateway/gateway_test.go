@@ -24,27 +24,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// memSecrets 内存凭据
-type memSecrets struct{ m map[string]map[string]string }
-
-func (s *memSecrets) UpsertTargetSecrets(upstream, target string, secrets map[string]string) error {
-	k := upstream + "/" + target
-	if s.m[k] == nil {
-		s.m[k] = map[string]string{}
-	}
-	for kk, v := range secrets {
-		s.m[k][kk] = v
-	}
-	return nil
-}
-func (s *memSecrets) GetTargetSecrets(upstream, target string) (map[string]string, bool) {
-	v, ok := s.m[upstream+"/"+target]
-	return v, ok
-}
-func (s *memSecrets) DeleteTargetSecrets(upstream, target string) {
-	delete(s.m, upstream+"/"+target)
-}
-
 // fixture 完整网关环境
 type fixture struct {
 	g           *Gateway
@@ -56,6 +35,22 @@ type fixture struct {
 	seenCount   int
 }
 
+// v2Ddl 新模型行表(测试库)
+func v2Ddl() []string {
+	return []string{
+		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
+			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
+		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, base_package TEXT NOT NULL,
+			params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (name, base_package))`,
+		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
+		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE package_settings (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
+	}
+}
+
+// newFixture 完整网关环境(v2:包参数 base_url + 包级 key api_key)
 func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody string) *fixture {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/t.db")
@@ -63,17 +58,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, ddl := range []string{
-		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
-			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
-		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
-			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
-			params_json TEXT NOT NULL DEFAULT '{}', filter_params_json TEXT NOT NULL DEFAULT '{}',
-			filters_enabled_json TEXT NOT NULL DEFAULT '{}', strategy_json TEXT NOT NULL DEFAULT '{}',
-			enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
-		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
-	} {
+	for _, ddl := range v2Ddl() {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatal(err)
 		}
@@ -90,23 +75,28 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		_, _ = w.Write([]byte(upstreamBody))
 	}))
 	t.Cleanup(f.upstreamSrv.Close)
-	// 包与上游(名字=内置协议名,走 Go 内置工厂注册)
+	// 包与模型行(名字=内置协议名,走 Go 内置工厂注册)
 	pkgs := plugin.NewRegistry(db)
 	pkgs.RegisterBuiltin("openai-compatible", func(deps plugin.BuiltinDeps) (pipeline.Protocol, error) {
-		return &builtin.Protocol{TargetSecrets: deps.TargetSecrets}, nil
+		return &builtin.Protocol{Config: deps.Config, PackageKey: deps.PackageKey}, nil
 	})
 	manifest := `{"manifestVersion":1,"name":"openai-compatible","version":"1","parts":{
-		"protocol":{"protocol":"openai-completions","features":["tools","vision"],"secretRefs":["api_key"]}}}`
-	protoSrc := `module.exports = {};`
+		"protocol":{"protocol":"openai-completions","features":["tools","vision"]}}}`
+	protoSrc := `module.exports = {
+		buildRequest: function(){return {url:"u"}}, mapEvent: function(ctx,e){return e;}, mapResponse: function(ctx,b){return b;} };
+	module.exports.settings = { base_url: setting.string({required: true}) };`
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: protoSrc})); err != nil {
 		t.Fatal(err)
 	}
-	secrets := &memSecrets{m: map[string]map[string]string{}}
-	reg := upstream.NewRegistry(db, pkgs, secrets)
-	u := &upstream.Upstream{Name: "u1", Enabled: true, Base: upstream.PackageRef{Package: "openai-compatible"},
-		Models: []string{"test-model"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: f.upstreamSrv.URL, Enabled: true,
-			Secrets: map[string]string{"api_key": "sk-live-key"}}}}
+	// 包级密钥 + 包参数(连接信息在包,不在模型行)
+	if err := pkgs.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-live-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pkgs.Settings().Put("openai-compatible", plugin.PutInput{Config: map[string]any{"base_url": f.upstreamSrv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	reg := upstream.NewRegistry(db, pkgs)
+	u := &upstream.Model{Name: "test-model", Enabled: true, Plugin: "openai-compatible"}
 	if err := reg.Save(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +112,6 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		Executor:  &pipeline.Executor{Transports: trMgr.Get},
 		Registry:  reg,
 		Metrics:   metrics.NewRecorder(),
-		Secrets:   secrets,
 	}
 	return f
 }
@@ -157,7 +146,7 @@ func (f *fixture) installJSProtocol(t *testing.T) {
 	f.installJSProtocolAs(t, "openai-completions")
 }
 
-// installJSProtocolAs 装 JS 协议包并换装注册表(协议可指定;形态由实现推导)
+// installJSProtocolAs 装 JS 协议包并换装注册表(协议可指定;形态由实现推导;v2 连接=包参数,密钥=包级 keys)
 func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/js.db")
@@ -165,51 +154,48 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, ddl := range []string{
-		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
-			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
-		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
-			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
-			params_json TEXT NOT NULL DEFAULT '{}', filter_params_json TEXT NOT NULL DEFAULT '{}',
-			filters_enabled_json TEXT NOT NULL DEFAULT '{}', strategy_json TEXT NOT NULL DEFAULT '{}',
-			enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
-	} {
+	for _, ddl := range v2Ddl() {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatal(err)
 		}
 	}
 	pkgs := plugin.NewRegistry(db)
 	manifest := `{"manifestVersion":1,"name":"js-proto","version":"1","parts":{
-		"protocol":{"protocol":"` + protocol + `","features":["tools","vision"],"secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"` + protocol + `","features":["tools","vision"]}}}`
 	src := `module.exports = function (config) {
 		return { buildRequest: function (ctx, entry) {
-			var key = util.secret("api_key");
-			return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
+			var key = util.key("api_key");
+			return { url: config.base_url + "/v1/chat/completions", method: "POST",
 				headers: {"Content-Type": "application/json", "Authorization": "Bearer " + key},
 				body: entry, stream: ctx.vars.entryStream };
 		},
 		mapResponse: function (ctx, b) { return b; },
 		mapEvent: function (ctx, e) { var f = JSON.parse(e); return JSON.stringify([JSON.parse(f.data)]); } };
-	};`
+	};
+	module.exports.settings = { base_url: setting.string({required: true}) };`
 	if protocol == "anthropic-messages" {
 		src = `module.exports = function (config) {
 		return { buildRequest: function (ctx, entry) {
-			var key = util.secret("api_key");
-			return { url: ctx.target.baseUrl + "/v1/messages", method: "POST",
+			var key = util.key("api_key");
+			return { url: config.base_url + "/v1/messages", method: "POST",
 				headers: {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"},
 				body: entry, stream: ctx.vars.entryStream };
 		},
 		mapResponse: function (ctx, b) { return b; } };
-	};`
+	};
+	module.exports.settings = { base_url: setting.string({required: true}) };`
 	}
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})); err != nil {
 		t.Fatal(err)
 	}
-	reg := upstream.NewRegistry(db, pkgs, f.g.Secrets)
-	u := &upstream.Upstream{Name: "u1", Enabled: true, Base: upstream.PackageRef{Package: "js-proto"},
-		Models: []string{"test-model"},
-		Targets: []upstream.Target{{Name: "t1", BaseURL: f.upstreamSrv.URL, Enabled: true,
-			Secrets: map[string]string{"api_key": "sk-live-key"}}}}
+	if err := pkgs.Keys().Merge("js-proto", map[string]any{"api_key": "sk-live-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pkgs.Settings().Put("js-proto", plugin.PutInput{Config: map[string]any{"base_url": f.upstreamSrv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	reg := upstream.NewRegistry(db, pkgs)
+	u := &upstream.Model{Name: "test-model", Enabled: true, Plugin: "js-proto"}
 	if err := reg.Save(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
@@ -318,11 +304,11 @@ func TestMessages_CapabilityMismatch400(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"type":"error"`) {
 		t.Fatalf("anthropic error shape: %s", w.Body.String())
 	}
-	// 逐上游原因(槽不符)+ 模型声明方汇总,用户可据此换入口或换上游
-	if !strings.Contains(w.Body.String(), "u1 declares openai-completions") {
+	// 逐行原因(槽不符)+ 模型声明方汇总,用户可据此换入口或换插件
+	if !strings.Contains(w.Body.String(), "test-model@openai-compatible declares openai-completions") {
 		t.Fatalf("reason missing: %s", w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "declared by u1(openai-completions)") {
+	if !strings.Contains(w.Body.String(), "declared by test-model@openai-compatible(openai-completions)") {
 		t.Fatalf("slot summary missing: %s", w.Body.String())
 	}
 }
@@ -436,7 +422,7 @@ func TestHistory_RecordsFastPath(t *testing.T) {
 	if e.Method != "POST" || e.Path != "/v1/chat/completions" || e.Model != "test-model" {
 		t.Fatalf("basic fields: %+v", e)
 	}
-	if e.Upstream != "u1" || e.Target != "t1" {
+	if e.Upstream != "test-model" || e.Target != "-" {
 		t.Fatalf("routing fields: %+v", e)
 	}
 	if e.Status != 200 || e.DurationMS < 0 || e.Stream {
@@ -506,7 +492,7 @@ func TestHistory_RecordsPipelinePath(t *testing.T) {
 	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"test-model","messages":[]}`)))
 	e := lastHistory(t, h)
-	if e.Status != 200 || e.Upstream != "u1" || e.Target != "t1" {
+	if e.Status != 200 || e.Upstream != "test-model" || e.Target != "-" {
 		t.Fatalf("pipeline record: %+v", e)
 	}
 }
@@ -533,10 +519,9 @@ func TestHistory_PickFailureEmptyRouting(t *testing.T) {
 	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"no-such","messages":[]}`)))
 	e := lastHistory(t, h)
-	if e.Status != 404 || e.Upstream != "" || e.Target != "" || e.Model != "no-such" {
+	if e.Status != 404 || e.Upstream != "" || e.Target != "-" || e.Model != "no-such" {
 		t.Fatalf("pick failure record: %+v", e)
-	}
-}
+	}}
 
 func TestHistory_AbsentNoPanic(t *testing.T) {
 	// Given 未装配历史库 When 请求 Then 正常服务不 panic

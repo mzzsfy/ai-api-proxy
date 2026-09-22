@@ -17,7 +17,6 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
 // ─── 真实二进制进程端到端:config.yaml 启动 + 管理 API 装配 + 4 组真实请求 ───
@@ -72,6 +71,41 @@ func postAdmin(t *testing.T, client *http.Client, base, path, contentType string
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", contentType)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, b
+}
+
+// getAdmin 管理 API GET 调用
+func getAdmin(t *testing.T, client *http.Client, base, path string) (int, []byte) {
+	t.Helper()
+	resp, err := client.Get(base + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, b
+}
+
+// putAdmin 管理 API PUT 调用
+func putAdmin(t *testing.T, client *http.Client, base, path string, body []byte) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, base+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +174,7 @@ transports:
 		t.Fatalf("login %d: %s", status, body)
 	}
 	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
-		aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc}))
+		aapZip(t, jsProtoManifest, map[string]string{plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc}))
 	if status != http.StatusOK {
 		t.Fatalf("install js-openai %d: %s", status, body)
 	}
@@ -149,37 +183,48 @@ transports:
 	if status != http.StatusOK {
 		t.Fatalf("install js-anthropic %d: %s", status, body)
 	}
-	status, body = postAdmin(t, client, base, "/admin/api/packages", "application/zip",
-		aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc}))
-	if status != http.StatusOK {
-		t.Fatalf("install rewrite-model %d: %s", status, body)
+	// v2 装配:包级 keys → 包参数(乐观锁 version)→ 模型行
+	for _, pkg := range []string{"js-openai", "js-anthropic"} {
+		status, body = putAdmin(t, client, base, "/admin/api/packages/"+pkg+"/keys/api_key",
+			[]byte(`{"value":"`+upstreamAPIKey+`"}`))
+		if status != http.StatusOK {
+			t.Fatalf("put key %s %d: %s", pkg, status, body)
+		}
+		proto := "openai-completions"
+		if pkg == "js-anthropic" {
+			proto = "anthropic-messages"
+		}
+		_, vbody := getAdmin(t, client, base, "/admin/api/packages/"+pkg+"/settings")
+		var view struct {
+			Version int64 `json:"version"`
+		}
+		if err := json.Unmarshal(vbody, &view); err != nil {
+			t.Fatalf("settings view %s: %v", pkg, err)
+		}
+		cfgBody, _ := json.Marshal(map[string]any{
+			"config":  map[string]any{"base_url": upSrv.URL, "protocol": proto},
+			"version": view.Version,
+		})
+		status, body = putAdmin(t, client, base, "/admin/api/packages/"+pkg+"/settings", cfgBody)
+		if status != http.StatusOK {
+			t.Fatalf("put settings %s %d: %s", pkg, status, body)
+		}
 	}
-	mkUpstream := func(name, model, basePkg, transport string, withFilter bool) {
-		u := &upstream.Upstream{
-			Name: name, Enabled: true,
-			Base:   upstream.PackageRef{Package: basePkg},
-			Models: []string{model},
-			Targets: []upstream.Target{{Name: "t1", BaseURL: upSrv.URL, Transport: transport, Enabled: true,
-				Secrets: map[string]string{"api_key": upstreamAPIKey}}},
-		}
-		if withFilter {
-			u.Extras = []upstream.PackageRef{{Package: "rewrite-model"}}
-			u.FilterParams = map[string]map[string]any{"rewrite-model/rewrite": {"model": upstreamRewriteM}}
-		}
-		b, err := json.Marshal(u)
+	mkRow := func(name, pkg string, params map[string]any) {
+		b, err := json.Marshal(map[string]any{"name": name, "plugin": pkg, "enabled": true, "params": params})
 		if err != nil {
 			t.Fatal(err)
 		}
-		st, bd := postAdmin(t, client, base, "/admin/api/upstreams", "application/json", b)
+		st, bd := postAdmin(t, client, base, "/admin/api/models", "application/json", b)
 		if st != http.StatusOK {
 			t.Fatalf("save %s %d: %s", name, st, bd)
 		}
 	}
-	mkUpstream("g1-direct-nofilter", "m-direct", "js-openai", "", false)
-	mkUpstream("g2-proxy-nofilter", "m-proxy", "js-openai", "px", false)
-	mkUpstream("g3-direct-filter", "mf-direct", "js-openai", "", true)
-	mkUpstream("g4-proxy-filter", "mf-proxy", "js-openai", "px", true)
-	mkUpstream("g5-anthropic", "m-anthropic", "js-anthropic", "", false)
+	mkRow("m-direct", "js-openai", nil)
+	mkRow("m-proxy", "js-openai", map[string]any{"transport": "px"})
+	mkRow("mf-direct", "js-openai", map[string]any{"model": upstreamRewriteM})
+	mkRow("mf-proxy", "js-openai", map[string]any{"transport": "px", "model": upstreamRewriteM})
+	mkRow("m-anthropic", "js-anthropic", nil)
 
 	// When 5 组 × 入口/流形态 全部真实 HTTP 请求
 	// Then 全部场景断言通过

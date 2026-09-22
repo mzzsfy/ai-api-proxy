@@ -59,18 +59,21 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 const goodManifest = `{"manifestVersion":1,"name":"demo","version":"1.0.0","parts":{
-	"protocol":{"protocol":"openai-completions","features":["tools"],"secretRefs":["api_key"]},
-	"filters":[{"name":"identity","configSchema":{"type":"object"}}]}}`
+	"protocol":{"protocol":"openai-completions","features":["tools"]},
+	"filters":[{"name":"identity"}]}}`
 
-const protoSrc = `module.exports = {
-	buildRequest: function (ctx, entry) {
-		return { url: ctx.target.baseUrl + "/v1/chat/completions", method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.secret("api_key") },
-			body: entry, stream: ctx.vars.entryStream };
-	},
-	mapEvent: function (ctx, e) { return JSON.stringify([{ chunk: e }]); },
-	mapResponse: function (ctx, b) { return b; }
-};`
+const protoSrc = `module.exports = function (config) {
+	return {
+		buildRequest: function (ctx, entry) {
+			return { url: config.base_url + "/v1/chat/completions", method: "POST",
+				headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key("api_key") },
+				body: entry, stream: ctx.vars.entryStream };
+		},
+		mapEvent: function (ctx, e) { return JSON.stringify([{ chunk: e }]); },
+		mapResponse: function (ctx, b) { return b; }
+	};
+};
+module.exports.settings = { base_url: setting.string({ required: true }) };`
 
 const filterSrc = `module.exports = function (config) {
 	return {
@@ -80,6 +83,7 @@ const filterSrc = `module.exports = function (config) {
 	};
 };`
 
+// mustInstall 构造并安装测试包(v2:连接信息在包参数,密钥走包级 keys)
 func mustInstall(t *testing.T, r *Registry) *Package {
 	t.Helper()
 	if err := r.Install(context.Background(), buildAAP(t, goodManifest, map[string]string{
@@ -95,29 +99,44 @@ func mustInstall(t *testing.T, r *Registry) *Package {
 	return pkg
 }
 
-// newProtoCtx 构造带 target 的管道上下文
+// newProtoCtx 构造管道上下文(v2:无目标)
 func newProtoCtx() *pipeline.PipelineContext {
-	c := pipeline.NewContext("r1", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
-	c.Target = pipeline.Target{Name: "t1", BaseURL: "https://up.test", SecretsRef: "u/t1"}
-	return c
+	return pipeline.NewContext("r1", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
+}
+
+// keyValues 包级 keys 值视图(脱敏用)
+func keyValues(kv func(string) (any, bool)) func() map[string]string {
+	return func() map[string]string {
+		out := map[string]string{}
+		if v, ok := kv("api_key"); ok {
+			if s, ok := v.(string); ok {
+				out["api_key"] = s
+			}
+		}
+		return out
+	}
 }
 
 func TestParseAndInstantiate_FullFlow(t *testing.T) {
-	// Given 合法包 When Parse+NewProtocol Then hook 可执行且 util.secret 注入 Bearer
+	// Given 合法包(参数预校验)+ 包级 key When NewProtocol+BuildRequest Then 参数闭包与 util.key 注入 Bearer
 	r := NewRegistry(testDB(t))
 	pkg := mustInstall(t, r)
-	proto, err := NewProtocol(pkg, nil, func(target, key string) (string, bool) {
-		if key == "api_key" {
+	apiKey := func(name string) (any, bool) {
+		if name == "api_key" {
 			return "sk-live", true
 		}
-		return "", false
-	}, nil, nil, nil, nil)
+		return nil, false
+	}
+	proto, err := NewProtocol(pkg, map[string]any{"base_url": "https://up.test"}, nil, apiKey, keyValues(apiKey), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req, err := proto.BuildRequest(newProtoCtx(), []byte(`{"model":"m"}`))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if req.URL != "https://up.test/v1/chat/completions" {
+		t.Fatalf("url: %s", req.URL)
 	}
 	if req.Headers["Authorization"] != "Bearer sk-live" {
 		t.Fatalf("auth: %s", req.Headers["Authorization"])
@@ -171,53 +190,6 @@ func TestValidate_SyntaxErrorLineReported(t *testing.T) {
 	}
 }
 
-func TestDrift_RequiredMissingRejectedAtInstantiate(t *testing.T) {
-	// Given configSchema required=model 且实例缺该键 When NewFilter Then 错误注明待补字段
-	m := `{"manifestVersion":1,"name":"drift","version":"1","parts":{
-		"filters":[{"name":"rw","configSchema":{"type":"object","required":["model"],"properties":{"model":{"type":"string"}}}}]}}`
-	src := `module.exports = function (config) {
-		return { mapRequest: function (ctx, p) { return p; } };
-	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/rw.js": src}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 实例缺 required(安装期不阻塞——validateParts 不查 schema;实例化期拒绝)
-	_, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], nil, nil, nil, nil, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "model") || !strings.Contains(err.Error(), "required") {
-		t.Fatalf("required missing must name field: %v", err)
-	}
-	// 补齐后成功
-	if _, err = NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"model": "m1"}, nil, nil, nil, nil, nil); err != nil {
-		t.Fatalf("valid config: %v", err)
-	}
-}
-
-func TestDrift_UnknownKeysStripped(t *testing.T) {
-	// Given 实例参数含 schema 外未知键 When NewFilter Then 注入 config 不含未知键
-	m := `{"manifestVersion":1,"name":"strip","version":"1","parts":{
-		"filters":[{"name":"rw","configSchema":{"type":"object","properties":{"keep":{"type":"string"}}}}]}}`
-	src := `module.exports = function (config) {
-		return { mapRequest: function (ctx, p) { return JSON.stringify(config); } };
-	};`
-	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/rw.js": src}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0],
-		map[string]any{"keep": "v", "legacyGone": "x"}, nil, nil, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := f.MapRequest(nil, []byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(out), "legacyGone") {
-		t.Fatalf("unknown key not stripped: %s", out)
-	}
-}
-
 func TestValidate_DuplicatedFilterNameRejected(t *testing.T) {
 	// Given 同包重复 filter 名 When Install Then 拒绝(名即路径,重复名 = 重复路径)
 	m := `{"manifestVersion":1,"name":"dup","version":"1","parts":{
@@ -225,28 +197,6 @@ func TestValidate_DuplicatedFilterNameRejected(t *testing.T) {
 	r := NewRegistry(testDB(t))
 	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/same.js": filterSrc})); err == nil {
 		t.Fatal("duplicate filter accepted")
-	}
-}
-
-func TestValidate_SecretMissingThrowsWithPartName(t *testing.T) {
-	// Given secret 缺键 When BuildRequest Then 错误含包名与键名
-	pkg := mustInstall(t, NewRegistry(testDB(t)))
-	proto, err := NewProtocol(pkg, nil,
-		func(target, key string) (string, bool) { return "", false }, nil, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = proto.BuildRequest(newProtoCtx(), []byte(`{}`))
-	if err == nil || !strings.Contains(err.Error(), "demo") || !strings.Contains(err.Error(), "api_key") {
-		t.Fatalf("error lacks pkg/key: %v", err)
-	}
-}
-
-func TestSecretRefsUnion(t *testing.T) {
-	// Given 主包 protocol+filter When Union Then 非空
-	pkg := mustInstall(t, NewRegistry(testDB(t)))
-	if got := pkg.SecretRefsUnion(); len(got) == 0 {
-		t.Fatal("empty union")
 	}
 }
 
@@ -307,7 +257,7 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,19 +267,19 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 }
 
 func TestRuntime_FilterFactoryConfig(t *testing.T) {
-	// Given factory 形式 filter+config When NewFilter Then config 闭包生效
+	// Given factory 形式 filter+解析后参数 When NewFilter Then config 闭包生效(v2 参数由调用方解析)
 	cfgSrc := `module.exports = function (config) {
 		return { mapRequest: function (ctx, entry) {
 			var o = JSON.parse(entry); o.tag = config.tag; return JSON.stringify(o);
 		} };
 	};`
 	m := `{"manifestVersion":1,"name":"cfg","version":"1","parts":{
-		"filters":[{"name":"tag","configSchema":{"type":"object"}}]}}`
+		"filters":[{"name":"tag"}]}}`
 	pkg, err := ParseAAP(buildAAP(t, m, map[string]string{"filters/tag.js": cfgSrc}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil, nil, nil)
+	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +308,7 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,13 +321,13 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 	}
 }
 
-func TestInspect_MasksSecrets(t *testing.T) {
-	// Given 部件 inspect 含凭据值 When 输出 Then 凭据替换 ***
+func TestInspect_MasksPackageKeys(t *testing.T) {
+	// Given 部件 inspect 含包级 key 值 When 输出 Then 值替换 ***(v2 密钥唯一来源 = 包级 keys)
 	m := `{"manifestVersion":1,"name":"mask","version":"1","parts":{
-		"protocol":{"protocol":"openai-completions","secretRefs":["api_key"]}}}`
+		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = {
 		buildRequest: function (ctx, entry) {
-			var k = util.secret("api_key");
+			var k = util.key("api_key");
 			return { url: "https://x", method: "POST", headers: {}, body: util.inspect({ key: k }) };
 		},
 		mapResponse: function (ctx, b) { return b; }
@@ -386,10 +336,13 @@ func TestInspect_MasksSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil,
-		func(target, key string) (string, bool) { return "sk-secret-value", true },
-		func(target string) map[string]string { return map[string]string{"api_key": "sk-secret-value"} },
-		nil, nil, nil)
+	apiKey := func(name string) (any, bool) {
+		if name == "api_key" {
+			return "sk-secret-value", true
+		}
+		return nil, false
+	}
+	proto, err := NewProtocol(pkg, nil, nil, apiKey, keyValues(apiKey), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +351,7 @@ func TestInspect_MasksSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(req.Body), "sk-secret-value") {
-		t.Fatalf("secret leaked via inspect: %s", req.Body)
+		t.Fatalf("key leaked via inspect: %s", req.Body)
 	}
 	if !strings.Contains(string(req.Body), "***") {
 		t.Fatalf("mask missing: %s", req.Body)
