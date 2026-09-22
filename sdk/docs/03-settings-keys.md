@@ -48,20 +48,25 @@ keys 是**包级 name → value 映射**(整包一份,current + 上一版 previo
 
 ### 写入途径与写窗
 
-写入只有一条路:**`ctx.keys.merge({...})` 键级合并(给定键覆盖,未提及保留)**——给定键覆盖,未提及的键保留不动;写前 current 整体快照进 previous。不存在"整文档替换"语义,任务刷 token 不会误删用户手动加的其他键。
+写入两条路,都是**局部命名操作**——不存在"整文档替换"(脚本是访客,不能整体重写用户的凭据文档):
 
-**写窗(阉割即权限)**:merge 方法只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.merge === "undefined"` 可探测)。
+- **`ctx.keys.merge({...})`** 键级合并:给定键覆盖,未提及键保留
+- **`ctx.keys.remove("a", "b")`** 删除指定键(变参,不存在的键忽略)——如密码换 token 后清理密码
+
+两者写前 current 都整体快照进 previous(误删可找回)。
+
+**写窗(阉割即权限)**:merge/remove 只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.merge === "undefined"` 可探测)。
 
 | 途径 | 时机 | 写窗 |
 |---|---|---|
-| 任务里 `ctx.keys.merge({...})` | 运行期(如刷到的 token) | ✓ 任务执行 |
+| 任务里 `ctx.keys.merge({...})` / `ctx.keys.remove(...)` | 运行期(刷 token / 清理作废键) | ✓ 任务执行 |
 | keySubmit 表单采集 | 钩子内自行 merge(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
 | 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) | 用户侧 |
 
 | 钩子 | keys 能力 |
 |---|---|
-| 任务 handler / next | get / previous / list / **merge** |
-| keySubmit | get / previous / list / **merge** + http |
+| 任务 handler / next | get / previous / list / **merge** / **remove** |
+| keySubmit | get / previous / list / **merge** / **remove** + http |
 | keyAction | get / previous / list + http(只读;发验证码无需写) |
 | onLoad | get / previous / list(只读) |
 | keyWrite / keyRead / keyForm | get / previous(最小面) |
@@ -113,7 +118,8 @@ module.exports = {
     var resp = ctx.http.run({ url: "https://example/login", method: "POST",
       body: JSON.stringify({ u: values.account, p: values.password }) });
     if (resp.status !== 200) return { message: "登录失败 " + resp.status };
-    ctx.keys.merge({ token: JSON.parse(resp.body).token });   // 键级合并(给定键覆盖,未提及保留):只写 token
+    ctx.keys.merge({ token: JSON.parse(resp.body).token });   // 键级合并:只写 token
+    ctx.keys.remove("password");                              // 凭据轮转:作废键即删(最小持有)
     return "登录成功";
   },
 };

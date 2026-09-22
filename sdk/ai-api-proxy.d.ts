@@ -150,7 +150,7 @@ export interface HookHttpResponse {
   body: string;
 }
 
-/** ctx.keys 包级 key 读写(hooks 部件专属;set 前 current 整体移入 previous) */
+/** ctx.keys 包级 key 读写(hooks 部件专属;每次变更前 current 整体移入 previous) */
 export interface HookKeys {
   get(name: string): unknown;
   /**
@@ -158,6 +158,11 @@ export interface HookKeys {
    * 仅任务执行与 keySubmit 的 ctx 挂载此方法(其余钩子 undefined——阉割即权限)
    */
   merge?(values: Record<string, unknown>): void;
+  /**
+   * 删除指定键(变参,不存在的键忽略):写前 current 整体快照进 previous(误删可找回)
+   * 仅任务执行与 keySubmit 的 ctx 挂载(窗口同 merge)——如密码换 token 后清理密码
+   */
+  remove?(...names: string[]): void;
   /** 仅热加载提供旧包快照;启停/首载 undefined */
   previous(name: string): unknown;
   /** 键名枚举(排序;不含值——值走 get;多账号遍历场景) */

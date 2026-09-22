@@ -548,7 +548,7 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 		}
 		return v, nil
 	})
-	// merge 仅在写入窗口挂载(任务执行/keySubmit);其余钩子 ctx.keys 上无此能力(阉割即权限)
+	// merge/remove 仅在写入窗口挂载(任务执行/keySubmit);其余钩子 ctx.keys 上无此能力(阉割即权限)
 	if canWriteKeys {
 		_ = keysObj.Set("merge", func(values map[string]any) error {
 			if h.deps.Keys == nil {
@@ -563,6 +563,20 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 				}
 			}
 			return h.deps.Keys.Merge(h.pkg, values)
+		})
+		_ = keysObj.Set("remove", func(names ...string) error {
+			if h.deps.Keys == nil {
+				return fmt.Errorf("keys unavailable (package %s)", h.pkg)
+			}
+			if h.collectWrite {
+				for _, k := range names {
+					if !h.writtenSeen[k] {
+						h.writtenSeen[k] = true
+						h.written = append(h.written, k)
+					}
+				}
+			}
+			return h.deps.Keys.Remove(h.pkg, names...)
 		})
 	}
 	_ = keysObj.Set("previous", func(name string) (any, error) {

@@ -135,6 +135,34 @@ func (s *KeysStore) Merge(pkg string, values map[string]any) error {
 	return s.save(pkg, doc)
 }
 
+// Remove 删除指定键(变参):写入前 current 整体移入 previous(一次变更一次快照,误删可找回);不存在的键忽略;包内串行
+func (s *KeysStore) Remove(pkg string, names ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := s.load(pkg)
+	drop := make(map[string]bool, len(names))
+	hit := false
+	for _, n := range names {
+		if _, ok := doc.Current[n]; ok {
+			drop[n] = true
+			hit = true
+		}
+	}
+	if !hit {
+		return nil
+	}
+	prev := doc.Current
+	cur := make(map[string]any, len(prev))
+	for k, v := range prev {
+		if !drop[k] {
+			cur[k] = v
+		}
+	}
+	doc.Previous, doc.Current = prev, cur
+	doc.UpdatedAt = time.Now().UnixMilli()
+	return s.save(pkg, doc)
+}
+
 // SetKey 单键 upsert(管理台编辑通道;与任务写入同轮转语义:current 整体移入 previous;返回新 updatedAt)
 func (s *KeysStore) SetKey(pkg, name string, value any) (int64, error) {
 	s.mu.Lock()

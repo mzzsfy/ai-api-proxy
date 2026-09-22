@@ -568,3 +568,53 @@ func TestStorage_TxCommitOnSuccessRollbackOnFailure(t *testing.T) {
 		t.Fatal("rollback missing: failed task persisted storage")
 	}
 }
+
+func TestKeys_RemoveMultipleRotatesOnce(t *testing.T) {
+	// Given current={token:t,password:p,other:o} When remove("password","token","ghost") Then current={other}, previous=删前全量,previous 只轮转一次
+	ks := NewKeysStore(testKeysDB(t))
+	if err := ks.Merge("pkg", map[string]any{"token": "t", "password": "p", "other": "o"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ks.Remove("pkg", "password", "token", "ghost"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ks.Get("pkg", "password"); v != nil {
+		t.Fatalf("password survived: %v", v)
+	}
+	if v, _ := ks.Get("pkg", "token"); v != nil {
+		t.Fatalf("token survived: %v", v)
+	}
+	if v, _ := ks.Get("pkg", "other"); v != "o" {
+		t.Fatalf("other lost: %v", v)
+	}
+	prev, ok := ks.Previous("pkg", "password")
+	if !ok || prev != "p" {
+		t.Fatalf("previous password: %v %v", prev, ok)
+	}
+	if v, _ := ks.Previous("pkg", "ghost"); v != nil {
+		t.Fatalf("ghost in previous: %v", v)
+	}
+	// 幂等:再删不存在的键,previous 不再轮转
+	if err := ks.Remove("pkg", "nope"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ks.Previous("pkg", "password"); v != "p" {
+		t.Fatalf("idempotent remove rotated: %v", v)
+	}
+}
+
+func TestHooks_RemoveOnlyInWriteWindow(t *testing.T) {
+	// Given onLoad(无写窗) When ctx.keys.remove Then 能力不存在(undefined)
+	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
+	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.remove===undefined));}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
+	rt, err := LoadInit(pkg, deps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.RunOnLoad(nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := deps.Storage.Get("probe"); v != "true" {
+		t.Fatalf("remove visible in onLoad ctx: %v", v)
+	}
+}

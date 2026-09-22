@@ -128,6 +128,7 @@ func TestKeys_FormFlow(t *testing.T) {
 			keySubmit:function(ctx,values){
 				if(!values.account){ return {errors:{account:"账号必填"}}; }
 				ctx.keys.merge({token:"t-"+values.account});
+				ctx.keys.remove("password", "oldToken");
 				return "ok";
 			},
 		}`,
@@ -159,6 +160,22 @@ func TestKeys_FormFlow(t *testing.T) {
 	}
 	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "t-me@x" {
 		t.Fatalf("submitted token: %v", v)
+	}
+	// 变更集含删除键(密码换 token 后清理无用凭据;先放键再删,验证 remove 真生效)
+	if err := pkgs.Keys().Merge("checkin", map[string]any{"password": "p", "oldToken": "ot"}); err != nil {
+		t.Fatal(err)
+	}
+	w6 := httptest.NewRecorder()
+	mux.ServeHTTP(w6, httptest.NewRequest(http.MethodPost, "/admin/api/packages/checkin/keys/form-submit",
+		strings.NewReader(`{"values":{"account":"me@x","code":"123"}}`)))
+	if w6.Code != http.StatusOK || !containsStr(w6.Body.String(), `"password"`) {
+		t.Fatalf("written with removed: %d %s", w6.Code, w6.Body.String())
+	}
+	if v, _ := pkgs.Keys().Get("checkin", "password"); v != nil {
+		t.Fatalf("password survived submit: %v", v)
+	}
+	if p, _ := pkgs.Keys().Previous("checkin", "password"); p != "p" {
+		t.Fatalf("removed key not in previous: %v", p)
 	}
 	// 校验 errors 返回 → 200+ok:false 字段级拒绝,存储不变(KF5;非异常通道)
 	w4 := httptest.NewRecorder()
