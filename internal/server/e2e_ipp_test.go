@@ -33,7 +33,7 @@ func mustNode(t *testing.T, m map[string]any) yaml.Node {
 
 // ─── 全链路多路径联调:装配根(server.Build)级别验证 ipp_* 传输端到端 ───
 // 路径:chat 请求 → gateway → ipTransport → ipp_clash(假 clash CONNECT)→ mock 上游 → 响应
-// 同矩阵覆盖 ipp_remote(假供给方);warp/mihomo 真链路各自库内 e2e 已覆盖(env 门控)
+// 同矩阵覆盖 ipp_remote(假供给方);真实外部代理经 e2e_real_transports(env 门控)
 
 // fakeClash 假 clash 混合端口(http CONNECT 隧道;任意目标透明转发)
 type fakeClash struct {
@@ -294,7 +294,7 @@ func TestE2E_IPP_未注册类型拒绝(t *testing.T) {
 	}
 }
 
-// 路径 5:内置供给方注册名齐备(ipp_warp 需 -tags withwarp,此处校验默认构建的非标签集)
+// 路径 5:内置供给方注册名齐备(默认构建全量集)
 func TestE2E_IPP_注册名齐备(t *testing.T) {
 	kinds := map[string]bool{}
 	for _, k := range ipprovider.Kinds() {

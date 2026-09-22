@@ -11,13 +11,17 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 )
 
-// hooksManifest 构造 hooks-only manifest(raw)
+// hooksManifest 构造 hooks-only manifest(raw;多文件布局:无 entry,任务缺省 tasks/<name>.js)
 const hooksManifest = `{"manifestVersion":1,"name":"checkin","version":"%s","parts":{
-	"hooks":{"entry":"hooks.js","tasks":[{"name":"signIn","cron":"* * * * *","timeoutMs":1000}]}}}`
+	"hooks":{"tasks":[{"name":"signIn","cron":"* * * * *","timeoutMs":1000}]}}}`
 
-func hooksAAP(t *testing.T, version, js string) []byte {
+func hooksAAP(t *testing.T, version string, files map[string]string) []byte {
 	t.Helper()
-	data, err := plugin.BuildAAP(mustManifest(t, sprintf(hooksManifest, version)), map[string][]byte{"hooks.js": []byte(js)})
+	fs := map[string][]byte{}
+	for k, v := range files {
+		fs[k] = []byte(v)
+	}
+	data, err := plugin.BuildAAP(mustManifest(t, sprintf(hooksManifest, version)), fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +43,16 @@ func sprintf(s, v string) string {
 	return string(out)
 }
 
+// initAndTaskFiles onLoad 与任务的新布局文件集
+func initAndTaskFiles(onLoadJS, taskJS string) map[string]string {
+	return map[string]string{
+		"init.js":       onLoadJS,
+		"tasks/signIn.js": taskJS,
+	}
+}
+
 func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
-	// Given hooks-only 包(onLoad 写 key) When 安装→升级→读管理 keys→卸载 Then 各环节语义成立
+	// Given hooks-only 包(init.js 写 key) When 安装→升级→读管理 keys→卸载 Then 各环节语义成立
 	ctx := context.Background()
 	pkgs, st := testRegistry(t)
 	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
@@ -48,9 +60,10 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	defer sched.Stop()
 
 	// 安装:onLoad 异步触发,写入 token
-	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", `module.exports={
-		onLoad:function(ctx){ctx.keys.set({token:"loaded"});},
-		signIn:function(ctx){ctx.keys.set({token:"signed"});}}`)); err != nil {
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
+		`module.exports={onLoad:function(ctx){ctx.keys.set({token:"loaded"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.set({token:"signed"});}}`,
+	))); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool {
@@ -59,9 +72,10 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	}, "onLoad key not written")
 
 	// 升级:onLoad 再次触发(current 移入 previous)
-	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", `module.exports={
-		onLoad:function(ctx){ctx.keys.set({token:"reloaded"});},
-		signIn:function(ctx){ctx.keys.set({token:"signed"});}}`)); err != nil {
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
+		`module.exports={onLoad:function(ctx){ctx.keys.set({token:"reloaded"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.set({token:"signed"});}}`,
+	))); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool {
@@ -77,7 +91,12 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 		t.Fatalf("view: %v", cur)
 	}
 
-	// 卸载清理
+	// 卸载清理(keys + settings)
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.1", initAndTaskFiles(
+		`module.exports={}`, `module.exports={handler:function(ctx){}}`,
+	))); err != nil {
+		t.Fatal(err)
+	}
 	if err := pkgs.Delete(ctx, "checkin"); err != nil {
 		t.Fatal(err)
 	}
@@ -87,33 +106,35 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 }
 
 func TestHooks_TaskRunsViaRunner(t *testing.T) {
-	// Given 已安装 hooks 包 When 直接调用 runner(runner 形态与调度器一致) Then keys 更新
+	// Given 已安装 hooks 包 When runner 形态装载任务文件并运行 Then keys 更新且 ctx.task 正确
 	ctx := context.Background()
 	pkgs, st := testRegistry(t)
 	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
 	sched := wireHooks(wire)
 	defer sched.Stop()
-	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", `module.exports={
-		signIn:function(ctx){ctx.keys.set({token:"signed"});}}`)); err != nil {
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set({token:ctx.task});}}`,
+	})); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond) // onLoad 无实现,无副作用;等回调
+	time.Sleep(50 * time.Millisecond) // 等 onLoad 回调(无 init.js,无副作用)
 	pkg, err := pkgs.GetPackage("checkin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := plugin.LoadHooks(pkg, plugin.HooksDeps{
+	task := plugin.HooksTask{Name: "signIn", Cron: "* * * * *", TimeoutMs: 1000}
+	rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{
 		PackageName: "checkin",
 		Keys:        pkgs.Keys(),
 		Now:         func() time.Time { return time.Unix(0, 0) },
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.RunTask("signIn", time.Unix(0, 0)); err != nil {
+	if err := rt.RunTask(task, time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signed" {
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signIn" {
 		t.Fatalf("task keys: %v", v)
 	}
 }
@@ -121,7 +142,9 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	// Given keys 有值 When GET 管理 keys 路由 Then 明文输出(键名+值)
 	pkgs, _ := testRegistry(t)
-	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", `module.exports={}`)); err != nil {
+	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", map[string]string{
+		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
+	})); err != nil {
 		t.Fatal(err)
 	}
 	if err := pkgs.Keys().Set("checkin", map[string]any{"token": "secret-value"}); err != nil {
@@ -138,6 +161,48 @@ func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	body := w.Body.String()
 	if !containsStr(body, "secret-value") || !containsStr(body, `"token"`) {
 		t.Fatalf("keys output: %s", body)
+	}
+}
+
+func TestHooks_SettingsLifecycle(t *testing.T) {
+	// Given 声明+覆盖 When 安装/保存/快照合并 Then 声明提取落库、PUT 覆盖生效、快照合并正确
+	ctx := context.Background()
+	pkgs, st := testRegistry(t)
+	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
+	sched := wireHooks(wire)
+	defer sched.Stop()
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
+		"settings.js":     `module.exports.settings={account:{type:"string",description:"账号"},level:{type:"int",default:1}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set({who:String(ctx.settings.account||"?")});}}`,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	pkg, _ := pkgs.GetPackage("checkin")
+	if _, ok := pkg.Declaration["account"]; !ok {
+		t.Fatalf("declaration extracted: %v", pkg.Declaration)
+	}
+	// overrides 保存后快照合并
+	if _, err := pkgs.Settings().Put("checkin", plugin.PutInput{
+		Config: map[string]any{"account": "me@x"},
+		Tasks:  map[string]map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snap := settingsSnapshot(pkgs, "checkin")
+	if snap["account"] != "me@x" {
+		t.Fatalf("snapshot: %v", snap)
+	}
+	// 任务经快照读覆盖值
+	task := plugin.HooksTask{Name: "signIn", Cron: "* * * * *"}
+	rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys(), Now: func() time.Time { return time.Unix(0, 0) }}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.RunTask(task, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := pkgs.Keys().Get("checkin", "who"); v != "me@x" {
+		t.Fatalf("task settings read: %v", v)
 	}
 }
 

@@ -76,6 +76,9 @@ func (s *Scheduler) Refresh() {
 			continue
 		}
 		for _, tk := range pkg.Manifest.Parts.Hooks.Tasks {
+			if tk.Next {
+				continue // 自调度形态不经 cron 表(独立 next 链)
+			}
 			sched, err := plugin.CronSchedule(tk.Cron)
 			if err != nil {
 				log.Printf("scheduler: package %s task %s: %v", name, tk.Name, err)

@@ -326,6 +326,7 @@ func Build(cfg *Config) (*App, error) {
 // hooks 启动:装配回调、启动调度器、对已加载包补发 onLoad(启动恢复路径)
 func (a *App) startHooks() {
 	a.Scheduler = wireHooks(a)
+	wireKeyHooks(a)
 	pkgs := a.AdminDeps.Packages
 	for _, name := range pkgs.ListPackages() {
 		if !pkgs.IsEnabled(name) {

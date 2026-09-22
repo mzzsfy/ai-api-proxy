@@ -55,6 +55,34 @@ func (h *httpExecutor) Do(req plugin.HttpRequest) (*plugin.HttpResponse, error) 
 	return &plugin.HttpResponse{Status: tresp.Status, Headers: tresp.Headers, Body: string(body)}, nil
 }
 
+// effectiveSettings 合并声明 ⊕ overrides 为运行时快照(校验由 admin 保存面负责,此处宽松)
+func effectiveSettings(decl map[string]any, overrides map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range decl {
+		out[k] = v
+	}
+	// overrides 形态 {"config": {...}};浅层键覆盖
+	if cfg, ok := overrides["config"].(map[string]any); ok {
+		for k, v := range cfg {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// settingsSnapshot 包的运行时 settings 快照(声明 + 存储覆盖;加载失败 = 空快照)
+func settingsSnapshot(pkgs *plugin.Registry, pkgName string) map[string]any {
+	pkg, err := pkgs.GetPackage(pkgName)
+	if err != nil {
+		return map[string]any{}
+	}
+	decl := pkg.Declaration
+	if decl == nil {
+		decl = map[string]any{}
+	}
+	return effectiveSettings(decl, pkgs.SettingsOverrides(pkgName))
+}
+
 // wireHooks 装配 hooks 通道:注册 onLoad/onChange 回调并启动调度器
 func wireHooks(app *App) *scheduler.Scheduler {
 	exec := &httpExecutor{trMgr: app.trMgr}
@@ -78,10 +106,13 @@ func wireHooks(app *App) *scheduler.Scheduler {
 	}
 	// onLoad 回调(安装/升级/启用;异步,失败不阻断加载)
 	pkgs.OnLoad = func(pkg *plugin.Package, previous map[string]any) {
-		if !pkgs.IsEnabled(pkg.Manifest.Name) {
+		if !pkgs.IsEnabled(pkg.Manifest.Name) || pkg.Manifest.Parts.Hooks == nil {
 			return
 		}
-		rt, err := plugin.LoadHooks(pkg, deps(pkg.Manifest.Name))
+		if _, ok := pkg.Files["init.js"]; !ok {
+			return
+		}
+		rt, err := plugin.LoadInit(pkg, deps(pkg.Manifest.Name), settingsSnapshot(pkgs, pkg.Manifest.Name))
 		if err != nil {
 			log.Printf("hooks: %s: load: %v", pkg.Manifest.Name, err)
 			return
@@ -98,11 +129,11 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		if !pkgs.IsEnabled(pkgName) {
 			return nil
 		}
-		rt, err := plugin.LoadHooks(pkg, deps(pkgName))
+		rt, err := plugin.LoadTask(pkg, task, deps(pkgName), settingsSnapshot(pkgs, pkgName))
 		if err != nil {
 			return err
 		}
-		return rt.RunTask(task.Name, at)
+		return rt.RunTask(task, at)
 	}
 	sched := scheduler.New(pkgs, run, nil)
 	pkgs.OnChange = func() { sched.Refresh() }

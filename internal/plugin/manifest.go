@@ -4,6 +4,7 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
@@ -46,16 +47,17 @@ type FilterPart struct {
 	SecretRefs   []string        `json:"secretRefs,omitempty"`
 }
 
-// HooksTask 定时任务声明
+// HooksTask 定时任务声明(crontab 心智模型:每行 = 一时刻 + 一命令;调度形态 cron/next 互斥)
 type HooksTask struct {
 	Name      string `json:"name"`
-	Cron      string `json:"cron"`
+	Cron      string `json:"cron,omitempty"`      // 宿主调度形态(单值)
+	Next      bool   `json:"next,omitempty"`      // 自调度形态(与 cron 互斥):文件须导出 next(ctx)
+	Entry     string `json:"entry,omitempty"`     // 缺省 tasks/<name>.js(相对包根;多行可共用一实现)
 	TimeoutMs int64  `json:"timeoutMs,omitempty"` // ≤0 按缺省;上限钳制在运行时
 }
 
-// HooksPart hooks 部件声明(加载钩子 + 定时任务;计入合法插槽)
+// HooksPart hooks 部件声明(定时任务;计入合法插槽)
 type HooksPart struct {
-	Entry string      `json:"entry"`
 	Tasks []HooksTask `json:"tasks,omitempty"`
 }
 
@@ -64,6 +66,11 @@ type Manifest struct {
 	ManifestVersion int               `json:"manifestVersion"`
 	Name            string            `json:"name"`
 	Version         string            `json:"version"`
+	Title           string            `json:"title,omitempty"`           // 显示名(缺省回退 name;纯展示)
+	Description     string            `json:"description,omitempty"`     // 一句话描述(纯展示)
+	Author          string            `json:"author,omitempty"`          // 纯展示
+	Homepage        string            `json:"homepage,omitempty"`        // 纯展示
+	License         string            `json:"license,omitempty"`         // 纯展示
 	Compat          map[string]string `json:"compat,omitempty"`
 	Parts           struct {
 		Protocol *ProtocolPart `json:"protocol,omitempty"`
@@ -76,11 +83,23 @@ type Manifest struct {
 	Extra            map[string]json.RawMessage `json:"-"`
 }
 
+// MetaTitle 显示名(缺省回退 name;Inspect 摘要用)
+func (m *Manifest) MetaTitle() string {
+	if m.Title != "" {
+		return m.Title
+	}
+	return m.Name
+}
+
+// MetaTitle 显示名(缺省回退 name)
+func (p *Package) MetaTitle() string { return p.Manifest.MetaTitle() }
+
 // Package 解析后的包(部件代码按 entry 存放)
 type Package struct {
-	Manifest *Manifest
-	Files    map[string][]byte // entry 路径 → 代码
-	Revision int64
+	Manifest    *Manifest
+	Files       map[string][]byte // 文件路径 → 源码(多文件布局;族文件 + lib/*.js)
+	Revision    int64
+	Declaration map[string]any // 合并后的 settings 声明(安装/升级/在线保存时提取;declaration_json 持久化)
 }
 
 // HasProtocol 是否含 protocol 部件(主包判定)
@@ -94,6 +113,10 @@ func (p *Package) Validate() error {
 	}
 	if m.Name == "" {
 		return fmt.Errorf("name required")
+	}
+	// upstream: 前缀 = target secrets 的 kv ns,插件包重名可读写凭据——安装期堵死
+	if strings.HasPrefix(m.Name, "upstream:") {
+		return fmt.Errorf("package name %q: reserved prefix", m.Name)
 	}
 	if m.Version == "" {
 		return fmt.Errorf("version required")
@@ -142,14 +165,8 @@ func (p *Package) Validate() error {
 			return fmt.Errorf("filter %s: entry %q missing in package", fp.Name, fp.Entry)
 		}
 	}
-	// hooks 声明绑定:entry 存在(安装期) + task 名唯一 + cron 语法(5 字段)
+	// hooks 声明绑定:任务文件存在 + task 名唯一 + 调度形态合法(cron 或 next 二选一)
 	if h := m.Parts.Hooks; h != nil {
-		if h.Entry == "" {
-			return fmt.Errorf("hooks: entry required")
-		}
-		if _, ok := p.Files[h.Entry]; !ok {
-			return fmt.Errorf("hooks: entry %q missing in package", h.Entry)
-		}
 		seenTask := map[string]bool{}
 		for _, tk := range h.Tasks {
 			if tk.Name == "" {
@@ -159,10 +176,29 @@ func (p *Package) Validate() error {
 				return fmt.Errorf("hooks task %q duplicated", tk.Name)
 			}
 			seenTask[tk.Name] = true
-			if _, err := CronSchedule(tk.Cron); err != nil {
-				return fmt.Errorf("hooks task %s: %w", tk.Name, err)
+			entry := tk.Entry
+			if entry == "" {
+				entry = "tasks/" + tk.Name + ".js"
+			}
+			if _, ok := p.Files[entry]; !ok {
+				return fmt.Errorf("hooks task %s: entry %q missing in package", tk.Name, entry)
+			}
+			if tk.Next && tk.Cron != "" {
+				return fmt.Errorf("hooks task %s: cron and next are mutually exclusive", tk.Name)
+			}
+			if !tk.Next {
+				if _, err := CronSchedule(tk.Cron); err != nil {
+					return fmt.Errorf("hooks task %s: %w", tk.Name, err)
+				}
 			}
 		}
+	}
+	// 元数据纯展示字段限长(超限拒装注明)
+	if l := len([]rune(m.Title)); l > 64 {
+		return fmt.Errorf("title too long (%d > 64)", l)
+	}
+	if l := len([]rune(m.Description)); l > 256 {
+		return fmt.Errorf("description too long (%d > 256)", l)
 	}
 	return nil
 }

@@ -35,7 +35,7 @@ func hooksPkg(name string, tasks ...plugin.HooksTask) *plugin.Package {
 	pkg := &plugin.Package{
 		Manifest: &plugin.Manifest{ManifestVersion: plugin.ManifestVersion, Name: name, Version: "0.1.0"},
 	}
-	pkg.Manifest.Parts.Hooks = &plugin.HooksPart{Entry: "h.js", Tasks: tasks}
+	pkg.Manifest.Parts.Hooks = &plugin.HooksPart{Tasks: tasks}
 	return pkg
 }
 

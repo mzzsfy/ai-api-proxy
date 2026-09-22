@@ -17,7 +17,7 @@ func TestAdmin_InspectBytesReturnsSummaryNotInstall(t *testing.T) {
 	pkgs, _ := testRegistry(t)
 	deps := newAdminDeps(pkgs)
 	mux := deps.Mux()
-	data := hooksAAP(t, "0.1.0", `module.exports={}`)
+	data := hooksAAP(t, "0.1.0", map[string]string{"tasks/signIn.js": `module.exports={handler:function(ctx){}}`})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/admin/api/packages/inspect", strings.NewReader(string(data)))
 	r.Header.Set("Content-Type", "application/octet-stream")
@@ -55,7 +55,7 @@ func TestAdmin_InspectURL(t *testing.T) {
 	}
 	mux := deps.Mux()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(hooksAAP(t, "0.2.0", `module.exports={}`))
+		_, _ = w.Write(hooksAAP(t, "0.2.0", map[string]string{"tasks/signIn.js": `module.exports={handler:function(ctx){}}`}))
 	}))
 	defer srv.Close()
 	body, _ := json.Marshal(map[string]string{"url": srv.URL + "/x.aap"})

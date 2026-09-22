@@ -1,8 +1,9 @@
 // ai-api-proxy 插件 SDK 类型定义(hook 全同步;代理层恰一次上游请求,无重试——归下游)
 // 声明式单协议:一个协议部件服务且仅服务 manifest 声明的唯一协议槽
 // 槽位取值只允许 "openai-completions" | "anthropic-messages";入口与槽位不符由主体 400 拒绝,不做任何转换
-// 部件导出形态:hooks 对象(无参)或 factory 函数 (config) => hooks;config 含 host 注入的 protocol
-// 全局注入:util / log / storage / module / exports;无 require(禁 npm)
+// 多文件布局(无单入口):init.js(onLoad)/ keys.js(keyWrite/keyRead/keyForm/keyAction/keySubmit)/ tasks/<name>.js(任务)
+// 任意族文件可挂 settings 声明片段(module.exports.settings);共享常量走 lib/*.js require(包内相对路径,幂等单例)
+// 全局注入:util / log / storage / setting(声明构建器)/ module / exports / require
 
 /** 协议槽枚举(manifest:parts.protocol.protocol) */
 export type ProtocolSlot = "openai-completions" | "anthropic-messages";
@@ -157,26 +158,98 @@ export interface HookKeys {
   previous(name: string): unknown;
 }
 
-/** hooks 部件调用上下文(onLoad 与每个 task) */
+/** settings 声明构建器(setting 全局;宿主求值时注入,GUI 渲染归宿主) */
+export interface SettingBuilders {
+  string(opts: SettingOptions): SettingDecl;
+  int(opts: SettingOptions): SettingDecl;
+  number(opts: SettingOptions): SettingDecl;
+  bool(opts: SettingOptions): SettingDecl;
+  enum(opts: SettingOptions & { values: string[] }): SettingDecl;
+}
+
+export interface SettingOptions {
+  /** 展示名 */
+  description?: string;
+  /** 缺省值(未覆盖时生效) */
+  default?: unknown;
+  required?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SettingDecl {
+  type: "string" | "int" | "number" | "bool" | "enum";
+  [key: string]: unknown;
+}
+
+/** hooks 部件调用上下文(onLoad/任务/keys 钩子;settings 仅注入了快照时存在) */
 export interface HookContext {
   http: { run(req: HookHttpRequest): HookHttpResponse };
   keys: HookKeys;
   cron: { runAt: string };
+  /** 运行时配置快照(声明 ⊕ 管理台覆盖;settings.js/init.js/keys.js/tasks 均可读) */
+  settings?: Record<string, unknown>;
+  /** 当前任务名(多行同指一实现时区分调用来源;仅任务调用注入) */
+  task?: string;
 }
 
-/** hooks 部件导出(仅对象形态;onLoad 与各 task 均可选实现) */
-export interface HooksPart {
-  /** 包加载完成(导入/升级/启用)后调用一次;同步;失败不阻断加载 */
-  onLoad?(ctx: HookContext): void;
-  /** 每个 manifest parts.hooks.tasks 项同名导出 */
-  [taskName: string]: unknown;
+/**
+ * 任务文件导出(tasks/<name>.js 或 manifest 缺省路径)
+ * handler:任务体;next 形态(声明 next:true)另导出 next
+ */
+export interface TaskModule {
+  /** 任务体(同步) */
+  handler(ctx: HookContext): void;
+  /**
+   * 自调度链(声明 next:true 时必须导出;与 cron 互斥)
+   * 返回下次触发的 Unix 毫秒时间戳;null = 停止链;返回值 ≤ now = 立即再触发
+   */
+  next?(ctx: HookContext): number | null;
+  /** 可挂 settings 声明片段 */
+  settings?: Record<string, unknown>;
 }
 
-// 宿主注入全局(CommonJS 部件经 reference 引用本文件时可用)
+/** init.js 导出(onLoad 处理器) */
+export interface InitModule {
+  onLoad(ctx: HookContext): void;
+  settings?: Record<string, unknown>;
+}
+
+/**
+ * keys.js 导出(凭据读写钩子 + 添加表单采集;全部可选)
+ * ctx 裁剪:keyWrite/keyRead 仅 keys.get/previous;keyForm 仅 keys.get;
+ * keyAction/keySubmit 另含 keys.set + http(采集 = 出站动作)
+ */
+export interface KeysModule {
+  /** 键写入归一化(管理台新增/编辑);undefined/null = 透传;拒绝写入须抛错 */
+  keyWrite?(ctx: HookContext, keyName: string, newValue: unknown, oldValue: unknown): unknown;
+  /** 键详情解释(管理台 [详情]);undefined → detail null;输出须脱敏 */
+  keyRead?(ctx: HookContext, keyName: string): unknown;
+  /**
+   * 添加表单声明(声明后 GUI 弹层渲染采集表单)
+   * fields 用 setting 构建器声明;actions 按钮点击回调 keyAction
+   */
+  keyForm?(ctx: HookContext): {
+    fields: SettingDecl[];
+    actions?: { name: string; label: string }[];
+  };
+  /** 表单按钮回调(可出站;如发送验证码);返回值 toast 呈现 */
+  keyAction?(ctx: HookContext, action: string, values: Record<string, unknown>): unknown;
+  /** 表单提交(可出站;写入经 ctx.keys.set——校验全部通过后再 set,set 后抛错不回滚);返回值 toast 呈现 */
+  keySubmit?(ctx: HookContext, values: Record<string, unknown>): unknown;
+  settings?: Record<string, unknown>;
+}
+
+/** 包级 key 只读说明:hooks 任务写入,protocol/filter 侧经 util.key 只读实时 */
 declare global {
   const util: Util;
   const log: Log;
   const storage: Storage;
+  /** settings 声明构建器(族文件求值时注入;keyForm 函数体运行期同样可用) */
+  const setting: SettingBuilders;
+  /** CommonJS 模块面(包内相对路径;扩展名可选/目录索引;同 runtime 幂等单例) */
+  function require(spec: string): unknown;
+  var module: { exports: unknown };
+  var exports: unknown;
 }
 
 export {}

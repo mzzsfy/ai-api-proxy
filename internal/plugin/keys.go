@@ -21,9 +21,6 @@ func CronSchedule(expr string) (cron.Schedule, error) {
 // KeysLimit 单包 keys 序列化总量上限(current+previous 联合计量)
 const KeysLimit = 64 * 1024
 
-// keysKVKey keys 文档在 kv 表的键名(ns=包名)
-const keysKVKey = "__keys__"
-
 // TaskTimeoutDefault 任务超时缺省
 const TaskTimeoutDefault = 30 * 1000
 
@@ -43,19 +40,19 @@ type keyDoc struct {
 	UpdatedAt int64          `json:"updatedAt"`
 }
 
-// KeysStore 包级 key 存储(kv 表,ns=包名;进程内互斥防并发 set 丢失更新)
+// KeysStore 包级 key 存储(package_keys blob 表;进程内互斥防并发 set 丢失更新)
 type KeysStore struct {
-	db *sql.DB
-	mu sync.Mutex // 包内 set 串行化(与文档互斥语义一致;跨包天然隔离)
+	blob *blobStore
+	mu   sync.Mutex
 }
 
 // NewKeysStore 构造(空文档容错:无行 = 全空)
-func NewKeysStore(db *sql.DB) *KeysStore { return &KeysStore{db: db} }
+func NewKeysStore(db *sql.DB) *KeysStore { return &KeysStore{blob: newBlobStore(db, "package_keys")} }
 
 func (s *KeysStore) load(pkg string) keyDoc {
-	var raw string
 	var doc keyDoc
-	if s.db.QueryRow(`SELECT value FROM kv WHERE ns=? AND key=?`, pkg, keysKVKey).Scan(&raw) != nil {
+	raw, ok := s.blob.load(pkg)
+	if !ok {
 		return keyDoc{}
 	}
 	_ = json.Unmarshal([]byte(raw), &doc)
@@ -73,10 +70,7 @@ func (s *KeysStore) save(pkg string, doc keyDoc) error {
 	if len(b) > KeysLimit {
 		return fmt.Errorf("keys exceed limit (%d > %d)", len(b), KeysLimit)
 	}
-	_, err = s.db.Exec(`INSERT INTO kv(ns, key, value) VALUES(?,?,?)
-		ON CONFLICT(ns, key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
-		pkg, keysKVKey, string(b))
-	return err
+	return s.blob.save(pkg, string(b))
 }
 
 // Get 读当前值
@@ -113,6 +107,20 @@ func (s *KeysStore) Set(pkg string, values map[string]any) error {
 	return s.save(pkg, doc)
 }
 
+// SetKey 单键 upsert(管理台编辑通道;与任务写入同轮转语义:current 整体移入 previous;返回新 updatedAt)
+func (s *KeysStore) SetKey(pkg, name string, value any) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := s.load(pkg)
+	doc.Previous = doc.Current
+	if doc.Current == nil {
+		doc.Current = map[string]any{}
+	}
+	doc.Current[name] = value
+	doc.UpdatedAt = time.Now().UnixMilli()
+	return doc.UpdatedAt, s.save(pkg, doc)
+}
+
 // UpgradeSnapshot 包升级快照:旧 current 快照进 previous(整体覆盖),current 原样保留
 func (s *KeysStore) UpgradeSnapshot(pkg string) error {
 	s.mu.Lock()
@@ -130,7 +138,7 @@ func (s *KeysStore) UpgradeSnapshot(pkg string) error {
 func (s *KeysStore) Delete(pkg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, _ = s.db.Exec(`DELETE FROM kv WHERE ns=? AND key=?`, pkg, keysKVKey)
+	s.blob.delete(pkg)
 }
 
 // View 管理面视图:明文输出(key 按包名 ns 隔离,属包私有数据)

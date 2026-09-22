@@ -51,6 +51,7 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS packages(
 		name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
 		revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
+		declaration_json TEXT NOT NULL DEFAULT '{}',
 		created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`); err != nil {
 		t.Fatal(err)
 	}

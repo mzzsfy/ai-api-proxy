@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,18 @@ type Deps struct {
 	FetchPackage func(r *http.Request, url string) ([]byte, error)
 	// KeysFunc 包级 keys 明文视图(按包名隔离)
 	KeysFunc func(pkg string) map[string]any
+	// KeyHooksFunc keys 钩子能力探测(write/read/form)
+	KeyHooksFunc func(pkg string) (write, read, form bool)
+	// KeyWriteFunc 单键写入(baseUpdatedAt 快检 + keyWrite 归一化 + 轮转落库)
+	KeyWriteFunc func(pkg, key string, value any, baseUpdatedAt int64) (updated int64, transformed bool, err error)
+	// KeyReadFunc 键详情解释
+	KeyReadFunc func(pkg, key string) (any, error)
+	// KeyFormFunc 添加表单声明
+	KeyFormFunc func(pkg string) (any, error)
+	// KeyActionFunc 表单按钮回调(可出站)
+	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
+	// KeySubmitFunc 表单提交(回调内 ctx.keys.set 写入;written 收集)
+	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, error)
 }
 
 // fetch 拉取实现取依赖覆写,缺省内置实现
@@ -59,6 +72,13 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("DELETE /admin/api/packages/{name}", d.deletePackage)
 	mux.HandleFunc("POST /admin/api/packages/{name}/enable", d.enablePackage)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
+	mux.HandleFunc("PUT /admin/api/packages/{name}/keys/{key}", d.putPackageKey)
+	mux.HandleFunc("GET /admin/api/packages/{name}/keys/{key}/detail", d.packageKeyDetail)
+	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
+	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-action", d.packageKeyFormAction)
+	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-submit", d.packageKeyFormSubmit)
+	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
+	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/code", d.updateCode)
 	mux.HandleFunc("GET /admin/api/packages/{name}/code", d.getPartCode)
 	mux.HandleFunc("GET /admin/api/upstreams", d.listUpstreams)
@@ -92,6 +112,13 @@ func (d *Deps) listPackages(w http.ResponseWriter, r *http.Request) {
 			"hasProtocol": p.HasProtocol(), "filters": filterNames,
 			"secretRefs": p.SecretRefsUnion(),
 			"protocol":   protocolName(p),
+			"hasHooks":   p.Manifest.Parts.Hooks != nil,
+			"enabled":    d.Packages.IsEnabled(n),
+			"title":       p.MetaTitle(),
+			"description": p.Manifest.Description,
+			"author":      p.Manifest.Author,
+			"homepage":    p.Manifest.Homepage,
+			"license":     p.Manifest.License,
 		})
 	}
 	writeJSON(w, out)
@@ -339,12 +366,14 @@ func (d *Deps) exportPackage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// PackageTemplate 最小骨架包下载(protocol+filter 各一,开发者起步模板;静态无敏感信息,免会话)
+// PackageTemplate 最小骨架包下载(protocol+filter+hooks 任务各一,开发者起步模板;静态无敏感信息,免会话)
 func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 	tpl := &plugin.Manifest{
 		ManifestVersion: plugin.ManifestVersion,
 		Name:            "my-package",
 		Version:         "0.1.0",
+		Title:           "示例包",
+		Description:     "protocol + filter + 定时任务起步模板",
 	}
 	tpl.Parts.Protocol = &plugin.ProtocolPart{
 		Entry: "protocol.js", Protocol: string(plugin.ProtocolOpenAICompletions),
@@ -352,6 +381,9 @@ func (d *Deps) PackageTemplate(w http.ResponseWriter, r *http.Request) {
 		Features: []string{"tools"}, SecretRefs: []string{"api_key"},
 	}
 	tpl.Parts.Filters = []plugin.FilterPart{{Name: "log-request", Entry: "filter.js"}}
+	tpl.Parts.Hooks = &plugin.HooksPart{Tasks: []plugin.HooksTask{
+		{Name: "heartbeat", Cron: "0 * * * *", TimeoutMs: 10 * 1000},
+	}}
 	files := map[string][]byte{
 		"protocol.js": []byte(`// openai-completions 起步模板:按需改造
 module.exports = {
@@ -373,6 +405,17 @@ module.exports = {
   mapChunk: function (ctx, c) { return c; },
   mapResponse: function (ctx, r) { return r; }
 };`),
+		"settings.js": []byte(`// 共享声明文件:包级配置槽位(任意族文件可挂 module.exports.settings,固定序合并)
+module.exports.settings = {
+  greeting: setting.string({ description: "问候语", default: "hello" }),
+};`),
+		"tasks/heartbeat.js": []byte(`// 定时任务起步模板:crontab 每行一时刻(manifest parts.hooks.tasks);handler 必导出
+var greeting = require("../settings.js");
+module.exports = {
+  handler: function (ctx) {
+    log.info("heartbeat", ctx.task, util.template("{g}", { g: "ok" }));
+  },
+};`),
 	}
 	data, err := plugin.BuildAAP(tpl, files)
 	if err != nil {
@@ -382,6 +425,238 @@ module.exports = {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="my-package.aap"`)
 	_, _ = w.Write(data)
+}
+
+// packageSettings GET 展开视图:声明 ⊕ overrides + 乐观锁 version(禁用包放行;无 hooks 包 400 键域)
+func (d *Deps) packageSettings(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	pkg, err := d.Packages.GetPackage(name)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if pkg.Manifest.Parts.Hooks == nil {
+		httpError(w, http.StatusBadRequest, "package has no settings (no hooks part)")
+		return
+	}
+	decl := pkg.Declaration
+	if decl == nil {
+		decl = map[string]any{}
+	}
+	view := d.Packages.Settings().View(name)
+	overrides := view.Overrides
+	if overrides == nil {
+		overrides = map[string]any{}
+	}
+	// 展开视图:每声明槽位 {schema, value(覆盖值;无则 default 缺省), overridden}
+	cfgOv, _ := overrides["config"].(map[string]any)
+	config := buildSettingsView(decl, cfgOv)
+	tasksOv, _ := overrides["tasks"].(map[string]any)
+	writeJSON(w, map[string]any{
+		"config":   config,
+		"tasks":    buildTasksView(pkg, tasksOv),
+		"version":  view.Version,
+		"revision": pkg.Revision,
+	})
+}
+
+// buildSettingsView 声明槽位展开(值 = 覆盖 > default;overridden 标记)
+func buildSettingsView(decl map[string]any, cfgOv map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(decl))
+	for _, name := range sortedKeys(decl) {
+		slot, _ := decl[name].(map[string]any)
+		if slot == nil {
+			continue
+		}
+		item := map[string]any{"name": name, "schema": slot}
+		if v, ok := cfgOv[name]; ok {
+			item["value"] = v
+			item["overridden"] = true
+		} else {
+			item["value"] = slot["default"]
+			item["overridden"] = false
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// buildTasksView 任务行展开(cron/next/覆盖状态;nextRun 查询归前端经 effectiveTasks)
+func buildTasksView(pkg *plugin.Package, tasksOv map[string]any) []map[string]any {
+	h := pkg.Manifest.Parts.Hooks
+	if h == nil {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(h.Tasks))
+	for _, tk := range h.Tasks {
+		item := map[string]any{
+			"name":       tk.Name,
+			"cron":       tk.Cron,
+			"next":       tk.Next,
+			"timeoutMs":  tk.TimeoutMs,
+			"overridden": false,
+		}
+		if ov, ok := tasksOv[tk.Name].(map[string]any); ok {
+			if c, ok := ov["cron"].(string); ok && c != "" {
+				item["cron"] = c
+				item["overridden"] = true
+			}
+			if dis, ok := ov["disabled"].(bool); ok {
+				item["enabled"] = !dis
+			} else {
+				item["enabled"] = true
+			}
+		} else {
+			item["enabled"] = true
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// sortedKeys 稳定序键列表
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// savePackageSettings PUT:version 最先校验(不匹配 409)→ 槽位校验(声明外剥离/类型校验)→ 剔除默认 → 等值跳写
+func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	pkg, err := d.Packages.GetPackage(name)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if pkg.Manifest.Parts.Hooks == nil {
+		httpError(w, http.StatusBadRequest, "package has no settings (no hooks part)")
+		return
+	}
+	var req struct {
+		Config     map[string]any            `json:"config"`
+		Tasks      map[string]map[string]any `json:"tasks"`
+		BaseVersion int64                    `json:"version"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	// 乐观锁最先:过期即 409(提示可能由任务或升级写入)
+	cur := d.Packages.Settings().View(name).Version
+	if req.BaseVersion != cur {
+		httpError(w, http.StatusConflict, "settings modified (version mismatch); reload and retry")
+		return
+	}
+	// 槽位校验:声明外键剥离;类型粗校验
+	decl := pkg.Declaration
+	if decl == nil {
+		decl = map[string]any{}
+	}
+	cfgOut := map[string]any{}
+	for k, v := range req.Config {
+		schema, ok := decl[k].(map[string]any)
+		if !ok {
+			continue // 声明外键剥离
+		}
+		if err := checkSettingType(k, schema, v); err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// 剔除默认值(等值于 default 不落层)
+		if dv, ok := schema["default"]; ok && settingValueEqual(dv, v) {
+			continue
+		}
+		cfgOut[k] = v
+	}
+	tasksOut := map[string]map[string]any{}
+	declared := map[string]bool{}
+	if h := pkg.Manifest.Parts.Hooks; h != nil {
+		for _, tk := range h.Tasks {
+			declared[tk.Name] = true
+		}
+	}
+	for tn, ov := range req.Tasks {
+		if !declared[tn] {
+			continue // 未声明任务剥离
+		}
+		clean := map[string]any{}
+		if c, ok := ov["cron"].(string); ok && c != "" {
+			if _, err := plugin.CronSchedule(c); err != nil {
+				httpError(w, http.StatusBadRequest, "task "+tn+": "+err.Error())
+				return
+			}
+			clean["cron"] = c
+		}
+		if dis, ok := ov["disabled"].(bool); ok && dis {
+			clean["disabled"] = true
+		}
+		if len(clean) > 0 {
+			tasksOut[tn] = clean
+		}
+	}
+	view, err := d.Packages.Settings().Put(name, plugin.PutInput{Config: cfgOut, Tasks: tasksOut})
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "version": view.Version})
+}
+
+// checkSettingType 类型粗校验(string/int/number/bool/enum)
+func checkSettingType(name string, schema map[string]any, v any) error {
+	typ, _ := schema["type"].(string)
+	switch typ {
+	case "string", "":
+		if _, ok := v.(string); !ok && v != nil {
+			return fmt.Errorf("setting %s: want string", name)
+		}
+	case "int", "number":
+		switch v.(type) {
+		case float64, int64, int:
+		default:
+			return fmt.Errorf("setting %s: want %s", name, typ)
+		}
+	case "bool":
+		if _, ok := v.(bool); !ok {
+			return fmt.Errorf("setting %s: want bool", name)
+		}
+	case "enum":
+		if sv, ok := v.(string); ok {
+			for _, e := range toStrings(schema["values"]) {
+				if e == sv {
+					return nil
+				}
+			}
+			return fmt.Errorf("setting %s: %q not in enum values", name, sv)
+		}
+	}
+	return nil
+}
+
+// toStrings 枚举值表
+func toStrings(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// settingValueEqual JSON 语义等值(数值跨 int/float 形态)
+func settingValueEqual(a, b any) bool {
+	ab, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	return string(ab) == string(bb)
 }
 
 func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
@@ -420,17 +695,25 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Deps) updateCode(w http.ResponseWriter, r *http.Request) {
-	// 在线编辑:?kind=protocol 或 ?kind=filter&name=<filter 名>;body=部件代码
-	// 语义:替换部件源码 → 整包升级(revision+1)→ 实例缓存经 revision 失效
+	// 在线编辑:?kind=protocol | ?kind=filter&name=<filter 名> | ?kind=hooks&name=<包内路径(init.js/keys.js/tasks/<n>.js)>
+	// 语义:替换部件源码 → 整包升级(revision+1)→ 编译/声明重提取校验(坏代码 400 拒保存)
 	name := r.PathValue("name")
 	kind := r.URL.Query().Get("kind")
 	partName := r.URL.Query().Get("name")
-	if kind != "protocol" && kind != "filter" {
-		httpError(w, http.StatusBadRequest, "kind must be protocol|filter")
-		return
-	}
-	if kind == "filter" && partName == "" {
-		httpError(w, http.StatusBadRequest, "filter name required")
+	switch kind {
+	case "filter":
+		if partName == "" {
+			httpError(w, http.StatusBadRequest, "filter name required")
+			return
+		}
+	case "hooks":
+		if partName == "" || strings.Contains(partName, "..") || strings.HasPrefix(partName, "/") {
+			httpError(w, http.StatusBadRequest, "hooks file path required (init.js|keys.js|tasks/<n>.js)")
+			return
+		}
+	case "protocol":
+	default:
+		httpError(w, http.StatusBadRequest, "kind must be protocol|filter|hooks")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
@@ -446,11 +729,15 @@ func (d *Deps) updateCode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "revision": revision})
 }
 
-// getPartCode 读部件源码(?kind=protocol|filter&name=<filter 名>;text/plain)
+// getPartCode 读部件源码(?kind=protocol|filter&name=<filter 名>|kind=hooks&name=<包内路径>;text/plain)
 func (d *Deps) getPartCode(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	kind := r.URL.Query().Get("kind")
 	partName := r.URL.Query().Get("name")
+	if kind == "hooks" && (partName == "" || strings.Contains(partName, "..") || strings.HasPrefix(partName, "/")) {
+		httpError(w, http.StatusBadRequest, "hooks file path required (init.js|keys.js|tasks/<n>.js)")
+		return
+	}
 	src, err := d.Packages.GetPart(name, kind, partName)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
@@ -460,13 +747,184 @@ func (d *Deps) getPartCode(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(src)
 }
 
-// packageKeys 包级 keys 视图(明文;按包名隔离,属包私有数据)
+// packageKeys 包级 keys 视图(明文;按包名隔离,属包私有数据;响应并 hooks 能力标记)
 func (d *Deps) packageKeys(w http.ResponseWriter, r *http.Request) {
 	if d.KeysFunc == nil {
 		httpError(w, http.StatusNotImplemented, "keys unavailable")
 		return
 	}
-	writeJSON(w, d.KeysFunc(r.PathValue("name")))
+	name := r.PathValue("name")
+	out := d.KeysFunc(name)
+	hooks := map[string]any{"keyWrite": false, "keyRead": false, "keyForm": false}
+	if d.KeyHooksFunc != nil {
+		write, read, form := d.KeyHooksFunc(name)
+		hooks["keyWrite"], hooks["keyRead"], hooks["keyForm"] = write, read, form
+	}
+	out["hooks"] = hooks
+	writeJSON(w, out)
+}
+
+// validKeyName 键名约束:非空,≤64 字符,无控制字符,不含 /(单路径段寻址)
+func validKeyName(name string) bool {
+	if name == "" || len(name) > 64 || strings.Contains(name, "/") {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// putPackageKey 单键写入(HW 面:键名校验 400/未启用 409/过期 409/钩子错 400/超时 500)
+func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
+	if d.KeyWriteFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys write unavailable")
+		return
+	}
+	pkg := r.PathValue("name")
+	key := r.PathValue("key")
+	if !validKeyName(key) {
+		httpError(w, http.StatusBadRequest, "invalid key name")
+		return
+	}
+	var req struct {
+		Value        any   `json:"value"`
+		BaseUpdatedAt int64 `json:"baseUpdatedAt"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	updated, transformed, err := d.KeyWriteFunc(pkg, key, req.Value, req.BaseUpdatedAt)
+	if err != nil {
+		writeKeyErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"updatedAt": updated, "transformed": transformed})
+}
+
+// packageKeyDetail 键详情(keyRead 解释;501 = 未实现)
+func (d *Deps) packageKeyDetail(w http.ResponseWriter, r *http.Request) {
+	if d.KeyReadFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys read unavailable")
+		return
+	}
+	pkg, key := r.PathValue("name"), r.PathValue("key")
+	if !validKeyName(key) {
+		httpError(w, http.StatusBadRequest, "invalid key name")
+		return
+	}
+	detail, err := d.KeyReadFunc(pkg, key)
+	if err != nil {
+		if errors.Is(err, plugin.ErrPackageDisabled) {
+			httpError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
+			httpError(w, http.StatusNotImplemented, "keyRead not implemented")
+			return
+		}
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"detail": detail})
+}
+
+// packageKeyForm 添加表单声明
+func (d *Deps) packageKeyForm(w http.ResponseWriter, r *http.Request) {
+	if d.KeyFormFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys form unavailable")
+		return
+	}
+	decl, err := d.KeyFormFunc(r.PathValue("name"))
+	if err != nil {
+		if errors.Is(err, plugin.ErrPackageDisabled) {
+			httpError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
+			httpError(w, http.StatusNotImplemented, "keyForm not implemented")
+			return
+		}
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	form, ok := decl.(map[string]any)
+	if !ok || form == nil {
+		httpError(w, http.StatusNotImplemented, "keyForm not implemented")
+		return
+	}
+	writeJSON(w, map[string]any{"fields": form["fields"], "actions": form["actions"]})
+}
+
+// packageKeyFormAction 表单按钮回调
+func (d *Deps) packageKeyFormAction(w http.ResponseWriter, r *http.Request) {
+	if d.KeyActionFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys form unavailable")
+		return
+	}
+	var req struct {
+		Action string         `json:"action"`
+		Values map[string]any `json:"values"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil || req.Action == "" {
+		httpError(w, http.StatusBadRequest, "action required")
+		return
+	}
+	msg, err := d.KeyActionFunc(r.PathValue("name"), req.Action, req.Values)
+	if err != nil {
+		writeKeyErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"message": msg})
+}
+
+// packageKeyFormSubmit 表单提交(写入在钩子内完成;written 收集)
+func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
+	if d.KeySubmitFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys form unavailable")
+		return
+	}
+	var req struct {
+		Values map[string]any `json:"values"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	written, msg, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
+	if err != nil {
+		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
+			httpError(w, http.StatusNotImplemented, "keySubmit not implemented")
+			return
+		}
+		writeKeyErr(w, err)
+		return
+	}
+	if written == nil {
+		written = []string{}
+	}
+	writeJSON(w, map[string]any{"written": written, "message": msg})
+}
+
+// writeKeyErr 错误映射:禁用 409/冲突 409/无部件 501/其余(钩子抛错/超限/超时)400|500 判别
+func writeKeyErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, plugin.ErrPackageDisabled):
+		httpError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, plugin.ErrVersionConflict):
+		httpError(w, http.StatusConflict, "keys modified (by task or upgrade); reload")
+	case errors.Is(err, plugin.ErrNoHooksPart):
+		httpError(w, http.StatusNotImplemented, "hooks not implemented")
+	case errors.Is(err, plugin.ErrHookTimeoutSentinel):
+		httpError(w, http.StatusInternalServerError, err.Error())
+	case strings.Contains(err.Error(), "exceed limit"):
+		httpError(w, http.StatusBadRequest, err.Error())
+	default:
+		httpError(w, http.StatusBadRequest, err.Error())
+	}
 }
 
 func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {
