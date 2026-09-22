@@ -47,11 +47,13 @@ type Entry struct {
 	ResponseBody string `json:"response_body,omitempty"`
 }
 
-// Filter 查询条件(空值 = 不过滤)
+// Filter 查询条件(空值 = 不过滤;时间含端点,零值不参与)
 type Filter struct {
 	Model    string
 	Upstream string
-	Error    bool // 仅错误(状态 >= 400)
+	Error    bool  // 仅错误(状态 >= 400)
+	Start    int64 // ts >= Start(epoch ms,零值不过滤)
+	End      int64 // ts <= End(epoch ms,零值不过滤)
 	Limit    int
 	Offset   int
 }
@@ -217,6 +219,14 @@ func buildWhere(f Filter) (string, []any) {
 	if f.Error {
 		where += " AND status >= ?"
 		args = append(args, http.StatusBadRequest)
+	}
+	if f.Start > 0 {
+		where += " AND ts >= ?"
+		args = append(args, f.Start)
+	}
+	if f.End > 0 {
+		where += " AND ts <= ?"
+		args = append(args, f.End)
 	}
 	return where, args
 }

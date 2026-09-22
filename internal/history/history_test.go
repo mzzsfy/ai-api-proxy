@@ -208,6 +208,72 @@ func TestStore_Query_ListExcludesBodies(t *testing.T) {
 	}
 }
 
+func TestStore_Query_TimeRange(t *testing.T) {
+	// Given 三个不同时间戳行 When 限定 start/end 区间 Then 仅区间内行,边界相等含端点
+	s := newTestStore(t)
+	ctx := context.Background()
+	seed(t, s, Entry{Method: "POST", Model: "old"}, 1000)
+	seed(t, s, Entry{Method: "POST", Model: "mid"}, 2000)
+	seed(t, s, Entry{Method: "POST", Model: "new"}, 3000)
+	rows, total, err := s.Query(ctx, Filter{Start: 1500, End: 2500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || rows[0].Model != "mid" {
+		t.Fatalf("range filter: total=%d rows=%+v", total, rows)
+	}
+	rows, total, err = s.Query(ctx, Filter{Start: 1000, End: 3000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("inclusive bounds: total=%d", total)
+	}
+}
+
+func TestStore_Query_TimeRangeSingleSide(t *testing.T) {
+	// Given 行混合 When 仅 start / 仅 end Then 各自方向子集正确
+	s := newTestStore(t)
+	ctx := context.Background()
+	seed(t, s, Entry{Method: "POST", Model: "a"}, 1000)
+	seed(t, s, Entry{Method: "POST", Model: "b"}, 2000)
+	rows, total, err := s.Query(ctx, Filter{Start: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || rows[0].Model != "b" {
+		t.Fatalf("start only: total=%d rows=%+v", total, rows)
+	}
+	rows, total, err = s.Query(ctx, Filter{End: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || rows[0].Model != "a" {
+		t.Fatalf("end only: total=%d rows=%+v", total, rows)
+	}
+}
+
+func TestStore_Query_TimeRangeInvalid(t *testing.T) {
+	// Given start>end 或非法语义 When 查询 Then 空集;零值(未传)不加过滤
+	s := newTestStore(t)
+	ctx := context.Background()
+	seed(t, s, Entry{Method: "POST", Model: "x"}, 2000)
+	rows, total, err := s.Query(ctx, Filter{Start: 3000, End: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("inverted range: total=%d", total)
+	}
+	_, total, err = s.Query(ctx, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("zero values must not filter: total=%d", total)
+	}
+}
+
 func TestStore_Query_LimitOffsetBounds(t *testing.T) {
 	// Given 多行 When limit/offset 越界与缺省 Then 钳制生效(缺省页大小、上限、负 offset 视 0)
 	s := newTestStore(t)

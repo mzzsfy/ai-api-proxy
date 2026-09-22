@@ -1120,7 +1120,7 @@ func (d *Deps) metricsSeries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rows)
 }
 
-// listHistory 请求历史分页查询(?model=&upstream=&error=1&limit=&offset=)
+// listHistory 请求历史分页查询(?model=&upstream=&error=1&start=&end=&limit=&offset=;非法时间参数忽略)
 func (d *Deps) listHistory(w http.ResponseWriter, r *http.Request) {
 	if d.History == nil {
 		httpError(w, http.StatusNotImplemented, "history not configured")
@@ -1131,6 +1131,8 @@ func (d *Deps) listHistory(w http.ResponseWriter, r *http.Request) {
 		Model:    q.Get("model"),
 		Upstream: q.Get("upstream"),
 		Error:    q.Get("error") == "1",
+		Start:    parseMS(q.Get("start")),
+		End:      parseMS(q.Get("end")),
 	}
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -1171,6 +1173,18 @@ func (d *Deps) getHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, e)
+}
+
+// parseMS 解析 epoch 毫秒查询参数(非数字或非正按未传)
+func parseMS(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // listTransports 传输实例清单(只读)

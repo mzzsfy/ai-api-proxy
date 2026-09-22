@@ -890,16 +890,32 @@ async function renderPkgMonPane(name) {
   registerDraw("pkg-chart", draw);
   draw();
 }
-/* ─── 请求历史:分页 + 过滤 + 单条详情(bodies;状态色按 4xx/5xx 分级) ─── */
+/* ─── 请求历史:时间段 + 分页 + 过滤 + 单条详情(bodies;状态色按 4xx/5xx 分级) ─── */
 const histState = { limit: 50, offset: 0 };
 const histStatusColor = s => s >= 500 ? "color:var(--err)" : (s >= 400 ? "color:var(--warn)" : "");
+/* 预设时间窗(ms 相对 now,0 = 全部,-1 = 自定义输入) */
+const HIST_RANGES = [
+  { label: "全部", ms: 0 },
+  { label: "30分钟", ms: 30*60*1000 },
+  { label: "1小时", ms: 60*60*1000 },
+  { label: "6小时", ms: 6*60*60*1000 },
+  { label: "1天", ms: 24*60*60*1000 },
+  { label: "7天", ms: 7*24*60*60*1000 },
+  { label: "30天", ms: 30*24*60*60*1000 },
+  { label: "自定义", ms: -1 },
+];
 
 async function showHistory() {
   $("#main").innerHTML = `
     <div class="titlerow"><h2>请求历史</h2><button id="histrf">刷新</button></div>
     <div class="row">
-      模型 <input id="his-model" style="width:180px">
-      上游 <input id="his-upstream" style="width:140px">
+      时间 <select id="his-range">${HIST_RANGES.map(r => `<option value="${r.ms}">${r.label}</option>`).join("")}</select>
+      <span id="his-custom" style="display:none">
+        <input type="datetime-local" id="his-start" style="width:200px"> 至
+        <input type="datetime-local" id="his-end" style="width:200px">
+      </span>
+      模型 <input id="his-model" style="width:140px">
+      上游 <input id="his-upstream" style="width:120px">
       <label class="muted" style="font-size:13px">仅错误 <input id="his-err" type="checkbox"></label>
       <button class="pri" id="his-q">查询</button>
       <span class="muted" id="his-total"></span>
@@ -907,8 +923,26 @@ async function showHistory() {
     <div id="his-table"><div class="muted">载入中…</div></div>
     <div id="his-detail"></div>`;
   $("#histrf").onclick = showHistory;
+  $("#his-range").onchange = e => { toggleHistCustom(+e.target.value); histState.offset = 0; loadHistory(); };
   $("#his-q").onclick = () => { histState.offset = 0; loadHistory(); };
+  toggleHistCustom(+$("#his-range").value);
   loadHistory();
+}
+
+function toggleHistCustom(ms) { $("#his-custom").style.display = ms < 0 ? "" : "none"; }
+
+/* 当前时间窗的 start/end(epoch ms);无过滤返回 {} */
+function histTimeRange() {
+  const ms = +$("#his-range").value;
+  if (ms > 0) return { start: Date.now() - ms };
+  if (ms < 0) {
+    const out = {};
+    const s = $("#his-start").value, e = $("#his-end").value;
+    if (s && Number.isFinite(+new Date(s))) out.start = new Date(s).getTime();
+    if (e && Number.isFinite(+new Date(e))) out.end = new Date(e).getTime();
+    return out;
+  }
+  return {};
 }
 
 async function loadHistory() {
@@ -917,6 +951,9 @@ async function loadHistory() {
   if (model) q.set("model", model);
   if (upstream) q.set("upstream", upstream);
   if ($("#his-err").checked) q.set("error", "1");
+  const range = histTimeRange();
+  if (range.start) q.set("start", range.start);
+  if (range.end) q.set("end", range.end);
   let r;
   try { r = await api.get("/history?" + q); }
   catch (err) { $("#his-table").innerHTML = `<div class="empty">加载失败: ${esc(err.message)}</div>`; return; }
