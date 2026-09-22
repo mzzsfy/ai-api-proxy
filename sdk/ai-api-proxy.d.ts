@@ -156,11 +156,13 @@ export interface HookKeys {
   /**
    * 键级合并:给定键覆盖,未提及键保留;写前 current 整体快照进 previous
    * 仅任务执行与 keySubmit 的 ctx 挂载此方法(其余钩子 undefined——阉割即权限)
+   * 立即持久化,不随任务回滚——凭据轮转先写新键后删旧键
    */
   merge?(values: Record<string, unknown>): void;
   /**
    * 删除指定键(变参,不存在的键忽略):写前 current 整体快照进 previous(误删可找回)
-   * 仅任务执行与 keySubmit 的 ctx 挂载(窗口同 merge)——如密码换 token 后清理密码
+   * 仅任务执行与 keySubmit 的 ctx 挂载(窗口同 merge);立即持久化不回滚
+   * 凭据最小持有:密码换 token 后密码必须删;不存在整文档替换 API(防无声吞掉用户手动凭据)
    */
   remove?(...names: string[]): void;
   /** 仅热加载提供旧包快照;启停/首载 undefined */

@@ -48,20 +48,31 @@ keys 是**包级 name → value 映射**(整包一份,current + 上一版 previo
 
 ### 写入途径与写窗
 
-写入两条路,都是**局部命名操作**——不存在"整文档替换"(脚本是访客,不能整体重写用户的凭据文档):
+写入两条路,都是**局部命名操作**——**不存在整文档替换 API,这是有意设计**:
 
-- **`ctx.keys.merge({...})`** 键级合并:给定键覆盖,未提及键保留
-- **`ctx.keys.remove("a", "b")`** 删除指定键(变参,不存在的键忽略)——如密码换 token 后清理密码
+> keys 文档有两个写者:脚本(访客,刷新自己采集的凭据)和用户(主人,经管理台手动加备用凭据/多账号)。
+> 全量重写会无声吞掉用户手动加的键——凭据静默丢失,下次请求 401 才暴露,故障面不可接受。
+> 因此脚本侧永远只有局部命名操作;整文档编辑是用户在 GUI JSON 弹层的专属能力。
 
-两者写前 current 都整体快照进 previous(误删可找回)。
+- **`ctx.keys.merge({...})`** 键级合并:给定键覆盖,**未提及键保留**
+- **`ctx.keys.remove("a", "b")`** 删除指定键(变参,不存在的键忽略)——**凭据最小持有**:密码换 token 后密码必须删,不当作废键留库
+
+两者写前 current 都整体快照进 previous(误删可找回);一次变更只产生一次快照(merge+remove 连续调用 = 两次变更、两次快照,previous 恒为最近一次变更前的状态)。
+
+典型凭据轮转(密码换 token):
+
+```js
+ctx.keys.merge({ token: newToken });
+ctx.keys.remove("password", "oldToken");   // 作废键即删
+```
 
 **写窗(阉割即权限)**:merge/remove 只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.merge === "undefined"` 可探测)。
 
 | 途径 | 时机 | 写窗 |
 |---|---|---|
 | 任务里 `ctx.keys.merge({...})` / `ctx.keys.remove(...)` | 运行期(刷 token / 清理作废键) | ✓ 任务执行 |
-| keySubmit 表单采集 | 钩子内自行 merge(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
-| 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) | 用户侧 |
+| keySubmit 表单采集 | 钩子内自行 merge/remove(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
+| 管理台手动新增/编辑 | 用户操作(声明了 keyWrite 时走归一化,否则原样保存) | 用户侧 |
 
 | 钩子 | keys 能力 |
 |---|---|
@@ -69,13 +80,30 @@ keys 是**包级 name → value 映射**(整包一份,current + 上一版 previo
 | keySubmit | get / previous / list / **merge** / **remove** + http |
 | keyAction | get / previous / list + http(只读;发验证码无需写) |
 | onLoad | get / previous / list(只读) |
-| keyWrite / keyRead / keyForm | get / previous(最小面) |
+| keyWrite / keyRead / keyForm | get / previous / list(最小面) |
 
-读:`ctx.keys.get(name)`;旧版快照:`ctx.keys.previous(name)`(仅热升级的 onLoad/首轮任务提供,平时 undefined)。
+**keys API 参考**(全部钩子可用的只读面):
 
-protocol/filter 部件只读:`util.key(name)` 实时读当前值。
+| 方法 | 签名 | 说明 |
+|---|---|---|
+| get | `get(name)` | 当前值;无值 undefined |
+| previous | `previous(name)` | 上一版快照值(最近一次变更前的 current 中该键);从未变更过返回 undefined |
+| list | `list()` | 键名数组,排序,不含值(枚举与读取分离) |
 
-### keys.js 五钩子(全部可选;不写 → GUI 退化为通用 JSON 编辑)
+**失败语义**:merge/remove **立即持久化,不随任务回滚**(storage 才有事务缓冲)。凭据轮转因此有顺序约束——**先写新键,后删旧键**:
+
+```js
+ctx.keys.merge({ token: newToken });   // 1) 新凭据先落库
+ctx.keys.remove("password");           // 2) 再删作废键;即使此处任务崩溃,token 已在
+```
+
+倒过来(先删后写)中途崩溃 = 旧凭据已删、新凭据未成,current 凭据失效(previous 尚留删除前快照,可人工找回,但服务已中断)。
+
+读:`ctx.keys.get(name)`;上一版快照:`ctx.keys.previous(name)`(库中无快照时 undefined)。
+
+protocol/filter 部件只读:`util.key(name)` 实时读当前值(与 ctx.keys.get 同源,只是入口在 util——protocol/filter 的 ctx 无 keys 命名空间)。
+
+### keys.js 五钩子(keyWrite / keyRead / keyForm / keyAction / keySubmit;全部可选;不写 → GUI 退化为通用 JSON 编辑)
 
 ```js
 // @ts-check
@@ -127,11 +155,13 @@ module.exports = {
 
 要点:
 - fields 建议显式 `name`(errors 按它定位输入框);缺省按 description/序号兜底
-- **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 merge 决定
+- **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 merge/remove 决定
+- GUI 提交反馈的变更集含 merge 与 remove 的全部键名(删除键也会列出)
 - 抛错仍然可用(视为崩溃,GUI 显示错误文本),但业务拒绝请用 errors/message 通道
-- 写窗:keyAction 无 merge(发验证码不需要写);业务需要写入的动作归入 keySubmit
-- 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败(storage 缓冲一并丢弃)
+- 写窗:keyAction 无 merge/remove(发验证码不需要写);业务需要写入的动作归入 keySubmit
+- 各钩子超时:keyWrite/keyRead/keyForm 5s,keyAction/keySubmit 10s,init.js onLoad 5s(见 02);超时该次操作失败(storage 缓冲一并丢弃;keys 写入无缓冲,已执行的 merge/remove 不回滚)
 - GUI「新增凭据」预填名:已有键序号 `key-N` 兜底;keyForm 声明 fields 后以表单采集为正入口
+- 值类型:JSON 可序列化(字符串/数字/布尔/对象/数组);64KB 单包上限(current+previous 联合计量)
 
 ### 手动管理兜底
 
