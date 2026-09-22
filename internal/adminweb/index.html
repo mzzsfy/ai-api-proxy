@@ -97,6 +97,23 @@
     position:fixed; top:14px; right:14px; z-index:9; padding:9px 16px; border-radius:8px;
     display:none; font-size:13px; max-width:60vw; box-shadow:0 6px 24px rgba(16,24,40,.12);
   }
+  /* 模态层:页内对话框(Esc/遮罩=取消,Enter=确认) */
+  .modal-mask {
+    position:fixed; inset:0; z-index:20; background:rgba(16,24,40,.45);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .modal {
+    width:min(460px, calc(100vw - 40px)); background:var(--bg1);
+    border:1px solid var(--line-soft); border-radius:10px; padding:18px 20px 16px;
+    box-shadow:0 12px 40px rgba(16,24,40,.24);
+  }
+  .modal h3 { margin:0 0 10px; }
+  .modal .modal-body {
+    color:var(--dim); font-size:12.5px; line-height:1.6; white-space:pre-wrap;
+    font-family:var(--mono); max-height:50vh; overflow:auto;
+  }
+  .modal .modal-input { width:100%; margin-top:10px; font-family:var(--mono); }
+  .modal .modal-ops { display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
   /* 监控:脉搏带(记忆点)+ 指标行 */
   .pulse { display:flex; align-items:flex-end; gap:34px; flex-wrap:wrap;
            border-bottom:1px solid var(--line); padding-bottom:18px; margin-bottom:6px; }
@@ -205,6 +222,45 @@ function msg(ok, text) {
   el._t = setTimeout(() => el.style.display = "none", 3200);
 }
 
+/* ─── 页内模态:Promise 化确认/输入(替代原生 confirm/prompt;Esc/遮罩=取消,Enter=确认) ─── */
+function uiModal(opts) {
+  return new Promise(resolve => {
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+    mask.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3>${esc(opts.title)}</h3>
+        ${opts.body ? `<div class="modal-body">${esc(opts.body)}</div>` : ""}
+        ${opts.input ? `<input class="modal-input">` : ""}
+        <div class="modal-ops">
+          <button data-act="cancel">取消</button>
+          <button class="pri" data-act="ok">确定</button>
+        </div>`;
+    let settled = false;
+    const field = mask.querySelector(".modal-input");
+    if (field) { field.value = opts.value || ""; }
+    document.body.appendChild(mask);
+    const done = v => {
+      if (settled) return;
+      settled = true;
+      mask.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(v);
+    };
+    const onKey = e => {
+      if (e.key === "Escape") done(null);
+      else if (e.key === "Enter") done(field ? field.value : true);
+    };
+    document.addEventListener("keydown", onKey);
+    mask.addEventListener("mousedown", e => { if (!mask.querySelector(".modal").contains(e.target)) done(null); });
+    mask.querySelector("[data-act=cancel]").onclick = () => done(null);
+    mask.querySelector("[data-act=ok]").onclick = () => done(field ? field.value : true);
+    if (field) field.select(); else mask.querySelector("[data-act=ok]").focus();
+  });
+}
+const uiConfirm = (title, body) => uiModal({ title: title, body: body }).then(v => v === true);
+const uiPrompt = (title, value) => uiModal({ title: title, input: true, value: value });
+
 /* ─── 外壳与路由:资源(模型管理/插件管理/插件配置) + 观测(监控/请求历史) ─── */
 const PAGES = { ups: showUpstreams, pkgs: showPackages, plugconf: showPlugConf, mon: showMonitor, hist: showHistory };
 const PAGE_NAMES = { ups: "模型管理", pkgs: "插件管理", plugconf: "插件配置", mon: "监控", hist: "请求历史" };
@@ -292,7 +348,7 @@ async function showUpstreams() {
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
-    if (!confirm("删除该上游?")) return;
+    if (!(await uiConfirm("删除上游", `删除该上游(${b.dataset.d})?删除后该模型的调用立即失败。`))) return;
     try { await api.del(`/upstreams/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
     catch (err) { msg(false, err.message); }
   });
@@ -479,7 +535,7 @@ async function showPackages() {
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
-    if (!confirm(`卸载包 ${b.dataset.del}?`)) return;
+    if (!(await uiConfirm("卸载包", `卸载包 ${b.dataset.del}?引用它的上游将无法解析。`))) return;
     try { await api.del(`/packages/${b.dataset.del}`); msg(true, "已卸载"); showPackages(); }
     catch (err) { msg(false, err.message); }
   });
@@ -500,7 +556,7 @@ function bindImport() {
       `secretRefs: ${(s.secretRefs || []).join(",") || "无"}`,
       `hooks 任务: ${s.hooks ? (s.hooks.tasks || []).map(t => t.name || t).join(",") || "无任务" : "无"}`,
     ].filter(Boolean);
-    return confirm("导入确认\n" + lines.join("\n") + "\n\n确认安装?");
+    return uiConfirm("导入确认", lines.join("\n") + "\n\n确认安装?");
   };
   $("#fp").onchange = async e => {
     const f = e.target.files[0];
@@ -516,7 +572,7 @@ function bindImport() {
     e.target.value = "";
   };
   $("#iu").onclick = async () => {
-    const url = prompt("包 URL (.aap):");
+    const url = await uiPrompt("从 URL 导入", "包 URL (.aap):");
     if (!url) return;
     try {
       const s = await api.post("/packages/inspect", { url });
@@ -527,12 +583,13 @@ function bindImport() {
   };
 }
 
-/* ─── 插件配置:左包选择 + 右详情 tabs(配置|keys|任务|代码|监控) ─── */
+/* ─── 插件配置:左包选择 + 右详情 tabs(配置|keys|任务) ─── */
 const plugConfState = { pkg: null, settings: null }; // settings: {version, config[], tasks[], noHooks}
 
 async function showPlugConf(selectName) {
   const pkgs = await api.get("/packages");
-  const name = selectName || plugConfState.pkg || (pkgs[0] && pkgs[0].name) || "";
+  const cached = plugConfState.pkg && pkgs.some(p => p.name === plugConfState.pkg) ? plugConfState.pkg : "";
+  const name = selectName || cached || (pkgs[0] && pkgs[0].name) || "";
   plugConfState.pkg = name;
   // 从插件管理行内入口跳转时同步左栏高亮
   document.querySelectorAll("nav a[data-p]").forEach(a => a.classList.toggle("on", a.dataset.p === "plugconf"));
@@ -564,34 +621,15 @@ async function renderPlugDetail(name) {
       ${p.hasProtocol ? `<span class="badge">协议</span>` : ""}
       ${(p.filters && p.filters.length) ? `<span class="badge">filters×${p.filters.length}</span>` : ""}
       ${p.hasHooks ? `<span class="badge">hooks</span>` : ""}
-      <span class="ops">
-        <button id="pd-toggle" data-on="${p.enabled ? "1" : "0"}">${p.enabled ? "停用" : "启用"}</button>
-        <a href="/admin/api/packages/${esc(p.name)}/export"><button>导出</button></a>
-        <button class="danger" id="pd-del">卸载</button>
-      </span>
     </div>
     <div class="tabs">
       <a data-tab="config">配置</a>
       <a data-tab="keys">keys</a>
       <a data-tab="tasks">任务</a>
-      <a data-tab="code">代码</a>
-      <a data-tab="mon">监控</a>
     </div>
     <div class="tabpane" id="pane-config"><div class="muted">载入中…</div></div>
     <div class="tabpane" id="pane-keys"></div>
-    <div class="tabpane" id="pane-tasks"></div>
-    <div class="tabpane" id="pane-code"></div>
-    <div class="tabpane" id="pane-mon"></div>`;
-  $("#pd-toggle").onclick = async () => {
-    const on = $("#pd-toggle").dataset.on !== "1";
-    try { await api.post(`/packages/${name}/enable`, { enabled: on }); renderPlugDetail(name); }
-    catch (err) { msg(false, err.message); }
-  };
-  $("#pd-del").onclick = async () => {
-    if (!confirm(`卸载包 ${name}?`)) return;
-    try { await api.del(`/packages/${name}`); msg(true, "已卸载"); plugConfState.pkg = null; showPlugConf(); }
-    catch (err) { msg(false, err.message); }
-  };
+    <div class="tabpane" id="pane-tasks"></div>`;
   // tab 切换:首次进入懒加载各 pane(失败回滚标记,可重试)
   const loaded = {};
   const loadPane = async tab => {
@@ -599,8 +637,6 @@ async function renderPlugDetail(name) {
     try {
       if (tab === "config" || tab === "tasks") await loadSettingsPanes(name, loaded);
       else if (tab === "keys") await renderKeysPane(name);
-      else if (tab === "code") await renderCodePane(name);
-      else if (tab === "mon") await renderPkgMonPane(name);
       loaded[tab] = true;
     } catch (err) { msg(false, err.message); }
   };
@@ -750,9 +786,9 @@ function renderKeyRows(name, kv, hooks) {
   });
 }
 
-function editKey(name, kv, key) {
+async function editKey(name, kv, key) {
   const cur = kv.current[key];
-  const v = prompt(`编辑 ${key}(JSON):`, JSON.stringify(cur, null, 2));
+  const v = await uiPrompt(`编辑 ${key}(JSON)`, JSON.stringify(cur, null, 2));
   if (v === null) return;
   let val;
   try { val = JSON.parse(v); } catch { msg(false, "值不是合法 JSON"); return; }
@@ -832,64 +868,6 @@ async function renderKeyForm(name) {
   };
 }
 
-/* 代码 pane:protocol / filter / hooks 在线编辑(热生效) */
-async function renderCodePane(name) {
-  const p = (await api.get("/packages")).find(x => x.name === name) || {};
-  $("#pane-code").innerHTML = `
-    <div class="row">
-      类型 <select id="ek"><option value="protocol">protocol</option><option value="filter">filter</option><option value="hooks">hooks 文件</option></select>
-      名称 <input id="en" style="width:220px" placeholder="filter 名或 hooks 路径(filters/n.js、tasks/n.js 等)">
-      <button id="load">载入</button> <button class="pri" id="save">保存(热生效)</button>
-    </div>
-    <textarea id="code" rows="18" spellcheck="false"></textarea>
-    <div class="row muted">保存会替换部件源码并整包升级(revision+1);hooks 文件保存会重新提取声明,语法错误拒保存。</div>`;
-  const q = () => {
-    const kind = $("#ek").value, fn = $("#en").value;
-    return kind === "protocol" ? "?kind=protocol" : `?kind=${kind}&name=${encodeURIComponent(fn)}`;
-  };
-  $("#load").onclick = async () => {
-    try { $("#code").value = await api.get(`/packages/${name}/code${q()}`, true); }
-    catch (err) { msg(false, err.message); }
-  };
-  $("#save").onclick = async () => {
-    try {
-      await api.put(`/packages/${name}/code${q()}`, $("#code").value);
-      msg(true, "已保存,热生效");
-    } catch (err) { msg(false, err.message); }
-  };
-}
-
-/* 包监控 pane:live 计数 + 近 60 分钟该包时序 + 错误率(canvas id=pkg-chart,复用 drawChart) */
-async function renderPkgMonPane(name) {
-  const pane = $("#pane-mon");
-  pane.innerHTML = `<div class="muted">载入中…</div>`;
-  let m, series;
-  try {
-    [m, series] = await Promise.all([api.get("/metrics/live"), api.get("/metrics/series?minutes=60")]);
-  } catch (err) { pane.innerHTML = `<div class="empty">指标加载失败: ${esc(err.message)}</div>`; return; }
-  series = series || [];
-  const live = (m.by_package || {})[name] || { requests: 0, errors: 0 };
-  const agg = series.reduce((acc, row) => {
-    const c = (row.by_package || {})[name] || {};
-    acc.requests += c.requests || 0;
-    acc.errors += c.errors || 0;
-    return acc;
-  }, { requests: 0, errors: 0 });
-  const rate = agg.requests > 0 ? (agg.errors * 100 / agg.requests) : null;
-  pane.innerHTML = `
-    <div class="stats">
-      <div class="stat"><div class="v acc num">${fmt(live.requests)}</div><div class="l">当前分钟请求</div></div>
-      <div class="stat"><div class="v num">${fmt(agg.requests)}</div><div class="l">近 60 分钟请求</div></div>
-      <div class="stat"><div class="v err num">${fmt(agg.errors)}</div><div class="l">近 60 分钟错误</div></div>
-      <div class="stat"><div class="v ${rate !== null && rate > 0 ? "err" : ""} num">${rate === null ? "—" : rate.toFixed(1) + "%"}</div><div class="l">错误率(近 60 分钟)</div></div>
-    </div>
-    <h3>该包分钟时序(近 60 分钟)</h3>
-    <canvas id="pkg-chart" width="1020" height="220" style="border:1px solid var(--line-soft);border-radius:8px;max-width:100%"></canvas>
-    <div class="muted row"><span style="color:var(--acc)">—</span> 请求数&nbsp;&nbsp;<span style="color:var(--err)">—</span> 错误数</div>`;
-  const draw = () => drawChart("pkg-chart", series);
-  registerDraw("pkg-chart", draw);
-  draw();
-}
 /* ─── 请求历史:时间段 + 分页 + 过滤 + 单条详情(bodies;状态色按 4xx/5xx 分级) ─── */
 const histState = { limit: 50, offset: 0 };
 const histStatusColor = s => s >= 500 ? "color:var(--err)" : (s >= 400 ? "color:var(--warn)" : "");
@@ -1149,7 +1127,7 @@ function drawSpark(id, values, warnColor) {
   ctx.strokeStyle = lineColor; ctx.lineWidth = 1.6; ctx.stroke();
 }
 
-/* drawChart 主时序:requests 面积 + errors 线(目标 canvas id,监控页与包监控 pane 复用) */
+/* drawChart 主时序:requests 面积 + errors 线(监控页使用) */
 function drawChart(id, series) {
   const cv = document.getElementById(id);
   if (!cv) return;

@@ -46,7 +46,7 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 - 起步模板:管理 GUI → 包 → 下载模板包;或 `GET /packages/template`
 - 示例包:`sdk/examples/gemini`(四 hook 全实现 + 编写说明)
 - 测试:`node --test plugins/*/test/*.test.js`(插件库根执行)
-- 管理包:GUI 在线编辑(保存热生效)/ 导入(文件或 URL)/ 导出 / 卸载
+- 管理包:导入(文件或 URL)/ 导出 / 卸载
 - 目录热载:`config.plugins_dir` 内 `.aap` 或包目录启动时自动导入(幂等);`config.pack_dir` 非空则只打包不服务
 
 ## 开发

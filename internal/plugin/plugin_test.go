@@ -298,25 +298,6 @@ func TestRegistry_EnableDisable(t *testing.T) {
 	}
 }
 
-func TestUpdatePart_CompileValidation(t *testing.T) {
-	// Given 语法错误的部件代码 When UpdatePart Then 拒绝且 revision 不变;合法替换 revision+1
-	r := NewRegistry(testDB(t))
-	_ = mustInstall(t, r)
-	before := r.Revision("demo")
-	if _, err := r.UpdatePart(context.Background(), "demo", "protocol", "", []byte(`module.exports = { broken`)); err == nil {
-		t.Fatal("bad code accepted")
-	}
-	if r.Revision("demo") != before {
-		t.Fatal("revision changed on rejected update")
-	}
-	if _, err := r.UpdatePart(context.Background(), "demo", "protocol", "", []byte(protoSrc)); err != nil {
-		t.Fatal(err)
-	}
-	if r.Revision("demo") != before+1 {
-		t.Fatalf("revision after update: %d", r.Revision("demo"))
-	}
-}
-
 func TestRuntime_SyncViolationDetected(t *testing.T) {
 	// Given mapEvent 返回 Promise When MapEvent Then 同步违规错误
 	m := `{"manifestVersion":1,"name":"async","version":"1","parts":{

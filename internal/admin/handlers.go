@@ -83,8 +83,6 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-submit", d.packageKeyFormSubmit)
 	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
-	mux.HandleFunc("PUT /admin/api/packages/{name}/code", d.updateCode)
-	mux.HandleFunc("GET /admin/api/packages/{name}/code", d.getPartCode)
 	mux.HandleFunc("GET /admin/api/upstreams", d.listUpstreams)
 	mux.HandleFunc("POST /admin/api/upstreams", d.saveUpstream)
 	mux.HandleFunc("GET /admin/api/upstreams/{id}", d.getUpstream)
@@ -698,59 +696,6 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (d *Deps) updateCode(w http.ResponseWriter, r *http.Request) {
-	// 在线编辑:?kind=protocol | ?kind=filter&name=<filter 名> | ?kind=hooks&name=<包内路径(init.js/keys.js/tasks/<n>.js)>
-	// 语义:替换部件源码 → 整包升级(revision+1)→ 编译/声明重提取校验(坏代码 400 拒保存)
-	name := r.PathValue("name")
-	kind := r.URL.Query().Get("kind")
-	partName := r.URL.Query().Get("name")
-	switch kind {
-	case "filter":
-		if partName == "" {
-			httpError(w, http.StatusBadRequest, "filter name required")
-			return
-		}
-	case "hooks":
-		if partName == "" || strings.Contains(partName, "..") || strings.HasPrefix(partName, "/") {
-			httpError(w, http.StatusBadRequest, "hooks file path required (init.js|keys.js|tasks/<n>.js)")
-			return
-		}
-	case "protocol":
-	default:
-		httpError(w, http.StatusBadRequest, "kind must be protocol|filter|hooks")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "read body")
-		return
-	}
-	revision, err := d.Packages.UpdatePart(r.Context(), name, kind, partName, body)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "revision": revision})
-}
-
-// getPartCode 读部件源码(?kind=protocol|filter&name=<filter 名>|kind=hooks&name=<包内路径>;text/plain)
-func (d *Deps) getPartCode(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	kind := r.URL.Query().Get("kind")
-	partName := r.URL.Query().Get("name")
-	if kind == "hooks" && (partName == "" || strings.Contains(partName, "..") || strings.HasPrefix(partName, "/")) {
-		httpError(w, http.StatusBadRequest, "hooks file path required (init.js|keys.js|tasks/<n>.js)")
-		return
-	}
-	src, err := d.Packages.GetPart(name, kind, partName)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write(src)
 }
 
 // packageKeys 包级 keys 视图(明文;按包名隔离,属包私有数据;响应并 hooks 能力标记)

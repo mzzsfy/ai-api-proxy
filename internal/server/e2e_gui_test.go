@@ -51,11 +51,17 @@ func TestGUI_AdminPageServed(t *testing.T) {
 			t.Fatalf("admin page must not contain %s (插件管理页已纯化)", gone)
 		}
 	}
-	// S7 插件配置页五 tabs + 元信息条 + 包监控图
-	for _, mark := range []string{`data-tab="config"`, `data-tab="keys"`, `data-tab="tasks"`, `data-tab="code"`, `data-tab="mon"`,
-		`id="plugcfg-meta"`, `id="pkg-chart"`} {
+	// S7 插件配置页三 tabs(配置/keys/任务) + 元信息条(仅上下文标识,无操作按钮)
+	for _, mark := range []string{`data-tab="config"`, `data-tab="keys"`, `data-tab="tasks"`, `id="plugcfg-meta"`} {
 		if !strings.Contains(body, mark) {
 			t.Fatalf("admin page missing plugconf mark %s", mark)
+		}
+	}
+	// S7 插件配置页纯化:包操作/代码/监控入口不得回流
+	for _, gone := range []string{`id="pd-toggle"`, `id="pd-del"`, `data-tab="code"`, `data-tab="mon"`,
+		`id="pane-code"`, `id="pane-mon"`, `id="pkg-chart"`} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("admin page must not contain %s (插件配置页已纯化)", gone)
 		}
 	}
 	// S8 监控页增强:包维度表 + 双 sparkline;对话测试面板
@@ -84,40 +90,16 @@ func TestGUI_AdminPageServed(t *testing.T) {
 	}
 }
 
-func TestGUI_PartCodeEditHotReload(t *testing.T) {
-	// Given 载入 js-openai 的 protocol 源码 When 改写 mapResponse 并 PUT Then 新请求用新代码(热生效)
+func TestGUI_PartCodeEditRemoved(t *testing.T) {
+	// Given 代码编辑能力已整体移除 When 已登录读/写包代码 Then 均返回 404,不再提供伪需求入口
 	f := newFourGroups(t)
-	// ① 未认证 GET code → 401
-	resp, _ := f.client.Get(f.gateway.URL + "/admin/api/packages/js-openai/code?kind=protocol")
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated code read: %d", resp.StatusCode)
+	status, _ := f.adminGet(t, "/admin/api/packages/js-openai/code?kind=protocol")
+	if status != http.StatusNotFound {
+		t.Fatalf("code read must be removed: %d", status)
 	}
-	_ = resp.Body.Close()
-	// ② 登录读取
-	status, src := f.adminGet(t, "/admin/api/packages/js-openai/code?kind=protocol")
-	if status != http.StatusOK || !strings.Contains(string(src), "buildRequest") {
-		t.Fatalf("read code: %d %s", status, string(src[:min(80, len(src))]))
-	}
-	// ③ 修改:mapResponse 注入标记字段
-	mutated := strings.Replace(string(src), "mapResponse: function (ctx, body) { return body; }",
-		`mapResponse: function (ctx, body) { var o = JSON.parse(body); o.x_gui_edit = 1; return JSON.stringify(o); }`, 1)
-	if mutated == string(src) {
-		t.Fatal("mutation did not apply (source anchor drifted)")
-	}
-	code, body := f.adminPut(t, "/admin/api/packages/js-openai/code?kind=protocol", mutated)
-	if code != http.StatusOK {
-		t.Fatalf("put code: %d %s", code, body)
-	}
-	// ④ 新请求走新代码(热生效断言:x_gui_edit 出现在响应)
-	payload := `{"model":"m-direct","messages":[{"role":"user","content":"hello"}],"stream":false}`
-	got, respBody := f.post(t, "/v1/chat/completions", map[string]string{
-		"Authorization": "Bearer sk-test", "Content-Type": "application/json",
-	}, payload)
-	if got != http.StatusOK {
-		t.Fatalf("request after edit: %d %s", got, respBody)
-	}
-	if !strings.Contains(respBody, `"x_gui_edit":1`) {
-		t.Fatalf("hot reload failed: %s", respBody)
+	status, body := f.adminPut(t, "/admin/api/packages/js-openai/code?kind=protocol", "module.exports = {}")
+	if status != http.StatusNotFound {
+		t.Fatalf("code write must be removed: %d %s", status, body)
 	}
 }
 

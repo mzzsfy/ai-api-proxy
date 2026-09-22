@@ -22,15 +22,15 @@ type BuiltinDeps struct {
 
 // Registry 包注册中心(安装/升级/启停/列举)
 type Registry struct {
-	mu        sync.RWMutex
-	db        *sql.DB
-	pkgs      map[string]*Package
-	disabled  map[string]bool
-	revs      map[string]int64
-	builtins  map[string]BuiltinFactory
-	keys      *KeysStore
-	settings  *SettingsStore
-	deps      HooksDeps // 声明提取依赖(装配根注入;nil = 提取用空依赖)
+	mu       sync.RWMutex
+	db       *sql.DB
+	pkgs     map[string]*Package
+	disabled map[string]bool
+	revs     map[string]int64
+	builtins map[string]BuiltinFactory
+	keys     *KeysStore
+	settings *SettingsStore
+	deps     HooksDeps // 声明提取依赖(装配根注入;nil = 提取用空依赖)
 	// OnLoad 包加载完成回调(导入/升级/启用;宿主注入执行 hooks.onLoad;previous=升级前 keys)
 	OnLoad func(pkg *Package, previous map[string]any)
 	// OnChange 任务声明变化回调(安装/启停/删除;宿主注入刷新调度)
@@ -190,12 +190,12 @@ func (r *Registry) Inspect(data []byte) (map[string]any, error) {
 	}
 	m := pkg.Manifest
 	out := map[string]any{
-		"name":       m.Name,
-		"title":      m.MetaTitle(),
+		"name":        m.Name,
+		"title":       m.MetaTitle(),
 		"description": m.Description,
-		"version":    m.Version,
-		"filters":    filterNames(m),
-		"secretRefs": pkg.SecretRefsUnion(),
+		"version":     m.Version,
+		"filters":     filterNames(m),
+		"secretRefs":  pkg.SecretRefsUnion(),
 	}
 	if p := m.Parts.Protocol; p != nil {
 		out["protocol"] = p.Protocol
@@ -360,25 +360,6 @@ func (r *Registry) Export(name string) ([]byte, error) {
 	return BuildAAP(pkg.Manifest, pkg.Files)
 }
 
-// GetPart 读部件源码(kind=protocol|filter;filter 需 partName)
-func (r *Registry) GetPart(pkgName, kind, partName string) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	pkg, ok := r.pkgs[pkgName]
-	if !ok {
-		return nil, fmt.Errorf("package %q not found", pkgName)
-	}
-	entry, err := partEntry(pkg, kind, partName)
-	if err != nil {
-		return nil, err
-	}
-	src, ok := pkg.Files[entry]
-	if !ok {
-		return nil, fmt.Errorf("entry %q missing in %q", entry, pkgName)
-	}
-	return src, nil
-}
-
 // Delete 卸载包(数据库+内存;引用检查归调用方——registry 不知上游层)
 func (r *Registry) Delete(ctx context.Context, name string) error {
 	r.mu.Lock()
@@ -422,86 +403,11 @@ func (r *Registry) KeyReader(pkgName string) func(name string) (any, bool) {
 	return func(name string) (any, bool) { return r.keys.Get(pkgName, name) }
 }
 
-// partEntry 按 kind/名定位部件 entry(hooks kind:name 即包内路径)
-func partEntry(pkg *Package, kind, partName string) (string, error) {
-	switch kind {
-	case "protocol":
-		if pkg.Manifest.Parts.Protocol == nil {
-			return "", fmt.Errorf("package %q has no protocol part", pkg.Manifest.Name)
-		}
-		return ProtocolEntry, nil
-	case "filter":
-		for _, fp := range pkg.Manifest.Parts.Filters {
-			if fp.Name == partName {
-				return ProtocolEntryFor("filter", partName), nil
-			}
-		}
-		return "", fmt.Errorf("filter %q not found in %q", partName, pkg.Manifest.Name)
-	case "hooks":
-		if _, ok := pkg.Files[partName]; !ok {
-			return "", fmt.Errorf("hooks file %q not found in %q", partName, pkg.Manifest.Name)
-		}
-		return partName, nil
-	default:
-		return "", fmt.Errorf("kind must be protocol|filter|hooks")
-	}
-}
-
 // Revision 包当前 revision(未知包 0)
 func (r *Registry) Revision(name string) int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.revs[name]
-}
-
-// UpdatePart 替换部件源码并整包升级(revision+1;entry 定位,编译校验失败拒绝)
-// hooks 族文件保存 → 声明重提取(失败 = 400 拒保存);protocol/filter 部件编译校验在下次实例化
-func (r *Registry) UpdatePart(ctx context.Context, pkgName, kind, partName string, code []byte) (int64, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pkg, ok := r.pkgs[pkgName]
-	if !ok {
-		return 0, fmt.Errorf("package %q not found", pkgName)
-	}
-	files := make(map[string][]byte, len(pkg.Files))
-	for k, v := range pkg.Files {
-		files[k] = v
-	}
-	entry, err := partEntry(pkg, kind, partName)
-	if err != nil {
-		return 0, err
-	}
-	if kind == "hooks" {
-		entry = partName // hooks kind:partName 即包内路径(init.js/keys.js/tasks/<n>.js)
-		if _, ok := files[entry]; !ok {
-			return 0, fmt.Errorf("hooks file %q not found in %q", entry, pkgName)
-		}
-	}
-	files[entry] = code
-	// 保存前编译校验(坏代码拒绝,防任务全挂)
-	if _, err := Compile(code, entry); err != nil {
-		return 0, err
-	}
-	updated := &Package{Manifest: pkg.Manifest, Files: files, Revision: pkg.Revision + 1}
-	if updated.Manifest.Parts.Hooks != nil {
-		deps := r.deps
-		decl, err := extractDeclaration(updated, &deps)
-		if err != nil {
-			return 0, fmt.Errorf("declaration: %w", err)
-		}
-		updated.Declaration = decl
-	} else {
-		updated.Declaration = pkg.Declaration
-	}
-	filesRaw, _ := json.Marshal(updated.Files)
-	if _, err := r.db.ExecContext(ctx,
-		`UPDATE packages SET parts_json=?, declaration_json=?, revision=?, updated_at=datetime('now') WHERE name=?`,
-		string(filesRaw), mustJSON(updated.Declaration), updated.Revision, pkgName); err != nil {
-		return 0, fmt.Errorf("persist update: %w", err)
-	}
-	r.pkgs[pkgName] = updated
-	r.revs[pkgName] = updated.Revision
-	return updated.Revision, nil
 }
 
 // mustJSON 序列化(失败回退空对象)
