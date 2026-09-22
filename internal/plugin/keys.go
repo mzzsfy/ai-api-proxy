@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -96,6 +97,17 @@ func (s *KeysStore) PreviousAll(pkg string) (map[string]any, bool) {
 	return doc.Previous, true
 }
 
+// List 键名枚举(排序;不含值——枚举与读取分离)
+func (s *KeysStore) List(pkg string) []string {
+	doc := s.load(pkg)
+	names := make([]string, 0, len(doc.Current))
+	for k := range doc.Current {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Set 批量写入;写入前 current 整体移入 previous(覆盖式);包内串行
 func (s *KeysStore) Set(pkg string, values map[string]any) error {
 	s.mu.Lock()
@@ -112,9 +124,16 @@ func (s *KeysStore) SetKey(pkg, name string, value any) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	doc := s.load(pkg)
-	doc.Previous = doc.Current
-	if doc.Current == nil {
-		doc.Current = map[string]any{}
+	if doc.Current != nil {
+		// 拷贝后再改:doc.Previous 与 doc.Current 共享底层引用,原地写会污染轮转历史
+		prev := doc.Current
+		cur := make(map[string]any, len(prev)+1)
+		for k, v := range prev {
+			cur[k] = v
+		}
+		doc.Previous, doc.Current = prev, cur
+	} else {
+		doc.Previous, doc.Current = nil, map[string]any{}
 	}
 	doc.Current[name] = value
 	doc.UpdatedAt = time.Now().UnixMilli()

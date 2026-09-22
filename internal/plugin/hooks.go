@@ -511,6 +511,12 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 		}
 		return v, nil
 	})
+	_ = keysObj.Set("list", func() ([]string, error) {
+		if h.deps.Keys == nil {
+			return nil, fmt.Errorf("keys unavailable (package %s)", h.pkg)
+		}
+		return h.deps.Keys.List(h.pkg), nil
+	})
 	_ = ctx.Set("keys", keysObj)
 	if h.settings != nil {
 		_ = ctx.Set("settings", h.settings)

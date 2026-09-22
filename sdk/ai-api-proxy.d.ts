@@ -156,6 +156,8 @@ export interface HookKeys {
   set(values: Record<string, unknown>): void;
   /** 仅热加载提供旧包快照;启停/首载 undefined */
   previous(name: string): unknown;
+  /** 键名枚举(排序;不含值——值走 get;多账号遍历场景) */
+  list(): string[];
 }
 
 /** settings 声明构建器(setting 全局;宿主求值时注入,GUI 渲染归宿主) */

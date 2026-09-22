@@ -322,6 +322,71 @@ func TestHooks_OnLoadAndSettings(t *testing.T) {
 	}
 }
 
+func TestHooks_KeysList(t *testing.T) {
+	// Given 包已有 3 键 When 任务 ctx.keys.list() Then 排序键名数组不含值
+	files := map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("names", JSON.stringify(ctx.keys.list()));}}`}
+	tk := HooksTask{Name: "a", Cron: "* * * * *"}
+	pkg := hooksPkg(t, files, tk)
+	ks := NewKeysStore(testKeysDB(t))
+	_ = ks.Set("hp", map[string]any{"token-b": "v2", "account": "me@x", "token-a": "v1"})
+	mem := &memKV{m: map[string]string{}}
+	deps := HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
+	rt, err := LoadTask(pkg, tk, deps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.RunTask(tk, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mem.m["names"]; got != `["account","token-a","token-b"]` {
+		t.Fatalf("list: %s", got)
+	}
+	// 空键包 → [](独立 store 隔离场景 1 数据)
+	pkg2 := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("n", String(ctx.keys.list().length));}}`}, tk)
+	deps2 := HooksDeps{Keys: NewKeysStore(testKeysDB(t)), Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
+	rt2, err := LoadTask(pkg2, tk, deps2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt2.RunTask(tk, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mem.m["n"]; got != "0" {
+		t.Fatalf("empty list: %s", got)
+	}
+}
+
+func TestKeys_SetKeyRotatesPrevious(t *testing.T) {
+	// Given 已有键 When SetKey 单键编辑 Then previous=旧 current 整体(别名污染回归:轮转后 previous 不得跟随 current 变更)
+	ks := NewKeysStore(testKeysDB(t))
+	_ = ks.Set("hp", map[string]any{"token": "old-token", "other": "keep"})
+	if _, err := ks.SetKey("hp", "token", "new-token"); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := ks.Get("hp", "token")
+	if cur != "new-token" {
+		t.Fatalf("current: %v", cur)
+	}
+	prev, ok := ks.Previous("hp", "token")
+	if !ok || prev != "old-token" {
+		t.Fatalf("previous polluted: %v ok=%v", prev, ok)
+	}
+	// 未编辑键:current 保留,previous 同值
+	if v, _ := ks.Get("hp", "other"); v != "keep" {
+		t.Fatalf("other lost: %v", v)
+	}
+	if p, ok := ks.Previous("hp", "other"); !ok || p != "keep" {
+		t.Fatalf("other previous: %v %v", p, ok)
+	}
+	// 首次写入(空文档):previous 空
+	if _, err := ks.SetKey("hp2", "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := ks.Previous("hp2", "k"); ok || p != nil {
+		t.Fatalf("fresh previous: %v %v", p, ok)
+	}
+}
+
 func TestHooks_PromiseRejected(t *testing.T) {
 	// Given task 返回 Promise When RunTask Then 同步性违规报错
 	pkg := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:async function(ctx){}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
@@ -437,6 +502,27 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 	}
 	if req.URL != "https://b" {
 		t.Fatalf("util.key stale: %s", req.URL)
+	}
+}
+
+func TestHooks_UtilNoListInProtocol(t *testing.T) {
+	// Given protocol 部件 When 访问 util.list Then undefined(枚举面不扩散到 protocol)
+	protoSrc := "module.exports={buildRequest:function(ctx,req){return {url:String(util.list===undefined),method:'POST',headers:{},body:req};},mapEvent:function(ctx,e){return '[]';}}"
+	pkg := &Package{
+		Manifest: &Manifest{ManifestVersion: ManifestVersion, Name: "kp", Version: "0.1.0"},
+		Files:    map[string][]byte{"p.js": []byte(protoSrc)},
+	}
+	pkg.Manifest.Parts.Protocol = &ProtocolPart{Entry: "p.js", Protocol: "openai-completions", Form: []string{"streaming"}}
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return nil, false }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := proto.BuildRequest(nil, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.URL != "true" {
+		t.Fatalf("util.list leaked into protocol: %s", req.URL)
 	}
 }
 
