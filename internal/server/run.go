@@ -265,17 +265,9 @@ func Build(cfg *Config) (*App, error) {
 		}
 		return gw.TestUpstream(context.Background(), u)
 	}
-	// 对话测试:用户模型与消息走完整管道(计上游+包维度;诊断即流量)
-	adminDeps.ChatTestFunc = func(ctx context.Context, id int64, model, message string) (int64, int, []byte, string) {
-		u, err := reg.Get(id)
-		if err != nil {
-			return 0, 0, nil, err.Error()
-		}
-		return gw.ChatTest(ctx, u, model, message)
-	}
 	// 监控时序:metrics_minutely 最近 n 分钟(老到新)
 	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {
-		rows, err := st.DB().Query(`SELECT minute, requests, errors, max_concurrent, by_upstream_json, by_target_json, by_package_json
+		rows, err := st.DB().Query(`SELECT minute, requests, errors, max_concurrent, by_upstream_json, by_target_json
 			FROM (SELECT * FROM metrics_minutely ORDER BY minute DESC LIMIT ?) ORDER BY minute ASC`, minutes)
 		if err != nil {
 			return nil, err
@@ -285,17 +277,16 @@ func Build(cfg *Config) (*App, error) {
 		for rows.Next() {
 			var minute string
 			var reqs, errs, conc int64
-			var upJSON, tgJSON, pkgJSON string
-			if err := rows.Scan(&minute, &reqs, &errs, &conc, &upJSON, &tgJSON, &pkgJSON); err != nil {
+			var upJSON, tgJSON string
+			if err := rows.Scan(&minute, &reqs, &errs, &conc, &upJSON, &tgJSON); err != nil {
 				return nil, err
 			}
-			var byUp, byTg, byPkg any
+			var byUp, byTg any
 			_ = json.Unmarshal([]byte(upJSON), &byUp)
 			_ = json.Unmarshal([]byte(tgJSON), &byTg)
-			_ = json.Unmarshal([]byte(pkgJSON), &byPkg)
 			out = append(out, map[string]any{
 				"minute": minute, "requests": reqs, "errors": errs,
-				"max_concurrent": conc, "by_upstream": byUp, "by_target": byTg, "by_package": byPkg,
+				"max_concurrent": conc, "by_upstream": byUp, "by_target": byTg,
 			})
 		}
 		return out, rows.Err()
@@ -725,14 +716,9 @@ func persistSnapshot(app *App, now time.Time) {
 		log.Printf("snapshot by_target: %v", err)
 		return
 	}
-	pkgJSON, err := row.PackageJSON()
-	if err != nil {
-		log.Printf("snapshot by_package: %v", err)
-		return
-	}
 	_, err = app.St.DB().Exec(`INSERT OR REPLACE INTO metrics_minutely
-		(minute, requests, errors, max_concurrent, by_upstream_json, by_target_json, by_package_json) VALUES(?,?,?,?,?,?,?)`,
-		row.Minute, row.Requests, row.Errors, row.MaxConc, upJSON, tgJSON, pkgJSON)
+		(minute, requests, errors, max_concurrent, by_upstream_json, by_target_json) VALUES(?,?,?,?,?,?)`,
+		row.Minute, row.Requests, row.Errors, row.MaxConc, upJSON, tgJSON)
 	if err != nil {
 		log.Printf("snapshot persist: %v", err)
 	}
