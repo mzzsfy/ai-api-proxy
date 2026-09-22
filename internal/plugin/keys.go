@@ -108,8 +108,8 @@ func (s *KeysStore) List(pkg string) []string {
 	return names
 }
 
-// Overwrite 合并覆写:给定键覆盖、未提及键保留;写入前 current 整体移入 previous;包内串行
-func (s *KeysStore) Overwrite(pkg string, values map[string]any) error {
+// Merge 键级合并:给定键覆盖、未提及键保留;写入前 current 整体移入 previous;包内串行
+func (s *KeysStore) Merge(pkg string, values map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	doc := s.load(pkg)

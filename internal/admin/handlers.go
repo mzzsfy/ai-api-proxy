@@ -50,7 +50,7 @@ type Deps struct {
 	KeyFormFunc func(pkg string) (any, error)
 	// KeyActionFunc 表单按钮回调(可出站)
 	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
-	// KeySubmitFunc 表单提交(回调内 ctx.keys.overwrite 写入;written 收集;errors=字段级拒绝)
+	// KeySubmitFunc 表单提交(回调内 ctx.keys.merge 写入;written 收集;errors=字段级拒绝)
 	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, map[string]any, error)
 }
 

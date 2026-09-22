@@ -48,20 +48,20 @@ keys 是**包级 name → value 映射**(整包一份,current + 上一版 previo
 
 ### 写入途径与写窗
 
-写入只有一条路:**`ctx.keys.overwrite({...})` 合并覆写**——给定键覆盖,未提及的键保留不动;写前 current 整体快照进 previous。不存在"整文档替换"语义,任务刷 token 不会误删用户手动加的其他键。
+写入只有一条路:**`ctx.keys.merge({...})` 键级合并(给定键覆盖,未提及保留)**——给定键覆盖,未提及的键保留不动;写前 current 整体快照进 previous。不存在"整文档替换"语义,任务刷 token 不会误删用户手动加的其他键。
 
-**写窗(阉割即权限)**:overwrite 方法只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.overwrite === "undefined"` 可探测)。
+**写窗(阉割即权限)**:merge 方法只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.merge === "undefined"` 可探测)。
 
 | 途径 | 时机 | 写窗 |
 |---|---|---|
-| 任务里 `ctx.keys.overwrite({...})` | 运行期(如刷到的 token) | ✓ 任务执行 |
-| keySubmit 表单采集 | 钩子内自行 overwrite(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
+| 任务里 `ctx.keys.merge({...})` | 运行期(如刷到的 token) | ✓ 任务执行 |
+| keySubmit 表单采集 | 钩子内自行 merge(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
 | 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) | 用户侧 |
 
 | 钩子 | keys 能力 |
 |---|---|
-| 任务 handler / next | get / previous / list / **overwrite** |
-| keySubmit | get / previous / list / **overwrite** + http |
+| 任务 handler / next | get / previous / list / **merge** |
+| keySubmit | get / previous / list / **merge** + http |
 | keyAction | get / previous / list + http(只读;发验证码无需写) |
 | onLoad | get / previous / list(只读) |
 | keyWrite / keyRead / keyForm | get / previous(最小面) |
@@ -107,13 +107,13 @@ module.exports = {
   // 5) 表单提交(可出站)。三种反馈通道,无需抛异常:
   //    {errors: {字段: 原因}} → 字段级拒绝:GUI 逐输入框标红,存储不变
   //    {message: "..."}       → 失败提示(toast),存储不变
-  //    字符串                  → 成功 toast;写入用 ctx.keys.overwrite 只写真凭据
+  //    字符串                  → 成功 toast;写入用 ctx.keys.merge 只写真凭据
   keySubmit: function (ctx, values) {
     if (!values.account) return { errors: { account: "必填" } };
     var resp = ctx.http.run({ url: "https://example/login", method: "POST",
       body: JSON.stringify({ u: values.account, p: values.password }) });
     if (resp.status !== 200) return { message: "登录失败 " + resp.status };
-    ctx.keys.overwrite({ token: JSON.parse(resp.body).token });   // 合并覆写:只写 token
+    ctx.keys.merge({ token: JSON.parse(resp.body).token });   // 键级合并(给定键覆盖,未提及保留):只写 token
     return "登录成功";
   },
 };
@@ -121,9 +121,9 @@ module.exports = {
 
 要点:
 - fields 建议显式 `name`(errors 按它定位输入框);缺省按 description/序号兜底
-- **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 overwrite 决定
+- **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 merge 决定
 - 抛错仍然可用(视为崩溃,GUI 显示错误文本),但业务拒绝请用 errors/message 通道
-- 写窗:keyAction 无 overwrite(发验证码不需要写);业务需要写入的动作归入 keySubmit
+- 写窗:keyAction 无 merge(发验证码不需要写);业务需要写入的动作归入 keySubmit
 - 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败(storage 缓冲一并丢弃)
 - GUI「新增凭据」预填名:已有键序号 `key-N` 兜底;keyForm 声明 fields 后以表单采集为正入口
 
@@ -136,7 +136,7 @@ module.exports = {
 | 数据 | 维护者 | 代码侧 |
 |---|---|---|
 | settings | 用户(管理台) | 只读(ctx.settings 快照);改参数下一轮任务生效 |
-| keys | 共同(用户表单/手动 + 脚本) | 限窗写:overwrite 仅任务执行与 keySubmit;合并覆写不误删 |
+| keys | 共同(用户表单/手动 + 脚本) | 限窗写:merge 仅任务执行与 keySubmit;键级合并(给定键覆盖,未提及保留)不误删 |
 | storage | 纯脚本 | 运行时自由读写;**事务语义**:执行期写私有缓冲,本次执行成功才归并持久化,抛错/超时全部丢弃(并发任务互相隔离) |
 
 ## 四、选择决策

@@ -121,7 +121,7 @@ func wireKeyHooks(app *App) {
 		return rt.CallKeyAction(action, values)
 	}
 
-	// KeySubmitFunc 表单提交(写入由回调内 ctx.keys.overwrite;written 拦截收集;errors=字段级拒绝)
+	// KeySubmitFunc 表单提交(写入由回调内 ctx.keys.merge;written 拦截收集;errors=字段级拒绝)
 	app.AdminDeps.KeySubmitFunc = func(pkg string, values map[string]any) ([]string, any, map[string]any, error) {
 		rt, err := loadKeys(pkg)
 		if err != nil {

@@ -53,7 +53,7 @@ func initAndTaskFiles(onLoadJS, taskJS string) map[string]string {
 
 func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	// Given hooks-only 包 When 安装→任务运行→升级→读管理 keys→卸载 Then 各环节语义成立
-	// (keys 写窗:任务可写;onLoad ctx.keys 无 overwrite 能力——阉割即权限)
+	// (keys 写窗:任务可写;onLoad ctx.keys 无 merge 能力——阉割即权限)
 	ctx := context.Background()
 	pkgs, st := testRegistry(t)
 	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
@@ -76,10 +76,10 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 		_ = tokenVal
 	}
 
-	// 安装:init 无写键能力(探测 overwrite 未挂载并记入 storage);任务执行写入
+	// 安装:init 无写键能力(探测 merge 未挂载并记入 storage);任务执行写入
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.overwrite===undefined));}}`,
-		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed"});}}`,
+		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.merge===undefined));}}`,
+		`module.exports={handler:function(ctx){ctx.keys.merge({token:"signed"});}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	// 升级:onLoad 再次触发;任务再写,current 移入 previous
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
 		`module.exports={onLoad:function(ctx){storage.set("probe", "x");}}`,
-		`module.exports={handler:function(ctx){ctx.keys.overwrite({token:"signed-2"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.merge({token:"signed-2"});}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	sched := wireHooks(wire)
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.overwrite({token:ctx.task});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({token:ctx.task});}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Keys().Overwrite("checkin", map[string]any{"token": "secret-value"}); err != nil {
+	if err := pkgs.Keys().Merge("checkin", map[string]any{"token": "secret-value"}); err != nil {
 		t.Fatal(err)
 	}
 	deps := newAdminDeps(pkgs)
@@ -197,7 +197,7 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     `module.exports.settings={account:{type:"string",description:"账号"},level:{type:"int",default:1}}`,
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.overwrite({who:String(ctx.settings.account||"?")});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({who:String(ctx.settings.account||"?")});}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}

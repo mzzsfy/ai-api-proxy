@@ -187,9 +187,9 @@ type HooksRuntime struct {
 	deps         HooksDeps
 	settings     map[string]any // ctx.settings 快照
 	taskName     string         // ctx.task
-	written      []string       // keySubmit 期间 overwrite 写入键名(去重按首次序)
+	written      []string       // keySubmit 期间 merge 写入键名(去重按首次序)
 	writtenSeen  map[string]bool
-	collectWrite bool        // overwrite 写入键名收集开关(keySubmit)
+	collectWrite bool        // merge 写入键名收集开关(keySubmit)
 	stx          *StorageTx  // storage 事务视图(执行期缓冲;成功归并/失败丢弃)
 }
 
@@ -410,7 +410,7 @@ func (h *HooksRuntime) RunNext() (int64, bool, error) {
 	return n, true, nil
 }
 
-// keyHook keys.js 钩子调用基座(only keySubmit 可写 keys;其余钩子 ctx 无 overwrite 能力;storage 事务随钩子成败)
+// keyHook keys.js 钩子调用基座(only keySubmit 可写 keys;其余钩子 ctx 无 merge 能力;storage 事务随钩子成败)
 func (h *HooksRuntime) keyHook(name string, budgetMs int64, args ...goja.Value) (goja.Value, error) {
 	fn := h.handler(name)
 	if fn == nil {
@@ -484,7 +484,7 @@ func (h *HooksRuntime) CallKeyAction(action string, values map[string]any) (any,
 	return v.Export(), nil
 }
 
-// CallKeySubmit 表单提交(落库由回调内 ctx.keys.overwrite;written 拦截收集,同键去重按首次序)
+// CallKeySubmit 表单提交(落库由回调内 ctx.keys.merge;written 拦截收集,同键去重按首次序)
 // 返回契约:undefined/null = 无消息;string = toast 消息;对象可带 {message?, errors?}(errors 非空 = 字段级拒绝,GUI 标红)
 func (h *HooksRuntime) CallKeySubmit(values map[string]any) ([]string, any, map[string]any, error) {
 	if h.handler("keySubmit") == nil {
@@ -548,9 +548,9 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 		}
 		return v, nil
 	})
-	// overwrite 仅在写入窗口挂载(任务执行/keySubmit);其余钩子 ctx.keys 上无此能力(阉割即权限)
+	// merge 仅在写入窗口挂载(任务执行/keySubmit);其余钩子 ctx.keys 上无此能力(阉割即权限)
 	if canWriteKeys {
-		_ = keysObj.Set("overwrite", func(values map[string]any) error {
+		_ = keysObj.Set("merge", func(values map[string]any) error {
 			if h.deps.Keys == nil {
 				return fmt.Errorf("keys unavailable (package %s)", h.pkg)
 			}
@@ -562,7 +562,7 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, previous map[string]
 					}
 				}
 			}
-			return h.deps.Keys.Overwrite(h.pkg, values)
+			return h.deps.Keys.Merge(h.pkg, values)
 		})
 	}
 	_ = keysObj.Set("previous", func(name string) (any, error) {

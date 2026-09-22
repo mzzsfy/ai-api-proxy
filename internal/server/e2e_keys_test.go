@@ -127,7 +127,7 @@ func TestKeys_FormFlow(t *testing.T) {
 			keyAction:function(ctx,action,values){ if(action==="sendCode"){ return "sent to "+values.account; } return "unknown"; },
 			keySubmit:function(ctx,values){
 				if(!values.account){ return {errors:{account:"账号必填"}}; }
-				ctx.keys.overwrite({token:"t-"+values.account});
+				ctx.keys.merge({token:"t-"+values.account});
 				return "ok";
 			},
 		}`,

@@ -29,13 +29,13 @@ func testKeysDB(t *testing.T) *sql.DB {
 func TestKeys_SetMovesCurrentToPrevious(t *testing.T) {
 	// Given current={"token":"t2"} previous={"token":"t1"} When set({"token":"t3"}) Then previous=t2(t1 丢弃)
 	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Overwrite("pkg", map[string]any{"token": "t1"}); err != nil {
+	if err := ks.Merge("pkg", map[string]any{"token": "t1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ks.Overwrite("pkg", map[string]any{"token": "t2"}); err != nil {
+	if err := ks.Merge("pkg", map[string]any{"token": "t2"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ks.Overwrite("pkg", map[string]any{"token": "t3"}); err != nil {
+	if err := ks.Merge("pkg", map[string]any{"token": "t3"}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := ks.Get("pkg", "token"); v != "t3" {
@@ -50,7 +50,7 @@ func TestKeys_LimitRejects(t *testing.T) {
 	// Given 已接近 64KB When 超限写入 Then 拒绝
 	ks := NewKeysStore(testKeysDB(t))
 	big := map[string]any{"blob": string(make([]byte, KeysLimit))}
-	if err := ks.Overwrite("pkg", big); err == nil {
+	if err := ks.Merge("pkg", big); err == nil {
 		t.Fatal("oversized keys accepted")
 	}
 }
@@ -58,7 +58,7 @@ func TestKeys_LimitRejects(t *testing.T) {
 func TestKeys_ViewAndDelete(t *testing.T) {
 	// Given set 后 When View Then 明文输出(键名+值+updatedAt);Delete 后全空
 	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Overwrite("pkg", map[string]any{"token": "secret-value"}); err != nil {
+	if err := ks.Merge("pkg", map[string]any{"token": "secret-value"}); err != nil {
 		t.Fatal(err)
 	}
 	m := ks.View("pkg")
@@ -75,7 +75,7 @@ func TestKeys_ViewAndDelete(t *testing.T) {
 func TestKeys_UpgradeSnapshot(t *testing.T) {
 	// Given current 有值 When 升级快照 Then previous=旧 current 且 current 原样
 	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Overwrite("pkg", map[string]any{"token": "old"}); err != nil {
+	if err := ks.Merge("pkg", map[string]any{"token": "old"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ks.UpgradeSnapshot("pkg"); err != nil {
@@ -303,7 +303,7 @@ func TestHooks_OnLoadAndSettings(t *testing.T) {
 	src := `module.exports={onLoad:function(ctx){storage.set("prev", String(ctx.keys.previous("token")));}}`
 	pkg2 := hooksPkg(t, map[string]string{"init.js": src})
 	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Overwrite("hp", map[string]any{"token": "stored"})
+	_ = ks.Merge("hp", map[string]any{"token": "stored"})
 	rt2, err := LoadInit(pkg2, HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +328,7 @@ func TestHooks_KeysList(t *testing.T) {
 	tk := HooksTask{Name: "a", Cron: "* * * * *"}
 	pkg := hooksPkg(t, files, tk)
 	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Overwrite("hp", map[string]any{"token-b": "v2", "account": "me@x", "token-a": "v1"})
+	_ = ks.Merge("hp", map[string]any{"token-b": "v2", "account": "me@x", "token-a": "v1"})
 	mem := &memKV{m: map[string]string{}}
 	deps := HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
 	rt, err := LoadTask(pkg, tk, deps, nil)
@@ -359,7 +359,7 @@ func TestHooks_KeysList(t *testing.T) {
 func TestKeys_SetKeyRotatesPrevious(t *testing.T) {
 	// Given 已有键 When SetKey 单键编辑 Then previous=旧 current 整体(别名污染回归:轮转后 previous 不得跟随 current 变更)
 	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Overwrite("hp", map[string]any{"token": "old-token", "other": "keep"})
+	_ = ks.Merge("hp", map[string]any{"token": "old-token", "other": "keep"})
 	if _, err := ks.SetKey("hp", "token", "new-token"); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 	}
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
 	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Overwrite("kp", map[string]any{"endpoint": "https://a"})
+	_ = ks.Merge("kp", map[string]any{"endpoint": "https://a"})
 	proto, err := NewProtocol(pkg, nil, nil, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -495,7 +495,7 @@ func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
 		t.Fatalf("util.key: %s", req.URL)
 	}
 	// 实时性:更新后新值
-	_ = ks.Overwrite("kp", map[string]any{"endpoint": "https://b"})
+	_ = ks.Merge("kp", map[string]any{"endpoint": "https://b"})
 	req, err = proto.BuildRequest(nil, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
