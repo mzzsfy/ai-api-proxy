@@ -20,8 +20,8 @@ hooks 部件 = init.js(加载钩子)+ tasks/*.js(定时任务)+ keys.js(凭据�
 /// <reference path="../ai-api-proxy.d.ts" />
 module.exports = {
   onLoad: function (ctx) {
-    // 环境判断、初始化 storage 标记、唤醒一次签到……均为尽力而为
-    log.info("loaded, settings:", ctx.settings);
+    // 环境判断、初始化 storage 标记……均为尽力而为
+    // 注意:onLoad 的 ctx.keys 无 overwrite(只读);需要写 keys 请放任务里
   },
 };
 ```

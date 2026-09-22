@@ -46,15 +46,25 @@ module.exports = {
 
 keys 是**包级 name → value 映射**(整包一份,current + 上一版 previous)。与 target secrets(静态,用户填)无关——keys 由脚本运行时写入或用户在 GUI 采集。
 
-### 写入途径
+### 写入途径与写窗
 
 写入只有一条路:**`ctx.keys.overwrite({...})` 合并覆写**——给定键覆盖,未提及的键保留不动;写前 current 整体快照进 previous。不存在"整文档替换"语义,任务刷 token 不会误删用户手动加的其他键。
 
-| 途径 | 时机 |
+**写窗(阉割即权限)**:overwrite 方法只挂在任务执行与 keySubmit 的 ctx 上;onLoad/keyAction/keyWrite/keyRead/keyForm 的 ctx.keys 上无此方法(`typeof ctx.keys.overwrite === "undefined"` 可探测)。
+
+| 途径 | 时机 | 写窗 |
+|---|---|---|
+| 任务里 `ctx.keys.overwrite({...})` | 运行期(如刷到的 token) | ✓ 任务执行 |
+| keySubmit 表单采集 | 钩子内自行 overwrite(只写真凭据;验证码这类一次性字段不该落库) | ✓ keySubmit |
+| 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) | 用户侧 |
+
+| 钩子 | keys 能力 |
 |---|---|
-| 任务/钩子里 `ctx.keys.overwrite({...})` | 运行期(如刷到的 token) |
-| 管理台手动新增/编辑 | 用户操作(走 keyWrite 归一化) |
-| keySubmit 表单采集 | 钩子内自行 overwrite(只写真凭据;验证码这类一次性字段不该落库) |
+| 任务 handler / next | get / previous / list / **overwrite** |
+| keySubmit | get / previous / list / **overwrite** + http |
+| keyAction | get / previous / list + http(只读;发验证码无需写) |
+| onLoad | get / previous / list(只读) |
+| keyWrite / keyRead / keyForm | get / previous(最小面) |
 
 读:`ctx.keys.get(name)`;旧版快照:`ctx.keys.previous(name)`(仅热升级的 onLoad/首轮任务提供,平时 undefined)。
 
@@ -113,15 +123,23 @@ module.exports = {
 - fields 建议显式 `name`(errors 按它定位输入框);缺省按 description/序号兜底
 - **框架不会自动落库表单值**(验证码等一次性字段不该存),要写什么由脚本 overwrite 决定
 - 抛错仍然可用(视为崩溃,GUI 显示错误文本),但业务拒绝请用 errors/message 通道
-- keyAction/keySubmit 才有 `ctx.keys.overwrite` 与出站意义;keyWrite/keyRead 只有 keys.get/previous
-- 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败
+- 写窗:keyAction 无 overwrite(发验证码不需要写);业务需要写入的动作归入 keySubmit
+- 各钩子超时:归一化/读取/表单声明 5s,按钮回调/提交 10s;超时该次操作失败(storage 缓冲一并丢弃)
 - GUI「新增凭据」预填名:已有键序号 `key-N` 兜底;keyForm 声明 fields 后以表单采集为正入口
 
 ### 手动管理兜底
 
 无 keys.js 时用户仍可在 keys 弹层直接编辑 JSON 值(`{"token":"..."}` 任意结构),宿主原样保存——五钩子是**体验增强**,不是必配。
 
-## 三、选择决策
+## 三、数据权限三分法
+
+| 数据 | 维护者 | 代码侧 |
+|---|---|---|
+| settings | 用户(管理台) | 只读(ctx.settings 快照);改参数下一轮任务生效 |
+| keys | 共同(用户表单/手动 + 脚本) | 限窗写:overwrite 仅任务执行与 keySubmit;合并覆写不误删 |
+| storage | 纯脚本 | 运行时自由读写;**事务语义**:执行期写私有缓冲,本次执行成功才归并持久化,抛错/超时全部丢弃(并发任务互相隔离) |
+
+## 四、选择决策
 
 - 固定不变、随上游账号走的凭据 → target secrets(`secretRefs` + `util.secret`),不走 keys
 - 会过期需要刷新、或由脚本采集 → keys + 刷新任务
