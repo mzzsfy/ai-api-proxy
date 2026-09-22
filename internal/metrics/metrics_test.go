@@ -14,11 +14,11 @@ func TestRecorder_CountAndConcurrency(t *testing.T) {
 	r.IncError()
 	done1()
 	done2()
-	reqs, errs, conc, _, _ := r.Snapshot()
+	reqs, errs, conc, _, _, _ := r.Snapshot()
 	if reqs != 2 || errs != 1 || conc != 2 {
 		t.Fatalf("got reqs=%d errs=%d conc=%d", reqs, errs, conc)
 	}
-	reqs2, _, _, _, _ := r.Snapshot()
+	reqs2, _, _, _, _, _ := r.Snapshot()
 	if reqs2 != 0 {
 		t.Fatalf("snapshot not reset: %d", reqs2)
 	}
@@ -29,7 +29,7 @@ func TestRecorder_CancelNotError(t *testing.T) {
 	r := NewRecorder()
 	done := r.EnterRequest()
 	done()
-	_, errs, _, _, _ := r.Snapshot()
+	_, errs, _, _, _, _ := r.Snapshot()
 	if errs != 0 {
 		t.Fatalf("cancel counted as error: %d", errs)
 	}
@@ -44,7 +44,7 @@ func TestRecorder_ByUpstreamAndTarget(t *testing.T) {
 	endT2 := r.EnterTarget("u1", "t2")
 	endT2(false)
 
-	_, _, _, byUp, byTarget := r.Snapshot()
+	_, _, _, byUp, byTarget, _ := r.Snapshot()
 	if byUp["u1"].Requests != 1 || byUp["u1"].Errors != 1 {
 		t.Fatalf("byUp wrong: %+v", byUp["u1"])
 	}
@@ -64,9 +64,36 @@ func TestRecorder_ConcurrentMax(t *testing.T) {
 	for _, e := range ends {
 		e(false)
 	}
-	_, _, _, _, byTarget := r.Snapshot()
+	_, _, _, _, byTarget, _ := r.Snapshot()
 	if byTarget[TargetKey("u", "t")].MaxConc != 3 {
 		t.Fatalf("max conc: %+v", byTarget[TargetKey("u", "t")])
+	}
+}
+
+func TestRecorder_ByPackage(t *testing.T) {
+	// Given 主包维度计数(成功+失败) When 快照 Then requests/errors 独立计数且键隔离
+	r := NewRecorder()
+	r.IncPackage("p1", false)
+	r.IncPackage("p1", true)
+	r.IncPackage("p2", false)
+
+	_, _, _, _, _, byPkg := r.Snapshot()
+	if byPkg["p1"].Requests != 2 || byPkg["p1"].Errors != 1 {
+		t.Fatalf("byPackage p1 wrong: %+v", byPkg["p1"])
+	}
+	if byPkg["p2"].Requests != 1 || byPkg["p2"].Errors != 0 {
+		t.Fatalf("byPackage p2 wrong: %+v", byPkg["p2"])
+	}
+}
+
+func TestRecorder_ByPackageSnapshotResets(t *testing.T) {
+	// Given 快照取走包维度 When 再次快照 Then 归零
+	r := NewRecorder()
+	r.IncPackage("p1", false)
+	r.Snapshot()
+	_, _, _, _, _, byPkg := r.Snapshot()
+	if len(byPkg) != 0 {
+		t.Fatalf("byPackage not reset: %+v", byPkg)
 	}
 }
 
@@ -81,6 +108,7 @@ func TestRecorder_RaceSafe(t *testing.T) {
 			for j := range 50 {
 				done := r.EnterRequest()
 				r.IncUpstream("u", j%2 == 0)
+				r.IncPackage("p", j%2 == 0)
 				done()
 			}
 		}()

@@ -54,18 +54,32 @@ const requestIDHeader = "X-Request-Id"
 
 // testBody 管理连通性测试体:按上游声明协议构造最小请求
 func testBody(declared, model string) ([]byte, error) {
+	return chatBody(declared, model, "ping")
+}
+
+// anthropicTestMaxTokens anthropic 必填字段的最小回复预算(管理测试取最小)
+const anthropicTestMaxTokens = 1
+
+// chatBody 管理对话测试体:按上游声明协议构造单轮 user 请求(管道契约:入口格式=声明协议,无转换)
+func chatBody(declared, model, message string) ([]byte, error) {
 	if declared == pipeline.ProtocolAnthropicMessages {
 		return json.Marshal(map[string]any{
 			"model":      model,
-			"max_tokens": 1,
-			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
+			"max_tokens": anthropicTestMaxTokens,
+			"messages":   []any{map[string]any{"role": "user", "content": message}},
 		})
 	}
 	return json.Marshal(map[string]any{
 		"model":    model,
 		"stream":   false,
-		"messages": []any{map[string]any{"role": "user", "content": "ping"}},
+		"messages": []any{map[string]any{"role": "user", "content": message}},
 	})
+}
+
+// recordUpstream 上游与主包双维度计数(failed 口径:执行错误或上游状态 >=400)
+func (g *Gateway) recordUpstream(u *upstream.Upstream, failed bool) {
+	g.Metrics.IncUpstream(u.Name, failed)
+	g.Metrics.IncPackage(u.Base.Package, failed)
 }
 
 // ChatCompletions POST /v1/chat/completions(openai 入口)
@@ -146,7 +160,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		pipeline.Vars{Model: model, EntryStream: entryStream})
 	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
@@ -157,13 +171,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	}
 	if resp.Status >= 400 {
 		// 终局错误(mapError 已在 executor 应用;未实现则原样透传)
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		g.Metrics.IncError()
 		status = resp.Status
 		writeRaw(w, resp.Status, resp.Body)
 		return
 	}
-	g.Metrics.IncUpstream(u.Name, false)
+	g.recordUpstream(u, false)
 	detail += fmt.Sprintf(" stream=%t", resp.Stream)
 	if resp.Stream {
 		g.writeStream(w, entry, resp)
@@ -298,6 +312,54 @@ func (g *Gateway) TestUpstream(ctx context.Context, u *upstream.Upstream) (int64
 	return latency, ""
 }
 
+// ChatTest 管理对话测试:用户指定模型与消息,走完整 pipeline(非流式;经 executor,OnTargetExit 照常计数)
+// 返回延迟、状态码、响应体与错误说明。两个判定口径分离:
+// 响应失败 = 执行错误或 resp.Status >= 300(对齐 TestUpstream 测试判定);
+// metrics failed = 执行错误或 resp.Status >= 400(与 serve 常规流量同口径,3xx 不计错误)。
+// 与 TestUpstream 的差异:本方法经 recordUpstream 计上游+包维度(诊断即流量,如实呈现)
+func (g *Gateway) ChatTest(ctx context.Context, u *upstream.Upstream, model, message string) (int64, int, []byte, string) {
+	resolved, release, err := g.Registry.Resolve(u)
+	if err != nil {
+		return 0, 0, nil, "resolve: " + err.Error()
+	}
+	defer release()
+	raw, err := chatBody(g.Registry.DeclaredProtocol(u), model, message)
+	if err != nil {
+		return 0, 0, nil, "marshal chat body: " + err.Error()
+	}
+	pctx := pipeline.NewContext("admin-chat-"+u.Name, pipeline.UpstreamInfo{Name: u.Name, Models: u.Models},
+		pipeline.Vars{Model: model, EntryStream: false})
+	start := time.Now()
+	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
+	latency := time.Since(start).Milliseconds()
+	// metrics 口径:执行错误或上游状态 >=400 计错误
+	if err != nil || resp.Status >= 400 {
+		g.recordUpstream(u, true)
+	} else {
+		g.recordUpstream(u, false)
+	}
+	if err != nil {
+		return latency, 0, nil, err.Error()
+	}
+	if resp.Status >= 300 {
+		if !resp.Stream {
+			return latency, resp.Status, resp.Body, fmt.Sprintf("upstream status %d", resp.Status)
+		}
+		for range resp.Chunks { // 排空
+		}
+		return latency, resp.Status, nil, fmt.Sprintf("upstream status %d", resp.Status)
+	}
+	if resp.Stream {
+		// 多帧拼接非合法 JSON 文档,数组包裹保 JSON.Valid;前端原样展示排空内容
+		var chunks []string
+		for item := range resp.Chunks {
+			chunks = append(chunks, string(item.JSON))
+		}
+		return latency, resp.Status, []byte("[" + strings.Join(chunks, ",") + "]"), ""
+	}
+	return latency, resp.Status, resp.Body, ""
+}
+
 // writeRaw 原样状态与 body(错误透传语义)
 func writeRaw(w http.ResponseWriter, status int, body []byte) {
 	if status < 100 || status > 599 {
@@ -325,7 +387,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 	key := secrets["api_key"]
 	if key == "" {
 		failed = true
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		g.Metrics.IncError()
 		writeError(w, g.OpenAI, http.StatusBadGateway, "target api_key missing")
 		return
@@ -337,7 +399,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 	tr, ok := g.Executor.Transports(trName)
 	if !ok {
 		failed = true
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		g.Metrics.IncError()
 		writeError(w, g.OpenAI, http.StatusBadGateway, "transport missing")
 		return
@@ -357,7 +419,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 	tresp, err := tr.RoundTrip(r.Context(), preq)
 	if err != nil {
 		failed = true
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		if r.Context().Err() == nil {
 			g.Metrics.IncError()
 			// 供给方无可用出口/节点并发上限(rep=1/2):503(临时性,调用方可换 upstream 重试);其余上游不可达:502
@@ -372,10 +434,10 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, u *upstream.U
 	}
 	if tresp.Status >= 400 {
 		failed = true
-		g.Metrics.IncUpstream(u.Name, true)
+		g.recordUpstream(u, true)
 		g.Metrics.IncError()
 	} else {
-		g.Metrics.IncUpstream(u.Name, false)
+		g.recordUpstream(u, false)
 	}
 	if isEventStreamCT(tresp.Headers["Content-Type"]) {
 		g.passthroughStream(w, tresp)

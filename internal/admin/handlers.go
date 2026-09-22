@@ -26,6 +26,8 @@ type Deps struct {
 	Metrics  *metrics.Recorder
 	Secrets  upstream.SecretsStore                                   // "***" 回读合并的旧值来源(kv 唯一存储)
 	TestFunc func(upstreamID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
+	// ChatTestFunc 对话测试(走完整管道,非流式;返回延迟/状态码/响应体/错误说明)
+	ChatTestFunc func(ctx context.Context, upstreamID int64, model, message string) (latencyMS int64, status int, body []byte, errMsg string)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
 	SeriesFunc func(minutes int) ([]map[string]any, error)
 	// TransportsFunc 命名传输实例清单(只读;名称+URL)
@@ -87,6 +89,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("PUT /admin/api/upstreams/{id}", d.saveUpstreamByID)
 	mux.HandleFunc("DELETE /admin/api/upstreams/{id}", d.deleteUpstream)
 	mux.HandleFunc("POST /admin/api/upstreams/{id}/test", d.testUpstream)
+	mux.HandleFunc("POST /admin/api/upstreams/{id}/chat-test", d.chatTestUpstream)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/transports", d.listTransports)
@@ -1039,11 +1042,61 @@ func (d *Deps) testUpstream(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// chatTestUpstream 对话测试:模型必填,消息缺省 "ping";错误路径 501 未装配/404 id 不存在/400 参数
+func (d *Deps) chatTestUpstream(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if d.ChatTestFunc == nil {
+		httpError(w, http.StatusNotImplemented, "chat test not configured")
+		return
+	}
+	var req struct {
+		Model   string `json:"model"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if req.Model == "" {
+		httpError(w, http.StatusBadRequest, "model required")
+		return
+	}
+	if req.Message == "" {
+		req.Message = "ping"
+	}
+	latency, status, body, errMsg := d.ChatTestFunc(r.Context(), id, req.Model, req.Message)
+	// 装配层 reg.Get 失败即 id 不存在 → 404(与其余 upstream 路由的 404 语义一致)
+	if strings.Contains(errMsg, "not found") {
+		httpError(w, http.StatusNotFound, errMsg)
+		return
+	}
+	out := map[string]any{"ok": errMsg == "", "latency_ms": latency}
+	if status != 0 {
+		out["status"] = status
+	}
+	if errMsg != "" {
+		out["error"] = errMsg
+	}
+	// 非 JSON 响应体(上游错误页/纯文本/流式拼接)降级为字符串,避免整个响应序列化失败成空体
+	if len(body) > 0 {
+		if json.Valid(body) {
+			out["body"] = json.RawMessage(body)
+		} else {
+			out["body"] = string(body)
+		}
+	}
+	writeJSON(w, out)
+}
+
 func (d *Deps) metricsLive(w http.ResponseWriter, r *http.Request) {
-	reqs, errs, conc, byUp, byTarget := d.Metrics.SnapshotLive()
+	reqs, errs, conc, byUp, byTarget, byPkg := d.Metrics.SnapshotLive()
 	writeJSON(w, map[string]any{
 		"active_concurrent": conc, "total_requests": reqs, "total_errors": errs,
-		"by_upstream": byUp, "by_target": byTarget,
+		"by_upstream": byUp, "by_target": byTarget, "by_package": byPkg,
 	})
 }
 

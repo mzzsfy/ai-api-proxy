@@ -24,20 +24,22 @@ type UpstreamCounters struct {
 
 // Recorder 请求计数器;Cancel 不计入 errors(feat/metrics)
 type Recorder struct {
-	mu       sync.Mutex
-	requests int64
-	errors   int64
-	current  int64
-	maxConc  int64
-	byUp     map[string]*UpstreamCounters
-	byTarget map[string]*UpstreamCounters
+	mu        sync.Mutex
+	requests  int64
+	errors    int64
+	current   int64
+	maxConc   int64
+	byUp      map[string]*UpstreamCounters
+	byTarget  map[string]*UpstreamCounters
+	byPackage map[string]*UpstreamCounters
 }
 
 // NewRecorder 构造
 func NewRecorder() *Recorder {
 	return &Recorder{
-		byUp:     make(map[string]*UpstreamCounters),
-		byTarget: make(map[string]*UpstreamCounters),
+		byUp:      make(map[string]*UpstreamCounters),
+		byTarget:  make(map[string]*UpstreamCounters),
+		byPackage: make(map[string]*UpstreamCounters),
 	}
 }
 
@@ -66,7 +68,7 @@ func (r *Recorder) IncError() {
 	r.mu.Unlock()
 }
 
-// IncUpstream 上游维度计数;failed 仅 5xx/传输类计错误
+// IncUpstream 上游维度计数;failed 口径与 gateway.serve 对齐(执行错误或上游状态 >=400)
 func (r *Recorder) IncUpstream(upstream string, failed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -74,6 +76,21 @@ func (r *Recorder) IncUpstream(upstream string, failed bool) {
 	if c == nil {
 		c = &UpstreamCounters{}
 		r.byUp[upstream] = c
+	}
+	c.Requests++
+	if failed {
+		c.Errors++
+	}
+}
+
+// IncPackage 主包维度计数(一请求一协议包口径;与 IncUpstream 同 failed 语义)
+func (r *Recorder) IncPackage(pkg string, failed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.byPackage[pkg]
+	if c == nil {
+		c = &UpstreamCounters{}
+		r.byPackage[pkg] = c
 	}
 	c.Requests++
 	if failed {
@@ -107,14 +124,15 @@ func (r *Recorder) EnterTarget(upstream, target string) func(failed bool) {
 }
 
 // Snapshot 读即重置:取走全部计数并归零
-func (r *Recorder) Snapshot() (requests, errors, maxConc int64, byUp, byTarget map[string]*UpstreamCounters) {
+func (r *Recorder) Snapshot() (requests, errors, maxConc int64, byUp, byTarget, byPackage map[string]*UpstreamCounters) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	requests, errors, maxConc = r.requests, r.errors, r.maxConc
 	r.requests, r.errors, r.maxConc = 0, 0, 0
-	byUp, byTarget = r.byUp, r.byTarget
+	byUp, byTarget, byPackage = r.byUp, r.byTarget, r.byPackage
 	r.byUp = make(map[string]*UpstreamCounters)
 	r.byTarget = make(map[string]*UpstreamCounters)
+	r.byPackage = make(map[string]*UpstreamCounters)
 	return
 }
 
@@ -126,11 +144,12 @@ type SnapshotRow struct {
 	MaxConc    int64
 	ByUpstream map[string]*UpstreamCounters
 	ByTarget   map[string]*UpstreamCounters
+	ByPackage  map[string]*UpstreamCounters
 }
 
 // Take 快照并封装为行;失败丢弃该分钟(不合并)由持久层决定
 func (r *Recorder) Take(now time.Time) SnapshotRow {
-	reqs, errs, conc, byUp, byTarget := r.Snapshot()
+	reqs, errs, conc, byUp, byTarget, byPackage := r.Snapshot()
 	return SnapshotRow{
 		Minute:     now.Format(MinuteFormat),
 		Requests:   reqs,
@@ -138,6 +157,7 @@ func (r *Recorder) Take(now time.Time) SnapshotRow {
 		MaxConc:    conc,
 		ByUpstream: byUp,
 		ByTarget:   byTarget,
+		ByPackage:  byPackage,
 	}
 }
 
@@ -159,11 +179,20 @@ func (row SnapshotRow) TargetJSON() (string, error) {
 	return string(b), nil
 }
 
+// PackageJSON 序列化 by_package
+func (row SnapshotRow) PackageJSON() (string, error) {
+	b, err := json.Marshal(row.ByPackage)
+	if err != nil {
+		return "", fmt.Errorf("marshal by_package: %w", err)
+	}
+	return string(b), nil
+}
+
 // SnapshotLive 非重置实时读
-func (r *Recorder) SnapshotLive() (requests, errors, concurrent int64, byUp, byTarget map[string]*UpstreamCounters) {
+func (r *Recorder) SnapshotLive() (requests, errors, concurrent int64, byUp, byTarget, byPackage map[string]*UpstreamCounters) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.requests, r.errors, r.current, copyCounters(r.byUp), copyCounters(r.byTarget)
+	return r.requests, r.errors, r.current, copyCounters(r.byUp), copyCounters(r.byTarget), copyCounters(r.byPackage)
 }
 
 // copyCounters 计数表浅拷贝(值拷贝)

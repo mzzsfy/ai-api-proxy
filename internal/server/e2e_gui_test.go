@@ -39,6 +39,37 @@ func TestGUI_AdminPageServed(t *testing.T) {
 			t.Fatalf("admin page missing %s", mark)
 		}
 	}
+	// 导航四页与分组(模型管理/插件管理/插件配置/监控;旧"包/上游"命名移除)
+	for _, mark := range []string{`data-p="ups"`, `data-p="pkgs"`, `data-p="plugconf"`, `>模型管理<`, `>插件管理<`, `>插件配置<`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing nav mark %s", mark)
+		}
+	}
+	// S6 插件管理页纯化:配置/keys 弹层与内嵌编辑区移除(功能迁插件配置页)
+	for _, gone := range []string{`id="cfgbox"`, `id="keysbox"`} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("admin page must not contain %s (插件管理页已纯化)", gone)
+		}
+	}
+	// S7 插件配置页五 tabs + 元信息条 + 包监控图
+	for _, mark := range []string{`data-tab="config"`, `data-tab="keys"`, `data-tab="tasks"`, `data-tab="code"`, `data-tab="mon"`,
+		`id="plugcfg-meta"`, `id="pkg-chart"`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing plugconf mark %s", mark)
+		}
+	}
+	// S8 监控页增强:包维度表 + 双 sparkline;对话测试面板
+	for _, mark := range []string{`id="bypkg"`, `id="rpm-spark"`, `id="conc-spark"`, `id="chatpanel"`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing monitor mark %s", mark)
+		}
+	}
+	// 双主题:浅色默认 token + 暗色覆盖组 + 切换按钮
+	for _, mark := range []string{`:root`, `html[data-theme="dark"]`, `id="themetoggle"`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing theme mark %s", mark)
+		}
+	}
 	// 零外部依赖守卫:内嵌页不得引用外链资源(架构约束:离线可用、无构建链)
 	for _, bad := range []string{"http://", "https://"} {
 		for _, line := range strings.Split(body, "\n") {

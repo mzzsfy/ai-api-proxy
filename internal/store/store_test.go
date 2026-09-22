@@ -62,6 +62,30 @@ func TestMigrate_ResumeAfterInterrupt(t *testing.T) {
 	}
 }
 
+func TestMigration003_PackageColumn(t *testing.T) {
+	// Given 旧库无 by_package_json 列 When 迁移 003 Then 列存在默认 '{}' 且旧行可读
+	s := newTestStore(t)
+	ctx := context.Background()
+	// 模拟旧数据行(仅写 001 时代的列)
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO metrics_minutely
+		(minute, requests, errors, max_concurrent, by_upstream_json, by_target_json)
+		VALUES('2024-01-01T00:00', 3, 1, 2, '{}', '{}')`); err != nil {
+		t.Fatal(err)
+	}
+	var pkgJSON string
+	var reqs int64
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT by_package_json, requests FROM metrics_minutely WHERE minute='2024-01-01T00:00'`).Scan(&pkgJSON, &reqs); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if pkgJSON != "{}" {
+		t.Fatalf("by_package_json default: %q", pkgJSON)
+	}
+	if reqs != 3 {
+		t.Fatalf("old row data lost: %d", reqs)
+	}
+}
+
 func TestKV_NamespaceIsolation(t *testing.T) {
 	// Given 两个 ns 写同名键 When 互读 Then 互不可见
 	s := newTestStore(t)
