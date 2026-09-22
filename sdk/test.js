@@ -97,6 +97,15 @@ function makeStorage(ns) {
 const storageData = {};
 const storage = makeStorage("default");
 
+// setting 声明构建器(与 host 求值期注入同语义:opts 合并进 type 声明)
+const setting = {
+  string: (opts) => Object.assign({ type: "string" }, opts),
+  int: (opts) => Object.assign({ type: "int" }, opts),
+  number: (opts) => Object.assign({ type: "number" }, opts),
+  bool: (opts) => Object.assign({ type: "bool" }, opts),
+  enum: (opts) => Object.assign({ type: "enum" }, opts),
+};
+
 // ─── 部件装载(与 host CommonJS 包装一致) ───
 
 // loadPart 装载部件源码;hooks=对象(无参)或 factory(config)
@@ -104,8 +113,8 @@ const storage = makeStorage("default");
 function loadPart(src, config, keys) {
   keyStore = keys || {};
   const mod = { exports: {} };
-  const fn = new Function("module", "exports", "util", "log", "storage", src);
-  fn(mod, mod.exports, util, log, storage);
+  const fn = new Function("module", "exports", "util", "log", "storage", "setting", src);
+  fn(mod, mod.exports, util, log, storage, setting);
   const exported = mod.exports;
   return typeof exported === "function" ? exported(config || {}) : exported;
 }
