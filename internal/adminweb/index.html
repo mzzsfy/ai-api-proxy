@@ -298,23 +298,24 @@ function shell(page, mainHTML) {
       <nav>
         <div class="brand">ai-api-proxy<i>_</i>控制台</div>
         <div class="navgroup">资源</div>
-        <a data-p="ups">模型管理</a><a data-p="pkgs">插件管理</a><a data-p="plugconf">插件配置</a>
+        <a href="#" data-p="ups">模型管理</a><a href="#" data-p="pkgs">插件管理</a><a href="#" data-p="plugconf">插件配置</a>
         <div class="navgroup">观测</div>
-        <a data-p="mon">监控</a><a data-p="hist">请求历史</a>
+        <a href="#" data-p="mon">监控</a><a href="#" data-p="hist">请求历史</a>
         <div class="gap"></div>
         <button class="mini" id="themetoggle"></button>
-        <a id="logout">退出</a>
+        <a href="#" id="logout">退出</a>
       </nav>
       <main id="main">${mainHTML}</main>
     </div>`;
   document.querySelectorAll("nav a[data-p]").forEach(a => {
     a.classList.toggle("on", a.dataset.p === page);
-    a.onclick = () => show(a.dataset.p);
+    a.onclick = e => { e.preventDefault(); show(a.dataset.p); };
   });
   $("#themetoggle").onclick = () =>
     applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
   applyTheme(document.documentElement.dataset.theme || initialTheme);
-  $("#logout").onclick = async () => {
+  $("#logout").onclick = async e => {
+    e.preventDefault();
     try { await api.post("/logout", {}); } catch (e) {}
     sessionStorage.removeItem("in"); show("login");
   };
