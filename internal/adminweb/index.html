@@ -184,6 +184,12 @@
                   background:var(--bg-hover); border:1px solid var(--line-soft); border-radius:8px;
                   padding:12px 14px; max-height:360px; overflow:auto; min-height:60px; }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+  /* 窄屏覆盖须置于基础规则之后(同特异性按源顺序取胜) */
+  @media (max-width:680px) {
+    .plugconf { flex-direction:column; }
+    .plugconf .plist { width:auto; max-width:100%; display:flex; overflow-x:auto; padding:6px; gap:2px; }
+    .plugconf .plist a { white-space:nowrap; }
+  }
 </style>
 </head>
 <body>
@@ -302,7 +308,7 @@ const uiConfirm = (title, body) => uiModal({ title: title, body: body }).then(v 
 const uiPrompt = (title, value) => uiModal({ title: title, input: true, value: value });
 
 /* ─── 外壳与路由:资源(模型管理/插件管理/插件配置) + 观测(监控/请求历史) ─── */
-const PAGES = { ups: showUpstreams, pkgs: showPackages, plugconf: showPlugConf, mon: showMonitor, hist: showHistory };
+const PAGES = { ups: showUpstreams, pkgs: showPackages, plugconf: gen => showPlugConf("", gen), mon: showMonitor, hist: showHistory };
 const PAGE_NAMES = { ups: "模型管理", pkgs: "插件管理", plugconf: "插件配置", mon: "监控", hist: "请求历史" };
 function shell(page, mainHTML) {
   canvasDraws = [];
