@@ -70,6 +70,12 @@ func TestGUI_AdminPageServed(t *testing.T) {
 			t.Fatalf("admin page missing monitor mark %s", mark)
 		}
 	}
+	// 模型行批量输入:列表添加/删除,替代旧逗号单输入
+	for _, mark := range []string{`id="model-list"`, `id="model-add"`, `data-model-name data-i=`, `data-model-remove data-i=`} {
+		if !strings.Contains(body, mark) {
+			t.Fatalf("admin page missing model batch mark %s", mark)
+		}
+	}
 	// 双主题:浅色默认 token + 暗色覆盖组 + 切换按钮
 	for _, mark := range []string{`:root`, `html[data-theme="dark"]`, `id="themetoggle"`} {
 		if !strings.Contains(body, mark) {
