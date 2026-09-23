@@ -42,10 +42,21 @@ func init() {
 
 func mustOpencodeFiles(t *testing.T) (string, string) {
 	t.Helper()
-	if opencodeLoadErr != nil {
-		t.Fatalf("load opencode pkg: %v", opencodeLoadErr)
+	if opencodeLoadErr == nil {
+		return string(opencodeManifestRaw), string(opencodeProtocolSrcs)
 	}
-	return string(opencodeManifestRaw), string(opencodeProtocolSrcs)
+	// 主仓 plugins/ 缺失时回落同级插件仓(包源迁居 ai-api-proxy-plugin)
+	root := findRepoRoot(t)
+	dir := filepath.Join(root, "..", "ai-api-proxy-plugin", "plugins", "opencode")
+	manifest, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Skip("opencode package not found (repo plugins/ and sibling plugin repo); skipping real-upstream E2E")
+	}
+	src, err := os.ReadFile(filepath.Join(dir, "protocol.js"))
+	if err != nil {
+		t.Fatalf("read opencode protocol: %v", err)
+	}
+	return string(manifest), string(src)
 }
 
 func opencodeTestEnv(t *testing.T) (key, model string) {
@@ -59,6 +70,14 @@ func opencodeTestEnv(t *testing.T) (key, model string) {
 		model = opencodeTestModelDefault
 	}
 	return key, model
+}
+
+// opencodeTestBaseURL 上游网关覆盖(缺省 OpenRouter;兼容网关如 newapi 经 env 注入)
+func opencodeTestBaseURL() string {
+	if base := os.Getenv("OPENCODE_TEST_BASE_URL"); base != "" {
+		return base
+	}
+	return "https://openrouter.ai/api"
 }
 
 // newOpencodeFixture 安装 opencode 包并建 OpenRouter 模型行(v2:连接=包参数,密钥=包级 keys)

@@ -70,7 +70,7 @@ func newRealTransportFixture(t *testing.T, apiKey, model, transportType, proxyUR
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
-		"base_url": "https://openrouter.ai/api", "transport": "real-" + transportType}}); err != nil {
+		"base_url": opencodeTestBaseURL(), "transport": "real-" + transportType}}); err != nil {
 		t.Fatalf("put opencode params: %v", err)
 	}
 	if err := app.Registry.Save(ctx, &upstream.Model{
