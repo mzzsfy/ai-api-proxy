@@ -19,15 +19,10 @@ func TestSupports(t *testing.T) {
 }
 
 func TestBuildRequest_AuthAndURL(t *testing.T) {
-	// Given 包参数 base_url + 包级 key api_key When BuildRequest Then URL 拼接 + Bearer 前缀 + stream 透传
+	// Given 包参数 base_url + 当前键 data={"api_key":...} When BuildRequest Then URL 拼接 + Bearer 前缀 + stream 透传
 	p := &Protocol{
-		Config: map[string]any{BaseURLParam: "https://api.x.com/"},
-		PackageKey: func(name string) (any, bool) {
-			if name == APIKeyParam {
-				return "sk-k", true
-			}
-			return nil, false
-		},
+		Config:     map[string]any{BaseURLParam: "https://api.x.com/"},
+		PackageKey: func() (any, bool) { return map[string]any{APIKeyParam: "sk-k"}, true },
 	}
 	ctx := pipeline.NewContext("r1", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
 	req, err := p.BuildRequest(ctx, []byte(`{"model":"m"}`))
@@ -52,7 +47,7 @@ func TestBuildRequest_TransportSlot(t *testing.T) {
 		if transport != nil {
 			cfg[TransportParam] = transport
 		}
-		return &Protocol{Config: cfg, PackageKey: func(string) (any, bool) { return "k", true }}
+		return &Protocol{Config: cfg, PackageKey: func() (any, bool) { return "k", true }}
 	}
 	req, err := newProto("slow").BuildRequest(&pipeline.PipelineContext{}, []byte(`{}`))
 	if err != nil {
@@ -71,13 +66,13 @@ func TestBuildRequest_TransportSlot(t *testing.T) {
 }
 
 func TestBuildRequest_MissingConfigRejected(t *testing.T) {
-	// Given 缺 base_url / 缺 key When BuildRequest Then 拒绝并注明槽名
-	p := &Protocol{Config: nil, PackageKey: func(string) (any, bool) { return "k", true }}
+	// Given 缺 base_url / 缺键 When BuildRequest Then 拒绝并注明槽名
+	p := &Protocol{Config: nil, PackageKey: func() (any, bool) { return "k", true }}
 	_, err := p.BuildRequest(&pipeline.PipelineContext{}, []byte(`{}`))
 	if err == nil || !strings.Contains(err.Error(), BaseURLParam) {
 		t.Fatalf("missing base_url: %v", err)
 	}
-	p2 := &Protocol{Config: map[string]any{BaseURLParam: "https://x"}, PackageKey: func(string) (any, bool) { return nil, false }}
+	p2 := &Protocol{Config: map[string]any{BaseURLParam: "https://x"}, PackageKey: func() (any, bool) { return map[string]any{}, true }}
 	_, err = p2.BuildRequest(&pipeline.PipelineContext{}, []byte(`{}`))
 	if err == nil || !strings.Contains(err.Error(), APIKeyParam) {
 		t.Fatalf("missing key: %v", err)
@@ -106,7 +101,7 @@ func TestPassthroughHooks(t *testing.T) {
 func TestPassthroughBody(t *testing.T) {
 	// Given 入口原文字节 When BuildRequest Then body 逐字节不变(声明式单协议,不做任何清洗)
 	in := []byte(`{"model":"m","messages":[],"top_k":3}`)
-	p := &Protocol{Config: map[string]any{BaseURLParam: "https://up.example"}, PackageKey: func(string) (any, bool) { return "k", true }}
+	p := &Protocol{Config: map[string]any{BaseURLParam: "https://up.example"}, PackageKey: func() (any, bool) { return "k", true }}
 	req, err := p.BuildRequest(&pipeline.PipelineContext{}, in)
 	if err != nil {
 		t.Fatal(err)

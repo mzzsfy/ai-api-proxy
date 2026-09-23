@@ -692,7 +692,7 @@ async function saveSettings(name, which) {
   }
 }
 
-/* keys pane:keyForm 表单(推荐入口)+ 手动新增 + 逐键行 + 轮转视图 */
+/* keys pane:keyForm 表单(推荐入口)+ 手动添加 + 逐键行(id+data+updatedAt+prev 标记)+ 恢复/详情/删除 */
 async function renderKeysPane(name) {
   $("#pane-keys").innerHTML = `
     <div id="keyformbox" style="display:none">
@@ -708,7 +708,8 @@ async function renderKeysPane(name) {
   try {
     const kv = await api.get(`/packages/${name}/keys`);
     const hooks = kv.hooks || {};
-    $("#keyspre").textContent = JSON.stringify({ current: kv.current, previous: kv.previous }, null, 2);
+    const keys = kv.keys || [];
+    $("#keyspre").textContent = JSON.stringify({ keys, rotation: kv.rotation }, null, 2);
     renderKeyRows(name, kv, hooks);
     if (hooks.keyForm) {
       try { await renderKeyForm(name); $("#keymanual").style.display = "block"; }
@@ -717,53 +718,70 @@ async function renderKeysPane(name) {
       $("#keymanual").style.display = "block";
       prefillNewKey(kv);
     }
-    $("#addkey").onclick = () => addKey(name, kv);
+    $("#addkey").onclick = () => addKey(name);
   } catch (err) { msg(false, err.message); }
 }
 
 function renderKeyRows(name, kv, hooks) {
-  const rows = Object.keys(kv.current || {}).map(k => `
-    <div class="row" data-krow="${esc(k)}">
-      <b>${esc(k)}</b>
-      <span class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(kv.current[k]).slice(0, 60))}</span>
-      ${hooks.keyWrite ? `<button data-kedit="${esc(k)}">编辑</button>` : ""}
-      ${hooks.keyRead ? `<button data-kdetail="${esc(k)}">详情</button>` : ""}
+  const keys = kv.keys || [];
+  const rot = new Set(kv.rotation || []);
+  const fmtTime = ts => ts ? new Date(ts).toLocaleString() : "-";
+  const rows = keys.map(k => `
+    <div class="row" data-krow="${esc(k.id)}">
+      <b>${esc(k.id)}</b>${rot.has(k.id) ? ' <span class="muted" title="下一轮转键">▸</span>' : ""}
+      <span class="muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(k.data).slice(0, 60))}</span>
+      <span class="muted">${fmtTime(k.updatedAt)}</span>
+      ${k.hasPrev ? `<button data-krestore="${esc(k.id)}" title="恢复上一版(data↔prev 交换)">恢复</button>` : ""}
+      ${hooks.keyWrite ? `<button data-kedit="${esc(k.id)}">编辑</button>` : ""}
+      <button data-kdetail="${esc(k.id)}">详情</button>
+      <button data-kdel="${esc(k.id)}">删除</button>
     </div>`).join("");
   $("#keyrows").innerHTML = rows || `<div class="muted">暂无 key</div>`;
   document.querySelectorAll("[data-kedit]").forEach(b => b.onclick = () => editKey(name, kv, b.dataset.kedit));
   document.querySelectorAll("[data-kdetail]").forEach(b => b.onclick = async () => {
     try {
       const d = await api.get(`/packages/${name}/keys/${encodeURIComponent(b.dataset.kdetail)}/detail`);
-      $("#keyspre").textContent = JSON.stringify(d.detail, null, 2);
+      $("#keyspre").textContent = JSON.stringify(d, null, 2);
+    } catch (err) { msg(false, err.message); }
+  });
+  document.querySelectorAll("[data-kdel]").forEach(b => b.onclick = async () => {
+    if (!confirm(`删除键 ${b.dataset.kdel}?`)) return;
+    try { await api.del(`/packages/${name}/keys/${encodeURIComponent(b.dataset.kdel)}`); renderKeysPane(name); }
+    catch (err) { msg(false, err.message); }
+  });
+  document.querySelectorAll("[data-krestore]").forEach(b => b.onclick = async () => {
+    try {
+      const d = await api.get(`/packages/${name}/keys/${encodeURIComponent(b.dataset.krestore)}/detail`);
+      await api.put(`/packages/${name}/keys/${encodeURIComponent(b.dataset.krestore)}`, { value: d.prev, baseUpdatedAt: Number(d.updatedAt || 0) });
+      renderKeysPane(name);
     } catch (err) { msg(false, err.message); }
   });
 }
 
 async function editKey(name, kv, key) {
-  const cur = kv.current[key];
-  const v = await uiPrompt(`编辑 ${key}(JSON)`, JSON.stringify(cur, null, 2));
+  const cur = (kv.keys || []).find(k => k.id === key);
+  const v = await uiPrompt(`编辑 ${key}(JSON;原值自动备份为 prev)`, JSON.stringify(cur ? cur.data : null, null, 2));
   if (v === null) return;
   let val;
   try { val = JSON.parse(v); } catch { msg(false, "值不是合法 JSON"); return; }
-  const updatedAt = Number(kv.updatedAt || 0);
-  api.put(`/packages/${name}/keys/${encodeURIComponent(key)}`, { value: val, baseUpdatedAt: updatedAt })
+  api.put(`/packages/${name}/keys/${encodeURIComponent(key)}`, { value: val, baseUpdatedAt: Number(cur ? cur.updatedAt : 0) })
     .then(() => renderKeysPane(name))
     .catch(err => msg(false, err.message));
 }
 
-function addKey(name, kv) {
+function addKey(name) {
   const key = $("#newkeyname").value.trim();
   if (!key) { msg(false, "键名必填"); return; }
   let val;
   try { val = JSON.parse($("#newkeyval").value || "null"); } catch { msg(false, "值不是合法 JSON"); return; }
-  api.put(`/packages/${name}/keys/${encodeURIComponent(key)}`, { value: val, baseUpdatedAt: Number(kv.updatedAt || 0) })
+  api.put(`/packages/${name}/keys/${encodeURIComponent(key)}`, { value: val, baseUpdatedAt: 0 })
     .then(() => renderKeysPane(name))
     .catch(err => msg(false, err.message));
 }
 
-/* 键名预填:无 keySchema 数据面时按 key-N 兜底 */
+/* 键名预填:现有 id 不冲突的最小编号 */
 function prefillNewKey(kv) {
-  const existing = new Set(Object.keys(kv.current || {}));
+  const existing = new Set((kv.keys || []).map(k => k.id));
   let i = 1;
   while (existing.has(`key-${i}`)) i++;
   $("#newkeyname").value = `key-${i}`;
@@ -815,7 +833,7 @@ async function renderKeyForm(name) {
         msg(false, r.message || "提交未通过");
         return;
       }
-      msg(true, r.message || "已提交" + ((r.written || []).length ? "(" + r.written.join(",") + ")" : ""));
+      msg(true, r.message || "已提交" + ((r.ids || []).length ? "(" + r.ids.join(",") + ")" : ""));
       renderKeysPane(name);
     } catch (err) { msg(false, err.message); }
   };

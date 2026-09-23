@@ -114,7 +114,7 @@ func newGeminiFixture(t *testing.T, apiKey, model string, egress geminiEgress) *
 	if egress.transport != "" {
 		t.Logf("gemini egress via named transport %q", egress.transport)
 	}
-	if err := f.app.AdminDeps.Packages.Keys().Merge("gemini", map[string]any{"api_key": apiKey}); err != nil {
+	if _, err := f.app.AdminDeps.Packages.Keys().Set("gemini", "api_key", map[string]any{"api_key": apiKey}); err != nil {
 		t.Fatalf("merge gemini key: %v", err)
 	}
 	cfg := map[string]any{"base_url": geminiBaseURL}

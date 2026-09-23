@@ -62,7 +62,7 @@ const v2ProtoJS = `module.exports = function (config) {
 			method: "POST",
 			headers: { "Content-Type": "application/json",
 				"anthropic-version": config.api_version || "2023-06-01",
-				"x-api-key": util.key("api_key") },
+				"x-api-key": util.key().api_key },
 			body: entry, stream: ctx.vars.entryStream
 		};
 	},
@@ -119,7 +119,7 @@ func newV2Env(t *testing.T) *v2Env {
 		plugin.ProtocolEntry: v2ProtoJS, "filters/redact.js": v2RedactJS})); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.app.AdminDeps.Packages.Keys().Merge("anthropic-compatible", map[string]any{"api_key": "K1"}); err != nil {
+	if _, err := f.app.AdminDeps.Packages.Keys().Set("anthropic-compatible", "api_key", map[string]any{"api_key": "K1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("anthropic-compatible", plugin.PutInput{Config: map[string]any{
@@ -237,7 +237,7 @@ func TestV2_KeyRotationAppliesImmediately(t *testing.T) {
 	if _, head, _ := e.spy.last(); head["X-Api-Key"] != "K1" {
 		t.Fatalf("initial key: %q", head["X-Api-Key"])
 	}
-	if err := e.f.app.AdminDeps.Packages.Keys().Merge("anthropic-compatible", map[string]any{"api_key": "K2"}); err != nil {
+	if _, err := e.f.app.AdminDeps.Packages.Keys().Set("anthropic-compatible", "api_key", map[string]any{"api_key": "K2"}); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := e.postMessage(t, "auto"); code != http.StatusOK {
@@ -295,7 +295,7 @@ func TestV2_SameNameAcrossProtocols(t *testing.T) {
 	// Given "auto" 同时绑定 anthropic-compatible 与内置 openai-compatible(各自包参数)When 各入口请求 Then 各自命中
 	e := newV2Env(t)
 	// 内置包参数指向同一观测上游;openai 入口槽 = /v1/chat/completions
-	if err := e.f.app.AdminDeps.Packages.Keys().Merge("openai-compatible", map[string]any{"api_key": "K1"}); err != nil {
+	if _, err := e.f.app.AdminDeps.Packages.Keys().Set("openai-compatible", "api_key", map[string]any{"api_key": "K1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.f.app.AdminDeps.Packages.Settings().Put("openai-compatible", plugin.PutInput{Config: map[string]any{

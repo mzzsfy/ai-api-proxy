@@ -19,9 +19,10 @@ var ErrPoolTimeout = errors.New("runtime pool queue timeout")
 
 // hookInstance 单个 runtime 实例(独立 module,池内并行,实例内串行)
 type hookInstance struct {
-	id    int64 // 工厂序号(测试观测补建)
-	vm    *goja.Runtime
-	hooks *Hooks
+	id     int64  // 工厂序号(测试观测补建)
+	vm     *goja.Runtime
+	hooks  *Hooks
+	keyRef *KeyRef // 键槽(deps.Key 指向;出池时按 pctx.Key 无条件重绑,含空值清槽)
 }
 
 // runtimePool hook 粒度借还池;poisoned 实例归还时丢弃,懒补建

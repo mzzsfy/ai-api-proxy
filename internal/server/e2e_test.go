@@ -36,7 +36,7 @@ func buildTestApp(t *testing.T, upstreamCT, upstreamBody string) (*App, *httptes
 	}))
 	t.Cleanup(upSrv.Close)
 	// 包级密钥 + 包参数 base_url(v2 连接信息归属包)
-	if err := app.AdminDeps.Packages.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-upstream"}); err != nil {
+	if _, err := app.AdminDeps.Packages.Keys().Set("openai-compatible", "api_key", map[string]any{"api_key": "sk-upstream"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Settings().Put("openai-compatible",

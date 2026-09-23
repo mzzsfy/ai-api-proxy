@@ -13,11 +13,12 @@ import (
 const SettingsLimit = 64 * 1024
 
 // blobStore 同构 blob 表原语(name + data_json + updated_at;表名为编译期常量)
-// 访问模式 = 整文档读/写;一次保存 = 单行写,天然原子
+// 访问模式 = 整文档读/写;一次保存 = 单行写,天然原子;hasPrev = 表带 prev_json 备份列
 type blobStore struct {
-	db    *sql.DB
-	table string
-	mu    sync.Mutex
+	db      *sql.DB
+	table   string
+	hasPrev bool
+	mu      sync.Mutex
 }
 
 func newBlobStore(db *sql.DB, table string) *blobStore {
@@ -66,6 +67,76 @@ func (b *blobStore) delete(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, _ = b.db.Exec(`DELETE FROM `+b.table+` WHERE name=?`, name)
+}
+
+// blobRow 行投影(Prev 仅 hasPrev store 填充)
+type blobRow struct {
+	Name      string
+	Data      string
+	Prev      string
+	UpdatedAt int64
+}
+
+// newBlobStoreWithPrev 构造带 prev_json 列的 store(表内可空列;行级备份)
+func newBlobStoreWithPrev(db *sql.DB, table string) *blobStore {
+	return &blobStore{db: db, table: table, hasPrev: true}
+}
+
+// loadWithPrev 读文档与备份列(hasPrev=false 时 prev 恒空)
+func (b *blobStore) loadWithPrev(name string) (data, prev string, ts int64, ok bool) {
+	if !b.hasPrev {
+		d, o := b.load(name)
+		return d, "", b.loadUpdatedAt(name), o
+	}
+	var dataJSON, prevJSON sql.NullString
+	var updated int64
+	err := b.db.QueryRow(`SELECT data_json, prev_json, updated_at FROM `+b.table+` WHERE name=?`, name).
+		Scan(&dataJSON, &prevJSON, &updated)
+	if err != nil {
+		return "", "", 0, false
+	}
+	return dataJSON.String, prevJSON.String, updated, true
+}
+
+// saveWithPrev 写文档与备份(prevJSON = JSON 文本;空串存 NULL)
+func (b *blobStore) saveWithPrev(name, dataJSON, prevJSON string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(dataJSON) > SettingsLimit {
+		return fmt.Errorf("%s exceed limit (%d > %d)", b.table, len(dataJSON), SettingsLimit)
+	}
+	var prev any
+	if prevJSON != "" {
+		prev = prevJSON
+	}
+	_, err := b.db.Exec(`INSERT INTO `+b.table+`(name, data_json, prev_json, updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET data_json=excluded.data_json, prev_json=excluded.prev_json, updated_at=excluded.updated_at`,
+		name, dataJSON, prev, time.Now().UnixMilli())
+	return err
+}
+
+// listPrefix 前缀枚举(键行扫描;快照语义;hasPrev 时带备份列)
+func (b *blobStore) listPrefix(prefix string) ([]blobRow, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	q := `SELECT name, data_json, updated_at FROM ` + b.table + ` WHERE name LIKE ? ORDER BY name`
+	if b.hasPrev {
+		q = `SELECT name, data_json, COALESCE(prev_json, ''), updated_at FROM ` + b.table + ` WHERE name LIKE ? ORDER BY name`
+	}
+	rows, err := b.db.Query(q, prefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []blobRow{}
+	for rows.Next() {
+		var r blobRow
+		if err := rows.Scan(&r.Name, &r.Data, &r.Prev, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ErrVersionConflict 过期 version 提交(乐观锁)

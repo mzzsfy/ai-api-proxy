@@ -170,7 +170,7 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.AdminDeps.Packages.Keys().Merge("js-openai", map[string]any{"api_key": upstreamAPIKey}); err != nil {
+	if _, err := app.AdminDeps.Packages.Keys().Set("js-openai", "api_key", map[string]any{"api_key": upstreamAPIKey}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Settings().Put("js-openai", plugin.PutInput{Config: map[string]any{

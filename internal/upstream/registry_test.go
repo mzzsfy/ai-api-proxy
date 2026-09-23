@@ -51,7 +51,7 @@ func v2Ddl() []string {
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (name, base_package))`,
 		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
-		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', prev_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE package_settings (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
 	}
 }
@@ -94,7 +94,7 @@ func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, 
 	src := fmt.Sprintf(`module.exports = function (config) {
 		return {
 			buildRequest: function (ctx, entry) {
-				var key = util.key("api_key");
+				var key = (util.key() || {"api_key":"sk-x"}).api_key;
 				return { url: (config.base_url || "https://d") + "/v1/chat/completions", method: "POST",
 					headers: {"Authorization": "Bearer " + key}, body: entry, stream: false };
 			},%s
@@ -333,6 +333,9 @@ func TestSettings_InvalidateModelCaches(t *testing.T) {
 	// Given 行已实例化(闭包持有插件参数)When 改包参数并 EvictPackageSettings Then 新实例读到新值
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
+	if _, err := pkgs.Keys().Set("demo", "api_key", map[string]any{"api_key": "sk-t"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pkgs.Settings().Put("demo", plugin.PutInput{Config: map[string]any{"base_url": "https://old"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -416,8 +419,8 @@ func TestMigrateV1_SecretsFromKv(t *testing.T) {
 		t.Fatalf("model row migrated: n=%d err=%v", n, err)
 	}
 	val, ok := pkgs.Keys().Get("demo", "api_key")
-	if !ok || val != "sk-v1" {
-		t.Fatalf("package key from v1 kv: %v %v", val, ok)
+	if !ok || val.Data != "sk-v1" {
+		t.Fatalf("package key from v1 kv: %+v %v", val, ok)
 	}
 	if err := reg.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='upstreams_v1'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("v1 table dropped: %d", n)

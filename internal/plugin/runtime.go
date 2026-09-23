@@ -14,18 +14,23 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/google/uuid"
+
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
 // MaxStorageValue storage 单键上限
 const MaxStorageValue = 64 * 1024
 
-// HostDeps 部件宿主依赖(注入 util;v2:无目标凭据,密钥唯一出口 = util.key 包级)
+// KeyRef 当前键引用(请求级/逐键注入;JS 经 ctx.key 或 util.key() 读取,无按名通道)
+type KeyRef = pipeline.KeyEntry
+
+// HostDeps 部件宿主依赖(注入 util;密钥唯一出口 = ctx.key / util.key() 当前键)
 type HostDeps struct {
 	PackageName string
-	// PackageKey 包级 key 只读(实时;hooks 任务写入;可空=util.key 报错)
-	PackageKey func(name string) (any, bool)
-	// PackageKeyValues 包级 keys 全量值(inspect/log 脱敏用;可空)
-	PackageKeyValues func() map[string]string
+	// Key 当前键(请求级选键/逐键执行注入;可空=util.key 返回 undefined)
+	Key *KeyRef
+	// PackageKeyValues 当前键数据字符串叶子(inspect/log 脱敏用;可空)
+	PackageKeyValues func() []string
 	// TransportEvict 主动失效上报(管理命令转发;仅失效,不触发重试;可空=util.evict 报错)
 	TransportEvict func(transport, scope, value string) error
 	Storage        StorageKV
@@ -155,16 +160,12 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		b, _ := json.Marshal(v.Export())
 		return maskSecrets(deps, string(b))
 	})
-	// key:包级密钥唯一出口(v2;轮换语义 current/previous 由 keys 存储承载)
-	_ = util.Set("key", func(name string) (any, error) {
-		if deps.PackageKey == nil {
-			return nil, fmt.Errorf("key %q: no keys context (package %s)", name, deps.PackageName)
+	// key:当前键 data 唯一出口(无参;多余参数被忽略 = 不支持按名取;无键 = undefined)
+	_ = util.Set("key", func(args ...goja.Value) any {
+		if deps.Key == nil || deps.Key.Data == nil {
+			return goja.Undefined()
 		}
-		v, ok := deps.PackageKey(name)
-		if !ok {
-			return nil, nil
-		}
-		return v, nil
+		return deps.Key.Data
 	})
 	// evict:主动失效上报出口(管理命令转发;仅失效当前绑定,不改当前请求重试行为)
 	_ = util.Set("evict", func(transport, scope, value string) (bool, error) {
@@ -268,8 +269,13 @@ func instantiate(prog *goja.Program, entry string, config any, deps HostDeps) (*
 	return vm, mv, nil
 }
 
-// newInstance 池工厂:实例化 + hook 抽取
+// newInstance 池工厂:实例化 + hook 抽取(keyRef 槽 = deps.Key;适配器出池重绑)
 func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*hookInstance, error) {
+	keyRef := &KeyRef{}
+	if deps.Key != nil {
+		*keyRef = *deps.Key
+	}
+	deps.Key = keyRef // 闭包持槽指针,运行期读值随重绑变化
 	vm, obj, err := instantiate(prog, entry, config, deps)
 	if err != nil {
 		return nil, err
@@ -278,7 +284,7 @@ func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*
 	if err != nil {
 		return nil, err
 	}
-	return &hookInstance{vm: vm, hooks: hooks}, nil
+	return &hookInstance{vm: vm, hooks: hooks, keyRef: keyRef}, nil
 }
 
 // ProbeHooks 结构探测:求值一次取钩子存在性(不进池;对象导出形态可探测)
@@ -508,7 +514,7 @@ func renderTemplate(s string, vars map[string]any) string {
 // secretMaskOutput 凭据值在输出中的替换串
 const secretMaskOutput = "***"
 
-// maskSecrets inspect/log 输出统一处理:包级 keys 值替换 + 截断
+// maskSecrets inspect/log 输出统一处理:当前键字符串叶子替换 + 截断
 func maskSecrets(deps HostDeps, s string) string {
 	if deps.PackageKeyValues != nil {
 		for _, val := range deps.PackageKeyValues() {

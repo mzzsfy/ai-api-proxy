@@ -18,7 +18,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	for _, stmt := range []string{
-		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', prev_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE package_settings (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
 		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
@@ -112,26 +112,26 @@ func TestSettingsStoreLimit(t *testing.T) {
 func TestKeysStoreOnBlobTable(t *testing.T) {
 	db := newTestDB(t)
 	ks := NewKeysStore(db)
-	if err := ks.Merge("checkin", map[string]any{"token": "t1"}); err != nil {
+	if _, err := ks.Set("checkin", "token", "t1"); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := ks.Get("checkin", "token"); !ok || v != "t1" {
-		t.Fatalf("get: %v %v", v, ok)
+	if e, ok := ks.Get("checkin", "token"); !ok || e.Data != "t1" {
+		t.Fatalf("get: %v %v", e, ok)
 	}
-	// 行落在 package_keys 表(kv 无 __keys__ 行)
+	// 行落在 package_keys 表,复合名 = 包/键id(kv 无 __keys__ 行)
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM package_keys WHERE name='checkin'`).Scan(&n); err != nil || n != 1 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM package_keys WHERE name='checkin/token'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("package_keys row: %d %v", n, err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM kv WHERE key='__keys__'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("kv should not hold keys: %d %v", n, err)
 	}
-	// 64KB 上限
-	big := strings.Repeat("x", KeysLimit)
-	if err := ks.Merge("checkin", map[string]any{"blob": big}); err == nil {
+	// 单键 64KB 上限
+	big := strings.Repeat("x", SettingsLimit+1)
+	if _, err := ks.Set("checkin", "big", big); err == nil {
 		t.Fatal("want limit error")
 	}
-	ks.Delete("checkin")
+	_ = ks.Delete("checkin", "token")
 	if _, ok := ks.Get("checkin", "token"); ok {
 		t.Fatal("delete failed")
 	}

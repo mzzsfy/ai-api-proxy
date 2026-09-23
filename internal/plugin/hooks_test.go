@@ -2,94 +2,15 @@ package plugin
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
-// ─── 包级 key 存储(BDD:previous 覆盖 / 上限拒写 / 明文视图 / 升级快照 / 卸载清理)───
-
-func testKeysDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", t.TempDir()+"/test.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
-
-func TestKeys_SetMovesCurrentToPrevious(t *testing.T) {
-	// Given current={"token":"t2"} previous={"token":"t1"} When set({"token":"t3"}) Then previous=t2(t1 丢弃)
-	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Merge("pkg", map[string]any{"token": "t1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ks.Merge("pkg", map[string]any{"token": "t2"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ks.Merge("pkg", map[string]any{"token": "t3"}); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := ks.Get("pkg", "token"); v != "t3" {
-		t.Fatalf("current: %v", v)
-	}
-	if v, _ := ks.Previous("pkg", "token"); v != "t2" {
-		t.Fatalf("previous: %v", v)
-	}
-}
-
-func TestKeys_LimitRejects(t *testing.T) {
-	// Given 已接近 64KB When 超限写入 Then 拒绝
-	ks := NewKeysStore(testKeysDB(t))
-	big := map[string]any{"blob": string(make([]byte, KeysLimit))}
-	if err := ks.Merge("pkg", big); err == nil {
-		t.Fatal("oversized keys accepted")
-	}
-}
-
-func TestKeys_ViewAndDelete(t *testing.T) {
-	// Given set 后 When View Then 明文输出(键名+值+updatedAt);Delete 后全空
-	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Merge("pkg", map[string]any{"token": "secret-value"}); err != nil {
-		t.Fatal(err)
-	}
-	m := ks.View("pkg")
-	cur := m["current"].(map[string]any)
-	if cur["token"] != "secret-value" {
-		t.Fatalf("view current: %v", cur)
-	}
-	ks.Delete("pkg")
-	if _, ok := ks.Get("pkg", "token"); ok {
-		t.Fatal("key survived delete")
-	}
-}
-
-func TestKeys_UpgradeSnapshot(t *testing.T) {
-	// Given current 有值 When 升级快照 Then previous=旧 current 且 current 原样
-	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Merge("pkg", map[string]any{"token": "old"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ks.UpgradeSnapshot("pkg"); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := ks.Get("pkg", "token"); v != "old" {
-		t.Fatalf("current after upgrade: %v", v)
-	}
-	if v, _ := ks.Previous("pkg", "token"); v != "old" {
-		t.Fatalf("previous after upgrade: %v", v)
-	}
-}
-
-// ─── manifest hooks 校验 ───
+// ─── hooks 运行时(装载/任务/onLoad/require/settings/next/storage 事务)───
+// 包级 key 存储(单键一等实体)测试见 keys_test.go
 
 func TestValidate_HooksOnlyPackage(t *testing.T) {
 	// Given 仅 hooks 的包 When Validate Then 合法(纯签到包形态;多文件布局)
@@ -293,97 +214,11 @@ func TestHooks_OnLoadAndSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.RunOnLoad(nil); err != nil {
+	if err := rt.RunOnLoad(); err != nil {
 		t.Fatal(err)
 	}
 	if v := mem.m["acct"]; v != "over@x" {
 		t.Fatalf("settings snapshot: %v", v)
-	}
-	// previous 注入:热加载可读,启停 nil 不可读
-	src := `module.exports={onLoad:function(ctx){storage.set("prev", String(ctx.keys.previous("token")));}}`
-	pkg2 := hooksPkg(t, map[string]string{"init.js": src})
-	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Merge("hp", map[string]any{"token": "stored"})
-	rt2, err := LoadInit(pkg2, HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rt2.RunOnLoad(nil); err != nil {
-		t.Fatal(err)
-	}
-	if v := mem.m["prev"]; v != "undefined" {
-		t.Fatalf("startup previous leaked: %v", v)
-	}
-	if err := rt2.RunOnLoad(map[string]any{"token": "hot"}); err != nil {
-		t.Fatal(err)
-	}
-	if v := mem.m["prev"]; v != "hot" {
-		t.Fatalf("hot previous: %v", v)
-	}
-}
-
-func TestHooks_KeysList(t *testing.T) {
-	// Given 包已有 3 键 When 任务 ctx.keys.list() Then 排序键名数组不含值
-	files := map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("names", JSON.stringify(ctx.keys.list()));}}`}
-	tk := HooksTask{Name: "a", Cron: "* * * * *"}
-	pkg := hooksPkg(t, files, tk)
-	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Merge("hp", map[string]any{"token-b": "v2", "account": "me@x", "token-a": "v1"})
-	mem := &memKV{m: map[string]string{}}
-	deps := HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
-	rt, err := LoadTask(pkg, tk, deps, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rt.RunTask(tk, time.Unix(0, 0)); err != nil {
-		t.Fatal(err)
-	}
-	if got := mem.m["names"]; got != `["account","token-a","token-b"]` {
-		t.Fatalf("list: %s", got)
-	}
-	// 空键包 → [](独立 store 隔离场景 1 数据)
-	pkg2 := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("n", String(ctx.keys.list().length));}}`}, tk)
-	deps2 := HooksDeps{Keys: NewKeysStore(testKeysDB(t)), Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
-	rt2, err := LoadTask(pkg2, tk, deps2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rt2.RunTask(tk, time.Unix(0, 0)); err != nil {
-		t.Fatal(err)
-	}
-	if got := mem.m["n"]; got != "0" {
-		t.Fatalf("empty list: %s", got)
-	}
-}
-
-func TestKeys_SetKeyRotatesPrevious(t *testing.T) {
-	// Given 已有键 When SetKey 单键编辑 Then previous=旧 current 整体(别名污染回归:轮转后 previous 不得跟随 current 变更)
-	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Merge("hp", map[string]any{"token": "old-token", "other": "keep"})
-	if _, err := ks.SetKey("hp", "token", "new-token"); err != nil {
-		t.Fatal(err)
-	}
-	cur, _ := ks.Get("hp", "token")
-	if cur != "new-token" {
-		t.Fatalf("current: %v", cur)
-	}
-	prev, ok := ks.Previous("hp", "token")
-	if !ok || prev != "old-token" {
-		t.Fatalf("previous polluted: %v ok=%v", prev, ok)
-	}
-	// 未编辑键:current 保留,previous 同值
-	if v, _ := ks.Get("hp", "other"); v != "keep" {
-		t.Fatalf("other lost: %v", v)
-	}
-	if p, ok := ks.Previous("hp", "other"); !ok || p != "keep" {
-		t.Fatalf("other previous: %v %v", p, ok)
-	}
-	// 首次写入(空文档):previous 空
-	if _, err := ks.SetKey("hp2", "k", "v"); err != nil {
-		t.Fatal(err)
-	}
-	if p, ok := ks.Previous("hp2", "k"); ok || p != nil {
-		t.Fatalf("fresh previous: %v %v", p, ok)
 	}
 }
 
@@ -509,29 +344,30 @@ func TestHooks_NextForm(t *testing.T) {
 }
 
 func TestHooks_UtilKeyReadonlyInProtocol(t *testing.T) {
-	// Given protocol 部件 util.key When 读 Then 返回当前值(实时)
-	protoSrc := "module.exports={buildRequest:function(ctx,req){return {url:String(util.key('endpoint')),method:'POST',headers:{},body:req};},mapEvent:function(ctx,e){return '[]';}}"
+	// Given protocol 部件 util.key() 无参 When pctx.Key 选键 Then 返回当前键 data(请求级)
+	protoSrc := "module.exports={buildRequest:function(ctx,req){return {url:String(util.key().endpoint),method:'POST',headers:{},body:req};},mapEvent:function(ctx,e){return '[]';}}"
 	pkg := &Package{
 		Manifest: &Manifest{ManifestVersion: ManifestVersion, Name: "kp", Version: "0.1.0"},
 		Files:    map[string][]byte{ProtocolEntry: []byte(protoSrc)},
 	}
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
-	ks := NewKeysStore(testKeysDB(t))
-	_ = ks.Merge("kp", map[string]any{"endpoint": "https://a"})
-	proto, err := NewProtocol(pkg, nil, nil, func(name string) (any, bool) { return ks.Get("kp", name) }, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := proto.BuildRequest(nil, []byte(`{}`))
+	pctx := pipeline.NewContext("r1", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{})
+	pctx.Key = &pipeline.KeyEntry{ID: "main", Data: map[string]any{"endpoint": "https://a"}}
+	req, err := proto.BuildRequest(pctx, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if req.URL != "https://a" {
 		t.Fatalf("util.key: %s", req.URL)
 	}
-	// 实时性:更新后新值
-	_ = ks.Merge("kp", map[string]any{"endpoint": "https://b"})
-	req, err = proto.BuildRequest(nil, []byte(`{}`))
+	// 下一请求选另一键(pctx.Key 变更 = 新值)
+	pctx2 := pipeline.NewContext("r2", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{})
+	pctx2.Key = &pipeline.KeyEntry{ID: "alt", Data: map[string]any{"endpoint": "https://b"}}
+	req, err = proto.BuildRequest(pctx2, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +384,7 @@ func TestHooks_UtilNoListInProtocol(t *testing.T) {
 		Files:    map[string][]byte{ProtocolEntry: []byte(protoSrc)},
 	}
 	pkg.Manifest.Parts.Protocol = &ProtocolPart{Protocol: "openai-completions"}
-	proto, err := NewProtocol(pkg, nil, nil, func(name string) (any, bool) { return nil, false }, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,52 +440,18 @@ func TestStorage_TxCommitOnSuccessRollbackOnFailure(t *testing.T) {
 	}
 }
 
-func TestKeys_RemoveMultipleRotatesOnce(t *testing.T) {
-	// Given current={token:t,password:p,other:o} When remove("password","token","ghost") Then current={other}, previous=删前全量,previous 只轮转一次
-	ks := NewKeysStore(testKeysDB(t))
-	if err := ks.Merge("pkg", map[string]any{"token": "t", "password": "p", "other": "o"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ks.Remove("pkg", "password", "token", "ghost"); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := ks.Get("pkg", "password"); v != nil {
-		t.Fatalf("password survived: %v", v)
-	}
-	if v, _ := ks.Get("pkg", "token"); v != nil {
-		t.Fatalf("token survived: %v", v)
-	}
-	if v, _ := ks.Get("pkg", "other"); v != "o" {
-		t.Fatalf("other lost: %v", v)
-	}
-	prev, ok := ks.Previous("pkg", "password")
-	if !ok || prev != "p" {
-		t.Fatalf("previous password: %v %v", prev, ok)
-	}
-	if v, _ := ks.Previous("pkg", "ghost"); v != nil {
-		t.Fatalf("ghost in previous: %v", v)
-	}
-	// 幂等:再删不存在的键,previous 不再轮转
-	if err := ks.Remove("pkg", "nope"); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := ks.Previous("pkg", "password"); v != "p" {
-		t.Fatalf("idempotent remove rotated: %v", v)
-	}
-}
-
-func TestHooks_RemoveOnlyInWriteWindow(t *testing.T) {
-	// Given onLoad(无写窗) When ctx.keys.remove Then 能力不存在(undefined)
+func TestHooks_WriteWindowScoped(t *testing.T) {
+	// BDD 16/写窗矩阵:onLoad ctx 无 set/merge/remove(阉割即权限);任务窗有
 	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
-	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.remove===undefined));}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
+	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined && ctx.keys.merge===undefined && ctx.keys.remove===undefined));}}`})
 	rt, err := LoadInit(pkg, deps, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.RunOnLoad(nil); err != nil {
+	if err := rt.RunOnLoad(); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := deps.Storage.Get("probe"); v != "true" {
-		t.Fatalf("remove visible in onLoad ctx: %v", v)
+		t.Fatalf("write window leaked into onLoad: %v", v)
 	}
 }

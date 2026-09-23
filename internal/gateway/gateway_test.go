@@ -45,7 +45,7 @@ func v2Ddl() []string {
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (name, base_package))`,
 		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
-		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', prev_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE package_settings (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
 	}
 }
@@ -89,7 +89,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		t.Fatal(err)
 	}
 	// 包级密钥 + 包参数(连接信息在包,不在模型行)
-	if err := pkgs.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-live-key"}); err != nil {
+	if _, err := pkgs.Keys().Set("openai-compatible", "api_key", map[string]any{"api_key": "sk-live-key"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pkgs.Settings().Put("openai-compatible", plugin.PutInput{Config: map[string]any{"base_url": f.upstreamSrv.URL}}); err != nil {
@@ -112,6 +112,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		Executor:  &pipeline.Executor{Transports: trMgr.Get},
 		Registry:  reg,
 		Metrics:   metrics.NewRecorder(),
+		Keys:      pkgs.Keys(),
 	}
 	return f
 }
@@ -164,7 +165,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 		"protocol":{"protocol":"` + protocol + `","features":["tools","vision"]}}}`
 	src := `module.exports = function (config) {
 		return { buildRequest: function (ctx, entry) {
-			var key = util.key("api_key");
+			var key = util.key().api_key;
 			return { url: config.base_url + "/v1/chat/completions", method: "POST",
 				headers: {"Content-Type": "application/json", "Authorization": "Bearer " + key},
 				body: entry, stream: ctx.vars.entryStream };
@@ -176,7 +177,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	if protocol == "anthropic-messages" {
 		src = `module.exports = function (config) {
 		return { buildRequest: function (ctx, entry) {
-			var key = util.key("api_key");
+			var key = util.key().api_key;
 			return { url: config.base_url + "/v1/messages", method: "POST",
 				headers: {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"},
 				body: entry, stream: ctx.vars.entryStream };
@@ -188,7 +189,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})); err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Keys().Merge("js-proto", map[string]any{"api_key": "sk-live-key"}); err != nil {
+	if _, err := pkgs.Keys().Set("js-proto", "api_key", map[string]any{"api_key": "sk-live-key"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pkgs.Settings().Put("js-proto", plugin.PutInput{Config: map[string]any{"base_url": f.upstreamSrv.URL}}); err != nil {
@@ -201,6 +202,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	}
 	f.reg = reg
 	f.g.Registry = reg
+	f.g.Keys = pkgs.Keys()
 }
 
 func buildZip(t *testing.T, manifest string, files map[string]string) []byte {

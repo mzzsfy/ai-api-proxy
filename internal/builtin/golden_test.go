@@ -14,19 +14,18 @@ import (
 
 // ─── 黄金对照:js-openai-full 包(JS 版)与内置 Go 版同输入同产物 ───
 
-// goldenCtx 构造一致上下文(v2:无目标概念)
+// goldenCtx 构造一致上下文(v2:无目标概念;当前键注入 = JS util.key() 数据源)
 func goldenCtx() *pipeline.PipelineContext {
-	return pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
+	ctx := pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m", EntryStream: true})
+	ctx.Key = &pipeline.KeyEntry{ID: "api_key", Data: map[string]any{"api_key": goldenKey}}
+	return ctx
 }
 
 const goldenKey = "sk-golden"
 
-// goldenPackageKey 包级 key 读值(JS/Go 两侧同源)
-func goldenPackageKey(name string) (any, bool) {
-	if name == "api_key" {
-		return goldenKey, true
-	}
-	return nil, false
+// goldenKeyData 当前键 data(JS util.key() 与 Go PackageKey 两侧同源;map 形态 = {"api_key":...})
+func goldenKeyData() (any, bool) {
+	return map[string]any{"api_key": goldenKey}, true
 }
 
 // goldenBaseURL 对拍用包参数值(两侧一致)
@@ -58,7 +57,7 @@ func loadJSPackage(t *testing.T) pipeline.Protocol {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := plugin.NewProtocol(pkg, map[string]any{"base_url": goldenBaseURL}, nil, goldenPackageKey, nil, nil)
+	p, err := plugin.NewProtocol(pkg, map[string]any{"base_url": goldenBaseURL}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +109,7 @@ func findRepoRoot(t *testing.T) string {
 func TestGolden_JSvsBuiltin_BuildRequest(t *testing.T) {
 	goProto := &Protocol{
 		Config:     map[string]any{BaseURLParam: goldenBaseURL},
-		PackageKey: goldenPackageKey,
+		PackageKey: goldenKeyData,
 	}
 	jsProto := loadJSPackage(t)
 	cases := []struct {

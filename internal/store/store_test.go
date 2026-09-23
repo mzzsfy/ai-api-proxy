@@ -145,10 +145,11 @@ func TestMigrate_BackupBeforeModelRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 手工构造 003 版本态:schema_migrations 记 3 + v1 形态 upstreams 表含数据
+	// 手工构造 003 版本态:schema_migrations 记 3 + v1 形态 upstreams 表含数据(升 004 时触发整库备份)
 	pre := []string{
 		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))`,
 		`INSERT INTO schema_migrations (version) VALUES (1),(2),(3)`,
+		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
 			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
 			params_json TEXT NOT NULL DEFAULT '{}', filter_params_json TEXT NOT NULL DEFAULT '{}', filters_enabled_json TEXT NOT NULL DEFAULT '{}',

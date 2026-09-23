@@ -317,8 +317,10 @@ func (r *Registry) migrateV1(ctx context.Context) error {
 			}
 		}
 		if len(keys) > 0 {
-			if err := r.pkgs.Keys().Merge(pkgName, keys); err != nil {
-				return fmt.Errorf("migrate package keys %s: %w", pkgName, err)
+			for k, v := range keys {
+				if _, err := r.pkgs.Keys().Set(pkgName, k, v); err != nil {
+					return fmt.Errorf("migrate package keys %s: %w", pkgName, err)
+				}
 			}
 		}
 		if baseURL != "" {
@@ -751,7 +753,7 @@ func (r *Registry) instantiateParts(m *Model) (*resolvedParts, error) {
 	r.mu.RUnlock()
 	var filters []pipeline.Filter
 	for _, fp := range pkg.Manifest.Parts.Filters {
-		f, err := plugin.NewFilter(pkg, fp, cloneParams(merged), r.pkgStorage(m.Plugin), r.pkgs.KeyReader(m.Plugin), nil, transportEvict)
+		f, err := plugin.NewFilter(pkg, fp, cloneParams(merged), r.pkgStorage(m.Plugin), r.maskValues(m.Plugin), transportEvict)
 		if err != nil {
 			return nil, err
 		}
@@ -764,27 +766,34 @@ func (r *Registry) instantiateParts(m *Model) (*resolvedParts, error) {
 	}
 	var proto pipeline.Protocol
 	if factory, ok := r.pkgs.BuiltinFactory(m.Plugin); ok {
-		proto, err = factory(plugin.BuiltinDeps{Config: cloneParams(merged), PackageKey: r.pkgs.KeyReader(m.Plugin)})
+		proto, err = factory(plugin.BuiltinDeps{Config: cloneParams(merged), PackageKey: r.currentKeyData(m.Plugin)})
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		keyValues := func() map[string]string {
-			out := map[string]string{}
-			for k, v := range r.pkgs.Keys().View(m.Plugin) {
-				if s, ok := v.(string); ok {
-					out[k] = s
-				}
-			}
-			return out
-		}
-		proto, err = plugin.NewProtocol(pkg, cloneParams(merged), r.pkgStorage(m.Plugin), r.pkgs.KeyReader(m.Plugin), keyValues, transportEvict)
+		proto, err = plugin.NewProtocol(pkg, cloneParams(merged), r.pkgStorage(m.Plugin), r.maskValues(m.Plugin), transportEvict)
 		if err != nil {
 			return nil, err
 		}
 	}
 	parts.Protocol = proto
 	return parts, nil
+}
+
+// maskValues 包全部键 data 的字符串叶子(inspect/log 脱敏源)
+func (r *Registry) maskValues(pkgName string) func() []string {
+	return func() []string { return r.pkgs.Keys().MaskStrings(pkgName) }
+}
+
+// currentKeyData 当前键 data 读取闭包(内置协议注入;请求级选键经 ctx,内置单例读轮询指针)
+func (r *Registry) currentKeyData(pkgName string) func() (any, bool) {
+	return func() (any, bool) {
+		e, ok := r.pkgs.Keys().Rotate(pkgName)
+		if !ok {
+			return nil, false
+		}
+		return e.Data, true
+	}
 }
 
 // EvictPackageSettings 插件参数保存后失效引用该包的行缓存(参数烘焙进部件,改值必须重建)

@@ -183,10 +183,10 @@ transports:
 	if status != http.StatusOK {
 		t.Fatalf("install js-anthropic %d: %s", status, body)
 	}
-	// v2 装配:包级 keys → 包参数(乐观锁 version)→ 模型行
+	// v2 装配:包级 keys(data = {"api_key":...} map 形态,插件 util.key().api_key 消费)→ 包参数(乐观锁 version)→ 模型行
 	for _, pkg := range []string{"js-openai", "js-anthropic"} {
 		status, body = putAdmin(t, client, base, "/admin/api/packages/"+pkg+"/keys/api_key",
-			[]byte(`{"value":"`+upstreamAPIKey+`"}`))
+			[]byte(`{"value":{"api_key":"`+upstreamAPIKey+`"}}`))
 		if status != http.StatusOK {
 			t.Fatalf("put key %s %d: %s", pkg, status, body)
 		}

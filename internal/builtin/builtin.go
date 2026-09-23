@@ -20,8 +20,8 @@ const DeclaredProtocol = pipeline.ProtocolOpenAICompletions
 type Protocol struct {
 	// Config 解析后的包参数(base_url 必填;transport 可空 = direct)
 	Config map[string]any
-	// PackageKey 包级 key 只读(实时)
-	PackageKey func(name string) (any, bool)
+	// PackageKey 当前键 data 只读(请求级选键后;string = 本身,map 取 api_key)
+	PackageKey func() (any, bool)
 }
 
 // New 构造
@@ -72,13 +72,20 @@ func (p *Protocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pi
 	if p.PackageKey == nil {
 		return pipeline.Request{}, fmt.Errorf("builtin: keys reader not wired")
 	}
-	keyVal, ok := p.PackageKey(APIKeyParam)
-	if !ok || keyVal == nil {
-		return pipeline.Request{}, fmt.Errorf("builtin: package key %s missing", APIKeyParam)
+	dataVal, ok := p.PackageKey()
+	if !ok || dataVal == nil {
+		return pipeline.Request{}, fmt.Errorf("builtin: package key missing (data = current key entry)")
 	}
-	key, _ := keyVal.(string)
+	// data 形态:string = token 本身;map = 取 api_key 字段
+	var key string
+	switch v := dataVal.(type) {
+	case string:
+		key = v
+	case map[string]any:
+		key, _ = v[APIKeyParam].(string)
+	}
 	if key == "" {
-		return pipeline.Request{}, fmt.Errorf("builtin: package key %s empty", APIKeyParam)
+		return pipeline.Request{}, fmt.Errorf("builtin: package key %s missing/empty in current key data", APIKeyParam)
 	}
 	body := entry
 	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(base, "/"))

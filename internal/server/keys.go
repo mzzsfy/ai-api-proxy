@@ -21,19 +21,18 @@ func wireKeyHooks(app *App) {
 			Log:         hooksLog(pkgName),
 		}
 	}
-	// loadKeys 探测装载(keys.js 缺失/包无 hooks = 零钩子)
+	// keySettings keys 钩子的 ctx.settings 快照(keyRead/keySubmit 出站查询需要包参数如 base_url)
+	keySettings := func(pkgName string) map[string]any { return settingsSnapshot(pkgs, pkgName) }
+	// loadKeys 探测装载(keys.js 缺失/包无 hooks 能力 = 零钩子;keys.js 为独立族文件,不要求 manifest hooks 部件)
 	loadKeys := func(pkg string) (*plugin.HooksRuntime, error) {
 		p, err := pkgs.GetPackage(pkg)
 		if err != nil {
 			return nil, err
 		}
-		if p.Manifest.Parts.Hooks == nil {
-			return nil, plugin.ErrNoHooksPart
-		}
 		if _, ok := p.Files["keys.js"]; !ok {
 			return nil, plugin.ErrNoHooksPart
 		}
-		return plugin.LoadKeys(p, deps(pkg))
+		return plugin.LoadKeys(p, deps(pkg), keySettings(pkg))
 	}
 
 	// KeyHooksFunc 能力探测(每次请求装载,编译缓存命中毫秒级)
@@ -45,7 +44,7 @@ func wireKeyHooks(app *App) {
 		return rt.Handler("keyWrite") != nil, rt.Handler("keyRead") != nil, rt.Handler("keyForm") != nil
 	}
 
-	// KeyWriteFunc 单键写入编排:updatedAt 快检 → keyWrite 归一化(无钩子原样) → 单键轮转替换
+	// KeyWriteFunc 单键写入编排(仅管理台 PUT 过归一化):per-key updatedAt 快检 → keyWrite 归一化(无钩子原样) → Set 自动备份
 	app.AdminDeps.KeyWriteFunc = func(pkg, key string, value any, baseUpdatedAt int64) (int64, bool, error) {
 		p, err := pkgs.GetPackage(pkg)
 		if err != nil {
@@ -54,9 +53,7 @@ func wireKeyHooks(app *App) {
 		if !pkgs.IsEnabled(pkg) {
 			return 0, false, plugin.ErrPackageDisabled
 		}
-		view := pkgs.Keys().View(pkg)
-		docUpdatedAt, _ := view["updatedAt"].(int64)
-		if docUpdatedAt != baseUpdatedAt {
+		if cur := pkgs.Keys().UpdatedAt(pkg, key); cur != baseUpdatedAt {
 			return 0, false, plugin.ErrVersionConflict
 		}
 		effective := value
@@ -64,12 +61,15 @@ func wireKeyHooks(app *App) {
 		// 无 keys.js 或未导出 keyWrite = 原样保存(降级语义)
 		if p.Manifest.Parts.Hooks != nil {
 			if _, ok := p.Files["keys.js"]; ok {
-				rt, err := plugin.LoadKeys(p, deps(pkg))
+				rt, err := plugin.LoadKeys(p, deps(pkg), keySettings(pkg))
 				if err != nil {
 					return 0, false, err
 				}
 				if rt.Handler("keyWrite") != nil {
-					old, _ := view["current"].(map[string]any)[key]
+					var old any
+					if e, ok := pkgs.Keys().Get(pkg, key); ok {
+						old = e.Data
+					}
 					effective, err = rt.CallKeyWrite(key, value, old)
 					if err != nil {
 						return 0, false, err
@@ -78,14 +78,14 @@ func wireKeyHooks(app *App) {
 				}
 			}
 		}
-		updated, err := pkgs.Keys().SetKey(pkg, key, effective)
+		updated, err := pkgs.Keys().Set(pkg, key, effective)
 		if err != nil {
 			return 0, transformed, err
 		}
 		return updated, transformed, nil
 	}
 
-	// KeyReadFunc 详情解释
+	// KeyReadFunc 详情解释(仅 GET detail 触发;ctx.key = 被查看键)
 	app.AdminDeps.KeyReadFunc = func(pkg, key string) (any, error) {
 		rt, err := loadKeys(pkg)
 		if err != nil {
@@ -94,8 +94,12 @@ func wireKeyHooks(app *App) {
 		if !pkgs.IsEnabled(pkg) {
 			return nil, plugin.ErrPackageDisabled
 		}
+		if e, ok := pkgs.Keys().Get(pkg, key); ok {
+			rt.Deps().Key = &plugin.KeyRef{ID: e.ID, Data: e.Data}
+		}
 		return rt.CallKeyRead(key)
 	}
+
 
 	// KeyFormFunc 表单声明
 	app.AdminDeps.KeyFormFunc = func(pkg string) (any, error) {
@@ -121,14 +125,14 @@ func wireKeyHooks(app *App) {
 		return rt.CallKeyAction(action, values)
 	}
 
-	// KeySubmitFunc 表单提交(写入由回调内 ctx.keys.merge;written 拦截收集;errors=字段级拒绝)
-	app.AdminDeps.KeySubmitFunc = func(pkg string, values map[string]any) ([]string, any, map[string]any, error) {
+	// KeySubmitFunc 表单提交(创建条目由回调内 ctx.keys.set;ids = 宿主生成新键 id;errors=字段级拒绝)
+	app.AdminDeps.KeySubmitFunc = func(pkg string, values map[string]any) ([]string, map[string]any, error) {
 		rt, err := loadKeys(pkg)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if !pkgs.IsEnabled(pkg) {
-			return nil, nil, nil, plugin.ErrPackageDisabled
+			return nil, nil, plugin.ErrPackageDisabled
 		}
 		return rt.CallKeySubmit(values)
 	}

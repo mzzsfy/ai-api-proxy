@@ -46,12 +46,12 @@ func (g *gojaProtocol) ClosePools() {
 }
 
 // NewProtocol 从包实例化 protocol 部件(params 已由调用方 ResolveParams 预校验;池预热;绑定校验用首实例)
-func NewProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error) (pipeline.Protocol, error) {
-	return buildProtocol(pkg, params, storage, packageKey, packageKeyValues, transportEvict, true)
+func NewProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKeyValues func() []string, transportEvict func(transport, scope, value string) error) (pipeline.Protocol, error) {
+	return buildProtocol(pkg, params, storage, packageKeyValues, transportEvict, true)
 }
 
 // buildProtocol 实例化主体;enforceSchema=false 供安装期结构校验(参数校验归调用方,v2 声明统一)
-func buildProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Protocol, error) {
+func buildProtocol(pkg *Package, params map[string]any, storage StorageKV, packageKeyValues func() []string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Protocol, error) {
 	part := pkg.Manifest.Parts.Protocol
 	src := pkg.Files[ProtocolEntry]
 	prog, err := Compile(src, ProtocolEntry)
@@ -60,7 +60,7 @@ func buildProtocol(pkg *Package, params map[string]any, storage StorageKV, packa
 	}
 	newDeps := func() HostDeps {
 		return HostDeps{
-			PackageName: pkg.Manifest.Name, PackageKey: packageKey, PackageKeyValues: packageKeyValues,
+			PackageName: pkg.Manifest.Name, PackageKeyValues: packageKeyValues,
 			Storage: storage, TransportEvict: transportEvict,
 		}
 	}
@@ -147,19 +147,32 @@ func callHook(inst *hookInstance, budget time.Duration, fn goja.Callable, args .
 	return out, brokenFlag.Load(), nil
 }
 
-// borrowWrap 借还包装:fn 在借出实例上执行;broken 实例归还时丢弃
-func (g *gojaProtocol) borrowWrap(fn func(inst *hookInstance) (any, bool, error)) (any, error) {
+// borrowWrap 借还包装:出池按 pctx.Key 无条件重绑键槽(含空值清槽,防池化残留);broken 实例归还时丢弃
+func (g *gojaProtocol) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
 	inst, err := g.pool.Borrow()
 	if err != nil {
 		return nil, pipeline.ErrPoolBusy
 	}
+	inst.rebindKey(ctx)
 	res, broken, err := fn(inst)
 	g.pool.Return(inst, broken)
 	return res, err
 }
 
+// rebindKey 键槽重绑(nil 安全:非池实例无槽)
+func (inst *hookInstance) rebindKey(ctx *pipeline.PipelineContext) {
+	if inst.keyRef == nil {
+		return
+	}
+	if ctx != nil && ctx.Key != nil {
+		*inst.keyRef = *ctx.Key
+	} else {
+		*inst.keyRef = KeyRef{}
+	}
+}
+
 func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pipeline.Request, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.BuildRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
@@ -208,7 +221,7 @@ func (g *gojaProtocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte)
 }
 
 func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]byte, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapEvent == nil {
 			// 未实现:声明缺 streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
 			return nil, false, errors.New("mapEvent not implemented")
@@ -263,7 +276,7 @@ func (g *gojaProtocol) MapEvent(ctx *pipeline.PipelineContext, event []byte) ([]
 }
 
 func (g *gojaProtocol) MapResponse(ctx *pipeline.PipelineContext, body []byte) ([]byte, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapResponse == nil {
 			// 未实现:声明缺 non_streaming 时 validateProtocolBindings 已拒装,此路径仅为防御
 			return nil, false, errors.New("mapResponse not implemented")
@@ -286,7 +299,7 @@ func (g *gojaProtocol) MapResponse(ctx *pipeline.PipelineContext, body []byte) (
 
 // MapError 可选(未实现返回哨兵错误,调用方走透传)
 func (g *gojaProtocol) MapError(ctx *pipeline.PipelineContext, status int, body []byte) ([]byte, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapError == nil {
 			return nil, false, errNotImplemented
 		}
@@ -325,12 +338,12 @@ type gojaFilter struct {
 func (g *gojaFilter) ClosePools() { g.pool.Close() }
 
 // NewFilter 从包实例化 filter 部件(params 已由调用方 ResolveParams 预校验)
-func NewFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error) (pipeline.Filter, error) {
-	return buildFilter(pkg, part, params, storage, packageKey, packageKeyValues, transportEvict, true)
+func NewFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKeyValues func() []string, transportEvict func(transport, scope, value string) error) (pipeline.Filter, error) {
+	return buildFilter(pkg, part, params, storage, packageKeyValues, transportEvict, true)
 }
 
 // buildFilter 实例化主体;末位 bool 为历史签名占位(v2 参数校验归调用方)
-func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKey func(name string) (any, bool), packageKeyValues func() map[string]string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Filter, error) {
+func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage StorageKV, packageKeyValues func() []string, transportEvict func(transport, scope, value string) error, _ bool) (pipeline.Filter, error) {
 	entry := ProtocolEntryFor("filter", part.Name)
 	src := pkg.Files[entry]
 	prog, err := Compile(src, entry)
@@ -339,7 +352,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage S
 	}
 	newDeps := func() HostDeps {
 		return HostDeps{
-			PackageName: pkg.Manifest.Name, PackageKey: packageKey, PackageKeyValues: packageKeyValues,
+			PackageName: pkg.Manifest.Name, PackageKeyValues: packageKeyValues,
 			Storage: storage, TransportEvict: transportEvict,
 		}
 	}
@@ -362,18 +375,19 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage S
 
 func (g *gojaFilter) Name() string { return g.name }
 
-func (g *gojaFilter) borrowWrap(fn func(inst *hookInstance) (any, bool, error)) (any, error) {
+func (g *gojaFilter) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
 	inst, err := g.pool.Borrow()
 	if err != nil {
 		return nil, pipeline.ErrPoolBusy
 	}
+	inst.rebindKey(ctx)
 	res, broken, err := fn(inst)
 	g.pool.Return(inst, broken)
 	return res, err
 }
 
 func (g *gojaFilter) MapRequest(ctx *pipeline.PipelineContext, entry []byte) ([]byte, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		out, broken, err := callHook(inst, HookTimeout, inst.hooks.MapRequest, ctxToValue(inst.vm, ctx), vmBytes(inst.vm, entry))
 		if err != nil {
 			return nil, broken, err
@@ -394,7 +408,7 @@ func (g *gojaFilter) MapChunk(ctx *pipeline.PipelineContext, chunk []byte) ([]by
 	if g.pool == nil {
 		return chunk, nil
 	}
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapChunk == nil {
 			return nil, false, nil
 		}
@@ -421,7 +435,7 @@ func (g *gojaFilter) MapChunk(ctx *pipeline.PipelineContext, chunk []byte) ([]by
 }
 
 func (g *gojaFilter) MapResponse(ctx *pipeline.PipelineContext, resp []byte) ([]byte, error) {
-	res, err := g.borrowWrap(func(inst *hookInstance) (any, bool, error) {
+	res, err := g.borrowWrap(ctx, func(inst *hookInstance) (any, bool, error) {
 		if inst.hooks.MapResponse == nil {
 			return nil, false, nil
 		}

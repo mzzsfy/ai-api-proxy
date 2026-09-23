@@ -224,6 +224,7 @@ func Build(cfg *Config) (*App, error) {
 		Registry: reg,
 		Metrics:  recorder,
 		History:  hist,
+		Keys:     pkgs.Keys(),
 	}
 	// 管理服务
 	adminSvc, randomPass, err := admin.New(cfg.AdminUser, cfg.AdminPassBcrypt)
@@ -240,7 +241,17 @@ func Build(cfg *Config) (*App, error) {
 		Upstream: reg,
 		Metrics:  recorder,
 		History:  hist,
-		KeysFunc: func(pkg string) map[string]any { return pkgs.Keys().View(pkg) },
+		KeysFunc: func(pkg string) map[string]any {
+			// 键行(不 dump prev,详情端点取)+ 轮询指针位(按 List 序,指向下次请求将选的行;空池 0)
+			keys := pkgs.Keys().List(pkg)
+			out := make([]map[string]any, 0, len(keys))
+			for _, e := range keys {
+				out = append(out, map[string]any{
+					"id": e.ID, "data": e.Data, "updatedAt": e.UpdatedAt, "hasPrev": e.Prev != nil,
+				})
+			}
+			return map[string]any{"keys": out, "rotation": pkgs.Keys().PeekRotation(pkg, len(keys))}
+		},
 	}
 	mux := http.NewServeMux()
 	// 反代入口(鉴权 + panic recover)
@@ -352,8 +363,7 @@ func (a *App) startHooks() {
 		if err != nil || pkg.Manifest.Parts.Hooks == nil {
 			continue
 		}
-		previous, _ := pkgs.Keys().PreviousAll(name)
-		pkgs.OnLoad(pkg, previous)
+		pkgs.OnLoad(pkg)
 	}
 }
 

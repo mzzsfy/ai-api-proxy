@@ -17,6 +17,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/history"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
@@ -49,6 +50,20 @@ type Gateway struct {
 	Metrics   *metrics.Recorder
 	// History 请求历史存储(nil = 不记录;装配可选)
 	History *history.Store
+	// Keys 键池(请求级 round-robin 选键;nil = 不注入键)
+	Keys *plugin.KeysStore
+}
+
+// pickKey 请求级选键(round-robin;空池/未装配 = nil,ctx.key = undefined)
+func (g *Gateway) pickKey(pkg string) *pipeline.KeyEntry {
+	if g.Keys == nil {
+		return nil
+	}
+	e, ok := g.Keys.Rotate(pkg)
+	if !ok {
+		return nil
+	}
+	return &pipeline.KeyEntry{ID: e.ID, Data: e.Data}
 }
 
 // requestIDHeader 请求标识(header 键)
@@ -166,6 +181,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	}
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
+	pctx.Key = g.pickKey(u.Plugin)
 	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
 		g.recordUpstream(u, true)
@@ -331,6 +347,7 @@ func (g *Gateway) TestUpstream(ctx context.Context, m *upstream.Model) (int64, s
 	}
 	pctx := pipeline.NewContext("admin-test-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
 		pipeline.Vars{Model: m.Name, EntryStream: false})
+	pctx.Key = g.pickKey(m.Plugin)
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -364,6 +381,7 @@ func (g *Gateway) ChatTest(ctx context.Context, m *upstream.Model, message strin
 	}
 	pctx := pipeline.NewContext("admin-chat-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
 		pipeline.Vars{Model: m.Name, EntryStream: false})
+	pctx.Key = g.pickKey(m.Plugin)
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -413,6 +431,7 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, m *upstream.M
 	*rowName = m.Name
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: m.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
+	pctx.Key = g.pickKey(m.Plugin)
 	req, err := resolved.Protocol.BuildRequest(pctx, body)
 	if err != nil {
 		g.recordUpstream(m, true)

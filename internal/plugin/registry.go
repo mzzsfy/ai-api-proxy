@@ -14,12 +14,12 @@ import (
 // BuiltinFactory Go 内置协议工厂(参数与密钥与 JS 部件同机制注入)
 type BuiltinFactory func(deps BuiltinDeps) (pipeline.Protocol, error)
 
-// BuiltinDeps 内置协议依赖(v2:解析后包参数 + 包级密钥读值)
+// BuiltinDeps 内置协议依赖(v2:解析后包参数 + 当前键 data 读值)
 type BuiltinDeps struct {
 	// Config 解析后的包参数(default ⊕ 插件参数 ⊕ 模型覆盖)
 	Config map[string]any
-	// PackageKey 包级 key 只读(实时)
-	PackageKey func(name string) (any, bool)
+	// PackageKey 当前键 data 只读(请求级选键后;string = 本身,map 取 api_key)
+	PackageKey func() (any, bool)
 }
 
 // Registry 包注册中心(安装/升级/启停/列举)
@@ -35,8 +35,8 @@ type Registry struct {
 	deps     HooksDeps // 声明提取依赖(装配根注入;nil = 提取用空依赖)
 	// supportsCache 协议形态/能力探测缓存(值=条目携带探测所基于的 revision;Install/Delete/RegisterBuiltin 主动失效兜底)
 	supportsCache map[string]*supportsEntry
-	// OnLoad 包加载完成回调(导入/升级/启用;宿主注入执行 hooks.onLoad;previous=升级前 keys)
-	OnLoad func(pkg *Package, previous map[string]any)
+	// OnLoad 包加载完成回调(导入/升级/启用;宿主注入执行 hooks.onLoad)
+	OnLoad func(pkg *Package)
 	// OnChange 任务声明变化回调(安装/启停/删除;宿主注入刷新调度)
 	OnChange func()
 	// NextChain next 自调度链宿主钩子(装配根注入;安装/升级/启用/重启 → 链重置)
@@ -146,15 +146,8 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	prevRev := int64(0)
 	if exists {
 		prevRev = old.Revision
-		// 升级快照:旧 current 移入 previous,current 原样保留(不丢弃用户既有 key)
-		if err := r.keys.UpgradeSnapshot(pkg.Manifest.Name); err != nil {
-			return fmt.Errorf("upgrade keys snapshot: %w", err)
-		}
 	}
-	var previous map[string]any
-	if exists {
-		previous, _ = r.keys.PreviousAll(pkg.Manifest.Name)
-	}
+	// 键保留:升级不动键行(无快照;prev 由首次写路径天然覆盖)
 	pkg.Revision = prevRev + 1
 	manifestRaw, _ := json.Marshal(pkg.Manifest)
 	filesRaw, _ := json.Marshal(pkg.Files)
@@ -169,10 +162,11 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	}
 	r.pkgs[pkg.Manifest.Name] = pkg
 	r.revs[pkg.Manifest.Name] = pkg.Revision
+	r.keys.ResetRotation(pkg.Manifest.Name)
 	delete(r.disabled, pkg.Manifest.Name)
 	delete(r.supportsCache, pkg.Manifest.Name)
 	if r.OnLoad != nil {
-		go r.OnLoad(pkg, previous)
+		go r.OnLoad(pkg)
 	}
 	if r.OnChange != nil {
 		go r.OnChange()
@@ -237,12 +231,12 @@ func (r *Registry) validateParts(pkg *Package) error {
 		return nil
 	}
 	if p := pkg.Manifest.Parts.Protocol; p != nil {
-		if _, err := buildProtocol(pkg, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildProtocol(pkg, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
 	for _, fp := range pkg.Manifest.Parts.Filters {
-		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, nil, false); err != nil {
+		if _, err := buildFilter(pkg, fp, nil, nil, nil, nil, false); err != nil {
 			return err
 		}
 	}
@@ -274,7 +268,7 @@ func (r *Registry) Enable(ctx context.Context, name string, on bool) error {
 	}
 	if on && r.OnLoad != nil {
 		pkg := r.pkgs[name]
-		go r.OnLoad(pkg, nil)
+		go r.OnLoad(pkg)
 	}
 	if r.OnChange != nil {
 		go r.OnChange()
@@ -405,7 +399,7 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	delete(r.revs, name)
 	delete(r.disabled, name)
 	delete(r.supportsCache, name)
-	r.keys.Delete(name)
+	r.keys.DeletePackage(name)
 	r.settings.Delete(name)
 	if r.OnChange != nil {
 		go r.OnChange()
@@ -413,7 +407,7 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// Keys 包级 key 存储(util.key 读取与升级快照共用)
+// Keys 包级 key 存储(单键行;轮询调度共用)
 func (r *Registry) Keys() *KeysStore { return r.keys }
 
 // Settings 包级 settings 存储
@@ -426,11 +420,6 @@ func (r *Registry) SettingsOverrides(pkgName string) map[string]any {
 
 // DeleteSettings 卸载清理 overrides
 func (r *Registry) DeleteSettings(name string) { r.settings.Delete(name) }
-
-// KeyReader util.key 读取闭包(实时读当前值)
-func (r *Registry) KeyReader(pkgName string) func(name string) (any, bool) {
-	return func(name string) (any, bool) { return r.keys.Get(pkgName, name) }
-}
 
 // Revision 包当前 revision(未知包 0)
 func (r *Registry) Revision(name string) int64 {

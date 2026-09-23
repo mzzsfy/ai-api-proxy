@@ -104,8 +104,8 @@ export interface Util {
   isoNow(): string;
   template(s: string, vars: Record<string, unknown>): string;
   inspect(obj: unknown): string;
-  /** 读包级 key 当前值;无值 undefined;唯一凭据出口(v2 删除 util.secret;配置经管理 GUI 或 hooks 写入) */
-  key(name: string): unknown;
+  /** 当前注入键 data(无键 undefined;唯一凭据出口;data 形态由包约定:string token 或 {api_key,...});多余参数忽略 */
+  key(): unknown;
   /**
    * 主动失效上报:aap 传输失效命令转发(仅失效当前绑定,不触发重试)
    * scope: "lease"(value=lease_id 32 字符 hex)| "egress"(value=IP 字符串)
@@ -127,8 +127,6 @@ export interface Storage {
   delete(key: string): void;
 }
 
-/** 包级 key 只读说明:hooks 任务写入,protocol/filter 侧经 util.key 只读实时 */
-
 /** ctx.http 请求体(hooks 部件专属;经宿主全局出站传输) */
 export interface HookHttpRequest {
   url: string;
@@ -147,25 +145,26 @@ export interface HookHttpResponse {
   body: string;
 }
 
-/** ctx.keys 包级 key 读写(hooks 部件专属;每次变更前 current 整体移入 previous) */
+/** ctx.keys 当前键窗口(hooks 部件专属;宿主每次注入一个键) */
+export interface KeyRef {
+  /** 键 ID(管理台手工键 = 键名;keySubmit 生成 = key-<时间>-<序号>) */
+  id: string;
+  /** data 本体(任意 JSON;形态由包约定) */
+  data: unknown;
+}
+
+/** ctx.keys 写窗能力:任务窗 = set/merge 整体替换当前键;keySubmit 窗 = set 创建新条目(宿主生成 id);其余钩子无写方法 */
 export interface HookKeys {
-  get(name: string): unknown;
   /**
-   * 键级合并:给定键覆盖,未提及键保留;写前 current 整体快照进 previous
-   * 仅任务执行与 keySubmit 的 ctx 挂载此方法(其余钩子 undefined——阉割即权限)
-   * 立即持久化,不随任务回滚——凭据轮转先写新键后删旧键
+   * 任务窗:整体替换当前键 data(原 data 自动移入 prev,单级)
+   * keySubmit 窗:创建新键池条目(data 为整条目内容;返回宿主生成的键 id)
+   * 仅任务执行与 keySubmit 的 ctx 挂载(其余钩子 undefined——阉割即权限);立即持久化,不随任务回滚
    */
-  merge?(values: Record<string, unknown>): void;
+  set?(data: unknown): string | void;
   /**
-   * 删除指定键(变参,不存在的键忽略):写前 current 整体快照进 previous(误删可找回)
-   * 仅任务执行与 keySubmit 的 ctx 挂载(窗口同 merge);立即持久化不回滚
-   * 凭据最小持有:密码换 token 后密码必须删;不存在整文档替换 API(防无声吞掉用户手动凭据)
+   * 仅任务窗:对象浅合并到当前 data(当前 data 须为对象;set 语义的便捷形态)
    */
-  remove?(...names: string[]): void;
-  /** 仅热加载提供旧包快照;启停/首载 undefined */
-  previous(name: string): unknown;
-  /** 键名枚举(排序;不含值——值走 get;多账号遍历场景) */
-  list(): string[];
+  merge?(patch: Record<string, unknown>): void;
 }
 
 /** settings 声明构建器(setting 全局;宿主求值时注入,GUI 渲染归宿主) */
@@ -196,6 +195,8 @@ export interface HookContext {
   http: { run(req: HookHttpRequest): HookHttpResponse };
   keys: HookKeys;
   cron: { runAt: string };
+  /** 当前注入键(任务/keyRead/keyWrite 窗存在;无键 undefined) */
+  key?: KeyRef;
   /** 运行时配置快照(声明 ⊕ 管理台覆盖;settings.js/init.js/keys.js/tasks 均可读) */
   settings?: Record<string, unknown>;
   /** 当前任务名(多行同指一实现时区分调用来源;仅任务调用注入) */
@@ -226,14 +227,14 @@ export interface InitModule {
 
 /**
  * keys.js 导出(凭据读写钩子 + 添加表单采集;全部可选)
- * ctx 裁剪:keyWrite/keyRead 仅 keys.get/previous;keyForm 仅 keys.get;
- * keyAction/keySubmit 另含 keys.merge + http(采集 = 出站动作)
+ * ctx 裁剪:keyWrite/keyRead 含 ctx.key(被操作键);keyForm 仅 settings;
+ * keyAction/keySubmit 另含 keys.set(创建窗)+ http(采集 = 出站动作)
  */
 export interface KeysModule {
-  /** 键写入归一化(管理台新增/编辑);undefined/null = 透传;拒绝写入须抛错 */
-  keyWrite?(ctx: HookContext, keyName: string, newValue: unknown, oldValue: unknown): unknown;
-  /** 键详情解释(管理台 [详情]);undefined → detail null;输出须脱敏 */
-  keyRead?(ctx: HookContext, keyName: string): unknown;
+  /** 键写入归一化(管理台新增/编辑;ctx.key = 目标键);undefined/null = 透传;拒绝写入须抛错 */
+  keyWrite?(ctx: HookContext, keyId: string, newValue: unknown, oldValue: unknown): unknown;
+  /** 键详情解释(ctx.key = 被查看键;仅 detail 端点触发);输出须脱敏 */
+  keyRead?(ctx: HookContext, keyId: string): unknown;
   /**
    * 添加表单声明(声明后 GUI 弹层渲染采集表单)
    * fields 用 setting 构建器声明(建议显式 name,errors 按它定位输入框);actions 按钮点击回调 keyAction
@@ -245,7 +246,7 @@ export interface KeysModule {
   /** 表单按钮回调(可出站;如发送验证码);返回值 toast 呈现 */
   keyAction?(ctx: HookContext, action: string, values: Record<string, unknown>): unknown;
   /**
-   * 表单提交(可出站;写入经 ctx.keys.merge——框架不自动落库,验证码等一次性字段由脚本决定不写)
+   * 表单提交(可出站;写入经 ctx.keys.set——每次调用创建一条新键池条目,宿主生成 id)
    * 返回三通道:string = 成功 toast;{message} = 失败提示(存储不变);{errors: {字段: 原因}} = 字段级拒绝(GUI 逐框标红);抛错 = 崩溃处理
    */
   keySubmit?(ctx: HookContext, values: Record<string, unknown>): string | {
@@ -255,7 +256,7 @@ export interface KeysModule {
   settings?: Record<string, unknown>;
 }
 
-/** 包级 key 只读说明:hooks 任务写入,protocol/filter 侧经 util.key 只读实时 */
+/** 包级键:每键独立实体(id+data+prev+updatedAt);protocol/filter 经 util.key() 只读当前注入键 */
 declare global {
   const util: Util;
   const log: Log;

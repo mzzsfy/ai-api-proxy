@@ -11,7 +11,7 @@ hooks 部件 = init.js(加载钩子)+ tasks/*.js(定时任务)+ keys.js(凭据�
 | 任务行 `next` | handler 跑完后宿主立即调用,决定下次时刻 | 5s | next 抛错 = 链终止 |
 | keys.js 五钩子 | 管理台 keys 操作时(见 03) | 归一化/读取 5s;表单流程 10s | 操作失败回报 GUI |
 
-热升级语义:新 revision 先跑自己的 onLoad,旧 revision 等在途引用归零后销毁;onLoad 里 `ctx.keys.previous(name)` 可读旧包凭据。
+热升级语义:新 revision 先跑自己的 onLoad,旧 revision 等在途引用归零后销毁;键池跨升级保留(键不做迁移处理)。
 
 ## 二、init.js(可选)
 
@@ -21,7 +21,7 @@ hooks 部件 = init.js(加载钩子)+ tasks/*.js(定时任务)+ keys.js(凭据�
 module.exports = {
   onLoad: function (ctx) {
     // 环境判断、初始化 storage 标记……均为尽力而为
-    // 注意:onLoad 的 ctx.keys 无 merge(只读);需要写 keys 请放任务里
+    // 注意:onLoad 无 keys 写方法;需要写 keys 请放任务里
   },
 };
 ```
@@ -89,7 +89,8 @@ module.exports = {
 | 字段 | 说明 | 可用性 |
 |---|---|---|
 | `ctx.http.run(req)` | 出站请求;`{url, method?, headers?, body?, timeoutMs?}` → `{status, headers, body}`;body >1MB 截断;timeoutMs 缺省 min(30s, 外层剩余) | 全部 hooks 钩子 |
-| `ctx.keys` | `get(name)` / `previous(name)` / `list()` 只读;`merge(values)` 键级合并(给定键覆盖,未提及保留)、`remove(...names)` 删除指定键(凭据最小持有:作废键即删)——**仅任务执行与 keySubmit 挂载**(其余钩子上无此方法——阉割即权限);**无整文档替换 API**(设计立场,见 03);写**立即持久化不随任务回滚**(轮转先写新后删旧,见 03) | 全部(写见窗口) |
+| `ctx.key` | 当前注入键 `{id, data}`(任务执行 = round-robin 选中的键;keyWrite/keyRead = 被操作键);无键 undefined。**JS 只见宿主注入的一个键**,无按名取任意键 API(见 03) | 任务/keyWrite/keyRead;keySubmit 窗无 ctx.key(创建新条目) |
+| `ctx.keys.set(data)` / `merge(patch)` | 任务窗:整体替换(或对象浅合并)当前键 data,原 data 自动备份进 prev;keySubmit 窗:set = 创建新条目(宿主生成 id)——**仅任务执行与 keySubmit 挂载**(其余钩子 undefined——阉割即权限);写**立即持久化不随任务回滚** | 写见窗口 |
 | `storage` | 包级 KV `get/set/delete`;**事务语义**:执行期写进私有缓冲,本次执行成功才归并持久化,抛错/超时全部丢弃 | 全部 |
 | `ctx.settings` | 参数快照(只读),见 03 | 全部 |
 | `ctx.task` | 本次任务行名 | 仅任务 |

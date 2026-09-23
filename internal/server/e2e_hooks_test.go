@@ -66,7 +66,8 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 		task := plugin.HooksTask{Name: "signIn", Cron: "* * * * *", TimeoutMs: 1000}
-		rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys()}, nil)
+		deps := plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys(), Key: &plugin.KeyRef{ID: "token", Data: "unsigned"}}
+		rt, err := plugin.LoadTask(pkg, task, deps, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,10 +77,10 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 		_ = tokenVal
 	}
 
-	// 安装:init 无写键能力(探测 merge 未挂载并记入 storage);任务执行写入
+	// 安装:init 无写键能力(探测 set 未挂载并记入 storage);任务执行写当前键
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
-		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.merge===undefined));}}`,
-		`module.exports={handler:function(ctx){ctx.keys.merge({token:"signed"});}}`,
+		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined));}}`,
+		`module.exports={handler:function(ctx){ctx.keys.set("signed");}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
@@ -89,30 +90,29 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 		return true
 	}, "install settle")
 	runSignIn("signed")
-	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signed" {
-		t.Fatalf("task key: %v", v)
+	if v, ok := pkgs.Keys().Get("checkin", "token"); !ok || v.Data != "signed" {
+		t.Fatalf("task key: %+v", v)
 	}
 
-	// 升级:onLoad 再次触发;任务再写,current 移入 previous
+	// 升级:onLoad 再次触发;任务再写,data → prev
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
 		`module.exports={onLoad:function(ctx){storage.set("probe", "x");}}`,
-		`module.exports={handler:function(ctx){ctx.keys.merge({token:"signed-2"});}}`,
+		`module.exports={handler:function(ctx){ctx.keys.set("signed-2");}}`,
 	))); err != nil {
 		t.Fatal(err)
 	}
 	runSignIn("signed-2")
-	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signed-2" {
-		t.Fatalf("task key after upgrade: %v", v)
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v.Data != "signed-2" {
+		t.Fatalf("task key after upgrade: %+v", v)
 	}
-	if p, _ := pkgs.Keys().Previous("checkin", "token"); p != "signed" {
-		t.Fatalf("previous: %v", p)
+	if p, _ := pkgs.Keys().Get("checkin", "token"); p.Prev != "signed" {
+		t.Fatalf("prev: %v", p.Prev)
 	}
 
-	// 管理面明文视图
-	view := pkgs.Keys().View("checkin")
-	cur := view["current"].(map[string]any)
-	if cur["token"] != "signed-2" {
-		t.Fatalf("view: %v", cur)
+	// 管理面清单视图
+	list := pkgs.Keys().List("checkin")
+	if len(list) != 1 || list[0].ID != "token" || list[0].Data != "signed-2" {
+		t.Fatalf("list: %+v", list)
 	}
 
 	// 卸载清理(keys + settings)
@@ -137,7 +137,7 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	sched := wireHooks(wire)
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({token:ctx.task});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(ctx.task);}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +150,7 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{
 		PackageName: "checkin",
 		Keys:        pkgs.Keys(),
+		Key:         &plugin.KeyRef{ID: "token", Data: ""},
 		Now:         func() time.Time { return time.Unix(0, 0) },
 	}, nil)
 	if err != nil {
@@ -158,8 +159,8 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	if err := rt.RunTask(task, time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signIn" {
-		t.Fatalf("task keys: %v", v)
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v.Data != "signIn" {
+		t.Fatalf("task keys: %+v", v)
 	}
 }
 
@@ -172,8 +173,12 @@ func TestHooks_TaskManualRun(t *testing.T) {
 	defer sched.Stop()
 	wire.AdminDeps.RunTaskFunc = wire.RunTaskOnce
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({token:ctx.task});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(ctx.task);}}`,
 	})); err != nil {
+		t.Fatal(err)
+	}
+	// 种子键(逐键执行目标)
+	if _, err := pkgs.Keys().Set("checkin", "token", "seed"); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond) // 等 onLoad 回调(无 init.js,无副作用)
@@ -183,16 +188,16 @@ func TestHooks_TaskManualRun(t *testing.T) {
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/api/packages/"+pkg+"/tasks/"+task+"/run", nil))
 		return w
 	}
-	// 正常触发:200 + keys 写窗生效
+	// 正常触发:200 + 键池逐键执行(写窗生效)
 	w := runTask("checkin", "signIn")
 	if w.Code != http.StatusOK || !containsStr(w.Body.String(), `"ok":true`) {
 		t.Fatalf("run status %d: %s", w.Code, w.Body.String())
 	}
-	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signIn" {
-		t.Fatalf("task keys: %v", v)
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v.Data != "signIn" {
+		t.Fatalf("task keys: %+v", v)
 	}
-	if !containsStr(w.Body.String(), "duration_ms") {
-		t.Fatalf("duration missing: %s", w.Body.String())
+	if !containsStr(w.Body.String(), `"results"`) || !containsStr(w.Body.String(), `"key":"token"`) {
+		t.Fatalf("results shape: %s", w.Body.String())
 	}
 	// 未声明任务 400
 	if w = runTask("checkin", "nope"); w.Code != http.StatusBadRequest {
@@ -231,7 +236,7 @@ func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Keys().Merge("checkin", map[string]any{"token": "secret-value"}); err != nil {
+	if _, err := pkgs.Keys().Set("checkin", "token", "secret-value"); err != nil {
 		t.Fatal(err)
 	}
 	deps := newAdminDeps(pkgs)
@@ -257,7 +262,7 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     `module.exports.settings={account:{type:"string",description:"账号"},level:{type:"int",default:1}}`,
-		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({who:String(ctx.settings.account||"?")});}}`,
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(String(ctx.settings.account||"?"));}}`,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -278,15 +283,15 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 	}
 	// 任务经快照读覆盖值
 	task := plugin.HooksTask{Name: "signIn", Cron: "* * * * *"}
-	rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys(), Now: func() time.Time { return time.Unix(0, 0) }}, snap)
+	rt, err := plugin.LoadTask(pkg, task, plugin.HooksDeps{PackageName: "checkin", Keys: pkgs.Keys(), Key: &plugin.KeyRef{ID: "token", Data: ""}, Now: func() time.Time { return time.Unix(0, 0) }}, snap)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.RunTask(task, time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := pkgs.Keys().Get("checkin", "who"); v != "me@x" {
-		t.Fatalf("task settings read: %v", v)
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v.Data != "me@x" {
+		t.Fatalf("task settings read: %+v", v)
 	}
 }
 
@@ -294,7 +299,14 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 func newAdminDeps(pkgs *plugin.Registry) *admin.Deps {
 	return &admin.Deps{
 		Packages: pkgs,
-		KeysFunc: func(pkg string) map[string]any { return pkgs.Keys().View(pkg) },
+		KeysFunc: func(pkg string) map[string]any {
+			keys := pkgs.Keys().List(pkg)
+			out := make([]map[string]any, 0, len(keys))
+			for _, e := range keys {
+				out = append(out, map[string]any{"id": e.ID, "data": e.Data, "updatedAt": e.UpdatedAt, "hasPrev": e.Prev != nil})
+			}
+			return map[string]any{"keys": out, "rotation": pkgs.Keys().PeekRotation(pkg, len(keys))}
+		},
 	}
 }
 

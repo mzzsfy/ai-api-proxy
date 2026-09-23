@@ -66,7 +66,7 @@ const protoSrc = `module.exports = function (config) {
 	return {
 		buildRequest: function (ctx, entry) {
 			return { url: config.base_url + "/v1/chat/completions", method: "POST",
-				headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key("api_key") },
+				headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key().api_key },
 				body: entry, stream: ctx.vars.entryStream };
 		},
 		mapEvent: function (ctx, e) { return JSON.stringify([{ chunk: e }]); },
@@ -105,33 +105,21 @@ func newProtoCtx() *pipeline.PipelineContext {
 }
 
 // keyValues 包级 keys 值视图(脱敏用)
-func keyValues(kv func(string) (any, bool)) func() map[string]string {
-	return func() map[string]string {
-		out := map[string]string{}
-		if v, ok := kv("api_key"); ok {
-			if s, ok := v.(string); ok {
-				out["api_key"] = s
-			}
-		}
-		return out
-	}
+func keyValues() func() []string {
+	return func() []string { return []string{"sk-live", "sk-secret-value"} }
 }
 
 func TestParseAndInstantiate_FullFlow(t *testing.T) {
-	// Given 合法包(参数预校验)+ 包级 key When NewProtocol+BuildRequest Then 参数闭包与 util.key 注入 Bearer
+	// Given 合法包(参数预校验)+ pctx.Key When NewProtocol+BuildRequest Then 参数闭包与 util.key() 注入当前键 data
 	r := NewRegistry(testDB(t))
 	pkg := mustInstall(t, r)
-	apiKey := func(name string) (any, bool) {
-		if name == "api_key" {
-			return "sk-live", true
-		}
-		return nil, false
-	}
-	proto, err := NewProtocol(pkg, map[string]any{"base_url": "https://up.test"}, nil, apiKey, keyValues(apiKey), nil)
+	proto, err := NewProtocol(pkg, map[string]any{"base_url": "https://up.test"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := proto.BuildRequest(newProtoCtx(), []byte(`{"model":"m"}`))
+	pctx := newProtoCtx()
+	pctx.Key = &pipeline.KeyEntry{ID: "main", Data: map[string]any{"api_key": "sk-live"}}
+	req, err := proto.BuildRequest(pctx, []byte(`{"model":"m"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +245,7 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +267,7 @@ func TestRuntime_FilterFactoryConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil, nil)
+	f, err := NewFilter(pkg, pkg.Manifest.Parts.Filters[0], map[string]any{"tag": "T1"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +296,7 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proto, err := NewProtocol(pkg, nil, nil, nil, nil, nil)
+	proto, err := NewProtocol(pkg, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,12 +310,12 @@ func TestUtil_TemplateAndPath(t *testing.T) {
 }
 
 func TestInspect_MasksPackageKeys(t *testing.T) {
-	// Given 部件 inspect 含包级 key 值 When 输出 Then 值替换 ***(v2 密钥唯一来源 = 包级 keys)
+	// Given 部件 inspect 含当前键 data 值 When 输出 Then 值替换 ***(密钥唯一来源 = 当前键 data)
 	m := `{"manifestVersion":1,"name":"mask","version":"1","parts":{
 		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = {
 		buildRequest: function (ctx, entry) {
-			var k = util.key("api_key");
+			var k = util.key().api_key;
 			return { url: "https://x", method: "POST", headers: {}, body: util.inspect({ key: k }) };
 		},
 		mapResponse: function (ctx, b) { return b; }
@@ -336,17 +324,13 @@ func TestInspect_MasksPackageKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiKey := func(name string) (any, bool) {
-		if name == "api_key" {
-			return "sk-secret-value", true
-		}
-		return nil, false
-	}
-	proto, err := NewProtocol(pkg, nil, nil, apiKey, keyValues(apiKey), nil)
+	proto, err := NewProtocol(pkg, nil, nil, keyValues(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := proto.BuildRequest(newProtoCtx(), []byte(`{}`))
+	pctx := newProtoCtx()
+	pctx.Key = &pipeline.KeyEntry{ID: "main", Data: map[string]any{"api_key": "sk-secret-value"}}
+	req, err := proto.BuildRequest(pctx, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}

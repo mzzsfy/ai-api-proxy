@@ -133,7 +133,7 @@ func newIPPFixture(t *testing.T, tr TransportCfg) *ippFixture {
 	}))
 	t.Cleanup(up.Close)
 	ctx := context.Background()
-	if err := app.AdminDeps.Packages.Keys().Merge("openai-compatible", map[string]any{"api_key": "sk-up"}); err != nil {
+	if _, err := app.AdminDeps.Packages.Keys().Set("openai-compatible", "api_key", map[string]any{"api_key": "sk-up"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Settings().Put("openai-compatible",

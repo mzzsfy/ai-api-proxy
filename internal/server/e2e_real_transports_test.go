@@ -66,7 +66,7 @@ func newRealTransportFixture(t *testing.T, apiKey, model, transportType, proxyUR
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
-	if err := app.AdminDeps.Packages.Keys().Merge("opencode", map[string]any{"api_key": apiKey}); err != nil {
+	if _, err := app.AdminDeps.Packages.Keys().Set("opencode", "api_key", map[string]any{"api_key": apiKey}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{

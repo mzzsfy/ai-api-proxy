@@ -89,7 +89,7 @@ func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
-	if err := f.app.AdminDeps.Packages.Keys().Merge("opencode", map[string]any{"api_key": apiKey}); err != nil {
+	if _, err := f.app.AdminDeps.Packages.Keys().Set("opencode", "api_key", map[string]any{"api_key": apiKey}); err != nil {
 		t.Fatalf("merge opencode key: %v", err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
@@ -246,7 +246,7 @@ func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 			t.Fatal(err)
 		}
 		// 逐 key 换包密钥后测(v2 密钥在包级,改名行会撞唯一键)
-		if err := f.app.AdminDeps.Packages.Keys().Merge("opencode", map[string]any{"api_key": key}); err != nil {
+		if _, err := f.app.AdminDeps.Packages.Keys().Set("opencode", "api_key", map[string]any{"api_key": key}); err != nil {
 			t.Fatal(err)
 		}
 		var id int64

@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/admin"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
 	"github.com/mzzsfy/ai-api-proxy/internal/scheduler"
@@ -102,19 +103,19 @@ func (a *App) hooksDeps(pkgName string) plugin.HooksDeps {
 	}
 }
 
-// RunTaskOnce 手动触发任务一次(同步;与调度器共用执行通道,不占用同包串行位)
-func (a *App) RunTaskOnce(pkgName, taskName string) (time.Duration, error) {
+// RunTaskOnce 手动触发任务一次(同步;keyID 空 = 键池全键跑,非空 = 单键跑;与调度器共用逐键通道)
+func (a *App) RunTaskOnce(pkgName, taskName, keyID string) ([]admin.TaskRunResult, error) {
 	pkgs := a.AdminDeps.Packages
 	pkg, err := pkgs.GetPackage(pkgName)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !pkgs.IsEnabled(pkgName) {
-		return 0, fmt.Errorf("package %s disabled", pkgName)
+		return nil, fmt.Errorf("package %s disabled", pkgName)
 	}
 	h := pkg.Manifest.Parts.Hooks
 	if h == nil {
-		return 0, fmt.Errorf("package %s has no hooks", pkgName)
+		return nil, fmt.Errorf("package %s has no hooks", pkgName)
 	}
 	var tk plugin.HooksTask
 	found := false
@@ -125,24 +126,44 @@ func (a *App) RunTaskOnce(pkgName, taskName string) (time.Duration, error) {
 		}
 	}
 	if !found {
-		return 0, fmt.Errorf("task %q not declared", taskName)
+		return nil, fmt.Errorf("task %q not declared", taskName)
 	}
-	start := time.Now()
-	rt, err := plugin.LoadTask(pkg, tk, a.hooksDeps(pkgName), settingsSnapshot(pkgs, pkgName))
-	if err != nil {
-		return 0, err
+	// 目标键集合:单键 or 全键(0 键 = 空结果,不报错)
+	var targets []plugin.KeyEntry
+	if keyID != "" {
+		e, ok := pkgs.Keys().Get(pkgName, keyID)
+		if !ok {
+			return nil, fmt.Errorf("key %q not found", keyID)
+		}
+		targets = []plugin.KeyEntry{e}
+	} else {
+		targets = pkgs.Keys().List(pkgName)
 	}
-	if err := rt.RunTask(tk, time.Now()); err != nil {
-		return time.Since(start), err
+	results := make([]admin.TaskRunResult, 0, len(targets))
+	for _, e := range targets {
+		start := time.Now()
+		deps := a.hooksDeps(pkgName)
+		deps.Key = &plugin.KeyRef{ID: e.ID, Data: e.Data}
+		rt, err := plugin.LoadTask(pkg, tk, deps, settingsSnapshot(pkgs, pkgName))
+		if err == nil {
+			err = rt.RunTask(tk, time.Now())
+		}
+		item := admin.TaskRunResult{Key: e.ID, DurationMS: time.Since(start).Milliseconds()}
+		if err != nil {
+			item.Error = err.Error()
+		} else {
+			item.OK = true
+		}
+		results = append(results, item)
 	}
-	return time.Since(start), nil
+	return results, nil
 }
 
 // wireHooks 装配 hooks 通道:注册 onLoad/onChange 回调并启动调度器
 func wireHooks(app *App) *scheduler.Scheduler {
 	pkgs := app.AdminDeps.Packages
-	// onLoad 回调(安装/升级/启用;异步,失败不阻断加载)
-	pkgs.OnLoad = func(pkg *plugin.Package, previous map[string]any) {
+	// onLoad 回调(安装/升级/启用;异步,失败不阻断加载;ctx.key = undefined)
+	pkgs.OnLoad = func(pkg *plugin.Package) {
 		if !pkgs.IsEnabled(pkg.Manifest.Name) || pkg.Manifest.Parts.Hooks == nil {
 			return
 		}
@@ -154,11 +175,12 @@ func wireHooks(app *App) *scheduler.Scheduler {
 			log.Printf("hooks: %s: load: %v", pkg.Manifest.Name, err)
 			return
 		}
-		if err := rt.RunOnLoad(previous); err != nil {
+		if err := rt.RunOnLoad(); err != nil {
 			log.Printf("hooks: %s: onLoad: %v", pkg.Manifest.Name, err)
 		}
 	}
-	run := func(pkgName string, task plugin.HooksTask, at time.Time) error {
+	// run 单次任务执行;keyID 非空 = 单键(逐键调度的最小单元),空 = 键池逐键循环(0 键 = 跳过)
+	run := func(pkgName string, task plugin.HooksTask, at time.Time, keyID string) error {
 		pkg, err := pkgs.GetPackage(pkgName)
 		if err != nil {
 			return err
@@ -166,11 +188,36 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		if !pkgs.IsEnabled(pkgName) {
 			return nil
 		}
-		rt, err := plugin.LoadTask(pkg, task, app.hooksDeps(pkgName), settingsSnapshot(pkgs, pkgName))
-		if err != nil {
-			return err
+		runOne := func(key *plugin.KeyRef) error {
+			deps := app.hooksDeps(pkgName)
+			deps.Key = key
+			rt, err := plugin.LoadTask(pkg, task, deps, settingsSnapshot(pkgs, pkgName))
+			if err != nil {
+				return err
+			}
+			return rt.RunTask(task, at)
 		}
-		return rt.RunTask(task, at)
+		if keyID != "" {
+			e, ok := pkgs.Keys().Get(pkgName, keyID)
+			if !ok {
+				return fmt.Errorf("key %q not found", keyID)
+			}
+			return runOne(&plugin.KeyRef{ID: e.ID, Data: e.Data})
+		}
+		keys := pkgs.Keys().List(pkgName)
+		if len(keys) == 0 {
+			return nil
+		}
+		var firstErr error
+		for _, e := range keys {
+			if err := runOne(&plugin.KeyRef{ID: e.ID, Data: e.Data}); err != nil {
+				log.Printf("hooks: %s: task %s key %s: %v", pkgName, task.Name, e.ID, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		return firstErr
 	}
 	sched := scheduler.New(pkgs, run, nil)
 	pkgs.OnChange = func() { sched.Refresh() }

@@ -74,8 +74,8 @@ function inspect(obj) {
   return s;
 }
 
-// keys:由测试用例提供包级密钥(util.key 直读;缺省无值返回 undefined,与 host 一致)
-let keyStore = {};
+// keys:由测试用例提供当前注入键 data(util.key() 直读;缺省 undefined,与 host 一致)
+let keyStore;
 
 // ─── log / storage mock ───
 
@@ -109,9 +109,9 @@ const setting = {
 // ─── 部件装载(与 host CommonJS 包装一致) ───
 
 // loadPart 装载部件源码;hooks=对象(无参)或 factory(config)
-// keys:可选 {api_key: "..."} 注入 util.key(v2 唯一凭据出口)
+// keys:可选 data(任意 JSON,如 {api_key:"..."})注入 util.key()(当前键唯一出口)
 function loadPart(src, config, keys) {
-  keyStore = keys || {};
+  keyStore = keys;
   const mod = { exports: {} };
   const fn = new Function("module", "exports", "util", "log", "storage", "setting", src);
   fn(mod, mod.exports, util, log, storage, setting);
@@ -134,7 +134,7 @@ const util = {
   deepMerge, deepClone, get, set, pick, omit,
   b64encode, b64decode, b64urlEncode, b64urlDecode,
   sha256hex, hmacSha256hex, uuid, now, isoNow, template, inspect,
-  key: (name) => keyStore[name],
+  key: () => keyStore,
 };
 
 // mockCtx 请求上下文(host PipelineContext 子集)
@@ -178,7 +178,7 @@ if (require.main === module) {
 
   test("loadPart honors factory config and key", () => {
     const hooks = loadPart(
-      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + config.p, headers: { Authorization: 'Bearer ' + util.key('api_key') } }; } }; };",
+      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + config.p, headers: { Authorization: 'Bearer ' + util.key().api_key } }; } }; };",
       { base_url: "https://upstream.test", p: "v2" },
       { api_key: "sk-1" }
     );
@@ -195,7 +195,7 @@ if (require.main === module) {
     );
     fs.writeFileSync(
       path.join(dir, "protocol.js"),
-      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + (config.p || 'd'), headers: { k: util.key('api_key') } }; } }; };"
+      "module.exports = function (config) { return { buildRequest: function (ctx) { return { url: config.base_url + '/' + (config.p || 'd'), headers: { k: util.key().api_key } }; } }; };"
     );
     const hooks = loadPackage(dir, { config: { base_url: "https://upstream.test", p: "v3" }, keys: { api_key: "sk-9" } });
     const req = hooks.buildRequest(mockCtx());
@@ -206,9 +206,9 @@ if (require.main === module) {
 
   test("key missing returns undefined", () => {
     const hooks = loadPart(
-      "module.exports = { buildRequest: function(){ return { v: util.key('nope') }; } };",
+      "module.exports = { buildRequest: function(){ return { v: util.key() }; } };",
       {},
-      {}
+      undefined
     );
     assert.equal(hooks.buildRequest(mockCtx()).v, undefined);
   });

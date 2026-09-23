@@ -139,13 +139,13 @@ func TestUtil_Template(t *testing.T) {
 	}
 }
 
-func TestUtil_KeyMissingThrowsWithPart(t *testing.T) {
-	// v2:util.secret 删除;key 无 keys 上下文时抛错,错误注明包名
+func TestUtil_KeyMissingUndefined(t *testing.T) {
+	// 单键契约:无键上下文 util.key() = undefined(不抛错;多余参数被忽略)
 	vm := goja.New()
 	bindUtil(vm, HostDeps{PackageName: "pkg-a"})
-	_, err := vm.RunString(`util.key("nope")`)
-	if err == nil || !strings.Contains(err.Error(), "pkg-a") || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("key error: %v", err)
+	got, err := vm.RunString(`String(util.key("ignored") === undefined)`)
+	if err != nil || got.String() != "true" {
+		t.Fatalf("key missing: %v %v", got, err)
 	}
 }
 
@@ -183,10 +183,8 @@ func (s *memKV) Delete(key string)             { delete(s.m, key) }
 func TestUtil_InspectMasksAndTruncates(t *testing.T) {
 	vm := goja.New()
 	bindUtil(vm, HostDeps{
-		PackageName: "p",
-		PackageKeyValues: func() map[string]string {
-			return map[string]string{"api_key": "sk-xyz"}
-		},
+		PackageName:      "p",
+		PackageKeyValues: func() []string { return []string{"sk-xyz"} },
 	})
 	got, _ := vm.RunString(`util.inspect({k:"sk-xyz", pad:"` + strings.Repeat("a", 3000) + `"})`)
 	s := got.String()

@@ -59,7 +59,7 @@ func TestScheduler_TickFiresDueTask(t *testing.T) {
 		plugin.HooksTask{Name: "signIn", Cron: "* * * * *"})}}
 	var mu sync.Mutex
 	var got []string
-	s := New(src, func(pkgName string, task plugin.HooksTask, at time.Time) error {
+	s := New(src, func(pkgName string, task plugin.HooksTask, at time.Time, _ string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, pkgName+"/"+task.Name)
@@ -90,7 +90,7 @@ func TestScheduler_SkipsWhenPreviousRunning(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	active := 0
-	s := New(src, func(pkgName string, task plugin.HooksTask, at time.Time) error {
+	s := New(src, func(pkgName string, task plugin.HooksTask, at time.Time, _ string) error {
 		mu.Lock()
 		active++
 		mu.Unlock()
@@ -119,7 +119,7 @@ func TestScheduler_DisabledNotRegistered(t *testing.T) {
 		pkgs:     map[string]*plugin.Package{"p": hooksPkg("p", plugin.HooksTask{Name: "t", Cron: "* * * * *"})},
 		disabled: map[string]bool{"p": true},
 	}
-	s := New(src, func(string, plugin.HooksTask, time.Time) error { return nil }, nil)
+	s := New(src, func(string, plugin.HooksTask, time.Time, string) error { return nil }, nil)
 	s.Refresh()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,7 +134,7 @@ func TestScheduler_TasksFromEnabledPackagesRegistered(t *testing.T) {
 		"a": hooksPkg("a", plugin.HooksTask{Name: "t", Cron: "*/5 * * * *"}),
 		"b": hooksPkg("b"),
 	}}
-	s := New(src, func(string, plugin.HooksTask, time.Time) error { return nil }, nil)
+	s := New(src, func(string, plugin.HooksTask, time.Time, string) error { return nil }, nil)
 	s.Refresh()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,7 +149,7 @@ func TestScheduler_TasksFromEnabledPackagesRegistered(t *testing.T) {
 func TestScheduler_RunStopsCleanly(t *testing.T) {
 	// Given Run 阻塞 When Stop Then 主循环退出
 	src := &fakeSource{pkgs: map[string]*plugin.Package{}}
-	s := New(src, func(string, plugin.HooksTask, time.Time) error { return nil }, nil)
+	s := New(src, func(string, plugin.HooksTask, time.Time, string) error { return nil }, nil)
 	done := make(chan struct{})
 	go func() { s.Run(); close(done) }()
 	time.Sleep(30 * time.Millisecond)

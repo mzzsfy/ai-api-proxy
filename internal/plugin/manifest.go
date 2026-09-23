@@ -125,6 +125,10 @@ func (p *Package) Validate() error {
 	if m.Name == "" {
 		return fmt.Errorf("name required")
 	}
+	// "/" = 键行复合寻址分隔符(包/键id),包名禁用
+	if strings.Contains(m.Name, "/") {
+		return fmt.Errorf("package name %q: slash not allowed", m.Name)
+	}
 	// upstream: 前缀 = target secrets 的 kv ns,插件包重名可读写凭据——安装期堵死
 	if strings.HasPrefix(m.Name, "upstream:") {
 		return fmt.Errorf("package name %q: reserved prefix", m.Name)

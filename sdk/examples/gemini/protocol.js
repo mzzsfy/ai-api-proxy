@@ -1,7 +1,7 @@
 // gemini 协议包:Google Gemini GenerateContent 上游适配(声明槽 openai-completions;entry ↔ gemini 双向翻译)
 // 协议来源:GenerateContent REST(POST {base}/{v}/models/{model}:generateContent | :streamGenerateContent?alt=sse)
 // 恰一次直发,无重试(归下游);纯文本面(features:[] 由能力协商挡 tools/vision)
-// v2:连接=包参数(config.base_url/api_version),密钥=包级 keys(util.key("api_key"))
+// v2:连接=包参数(config.base_url/api_version),密钥=包级键池当前键(util.key())
 "use strict";
 // @ts-check
 /// <reference path="../../ai-api-proxy.d.ts" />
@@ -148,7 +148,7 @@ module.exports = function (config) {
         url: cfg.base_url.replace(/\/+$/, "") + "/" + encodeURIComponent(apiVersion) + "/models/" +
           encodeURIComponent(ctx.vars.model) + action,
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": util.key("api_key") },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": util.key().api_key },
         body: JSON.stringify(body),
         stream: stream
       };

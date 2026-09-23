@@ -42,12 +42,19 @@ type UpstreamInfo struct {
 	Name string
 }
 
+// KeyEntry 请求级选中键(round-robin 调度产出;注入协议/过滤器运行时键槽)
+type KeyEntry struct {
+	ID   string `json:"id"`
+	Data any    `json:"data"`
+}
+
 // PipelineContext 管道请求上下文(v2:无目标概念,连接信息归适配器)
 type PipelineContext struct {
 	RequestID string
 	Upstream  UpstreamInfo
 	State     map[string]any
 	Vars      Vars
+	Key       *KeyEntry // 当前键(空池 = nil;适配器出池时无条件重绑键槽)
 }
 
 // NewContext 构造(初始化 State)

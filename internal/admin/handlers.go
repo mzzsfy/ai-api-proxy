@@ -39,22 +39,30 @@ type Deps struct {
 	TransportEvictFunc func(ctx context.Context, name, scope, value string) error
 	// FetchPackage URL 拉取实现(nil=fetchPackage;测试覆写注入:httptest 源站在回环,生产路径强制公网校验)
 	FetchPackage func(r *http.Request, url string) ([]byte, error)
-	// KeysFunc 包级 keys 明文视图(按包名隔离)
+	// KeysFunc 包键清单视图({keys, rotation};按包名隔离)
 	KeysFunc func(pkg string) map[string]any
 	// KeyHooksFunc keys 钩子能力探测(write/read/form)
 	KeyHooksFunc func(pkg string) (write, read, form bool)
-	// KeyWriteFunc 单键写入(baseUpdatedAt 快检 + keyWrite 归一化 + 轮转落库)
+	// KeyWriteFunc 单键写入(仅管理台 PUT;per-key baseUpdatedAt 快检 + keyWrite 归一化 + Set 备份)
 	KeyWriteFunc func(pkg, key string, value any, baseUpdatedAt int64) (updated int64, transformed bool, err error)
-	// KeyReadFunc 键详情解释
+	// KeyReadFunc 键详情解释(keyRead;仅 GET detail 触发)
 	KeyReadFunc func(pkg, key string) (any, error)
 	// KeyFormFunc 添加表单声明
 	KeyFormFunc func(pkg string) (any, error)
 	// KeyActionFunc 表单按钮回调(可出站)
 	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
-	// KeySubmitFunc 表单提交(回调内 ctx.keys.merge 写入;written 收集;errors=字段级拒绝)
-	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, map[string]any, error)
-	// RunTaskFunc 手动触发 hooks 任务一次(测试按钮;同步执行,返回耗时)
-	RunTaskFunc func(pkg, task string) (time.Duration, error)
+	// KeySubmitFunc 表单提交(回调内 ctx.keys.set 创建条目;ids=宿主生成 id;errors=字段级拒绝)
+	KeySubmitFunc func(pkg string, values map[string]any) ([]string, map[string]any, error)
+	// RunTaskFunc 手动触发 hooks 任务一次(keyID 空 = 全键跑;同步执行,逐键结果)
+	RunTaskFunc func(pkg, task, keyID string) ([]TaskRunResult, error)
+}
+
+// TaskRunResult 手动"测试"单项(键维度)
+type TaskRunResult struct {
+	Key        string `json:"key"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
 // fetch 拉取实现取依赖覆写,缺省内置实现
@@ -78,6 +86,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/enable", d.enablePackage)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/keys/{key}", d.putPackageKey)
+	mux.HandleFunc("DELETE /admin/api/packages/{name}/keys/{key}", d.deletePackageKey)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys/{key}/detail", d.packageKeyDetail)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-action", d.packageKeyFormAction)
@@ -390,7 +399,7 @@ module.exports = function (config) {
   return {
     buildRequest: function (ctx, entry) {
       return { url: config.base_url + "/v1/chat/completions", method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + util.key("api_key") },
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + util.key().api_key },
         body: entry, stream: ctx.vars.entryStream };
     },
     mapEvent: function (ctx, e) {
@@ -704,31 +713,44 @@ func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"updatedAt": updated, "transformed": transformed})
 }
 
-// packageKeyDetail 键详情(keyRead 解释;501 = 未实现)
+// packageKeyDetail 键详情(data + prev 备份 + keyRead 解释)
 func (d *Deps) packageKeyDetail(w http.ResponseWriter, r *http.Request) {
-	if d.KeyReadFunc == nil {
-		httpError(w, http.StatusNotImplemented, "keys read unavailable")
-		return
-	}
 	pkg, key := r.PathValue("name"), r.PathValue("key")
 	if !validKeyName(key) {
 		httpError(w, http.StatusBadRequest, "invalid key name")
 		return
 	}
-	detail, err := d.KeyReadFunc(pkg, key)
-	if err != nil {
-		if errors.Is(err, plugin.ErrPackageDisabled) {
-			httpError(w, http.StatusConflict, err.Error())
-			return
+	e, ok := d.Packages.Keys().Get(pkg, key)
+	if !ok {
+		httpError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	out := map[string]any{"id": e.ID, "data": e.Data, "prev": e.Prev, "updatedAt": e.UpdatedAt}
+	// keyRead 解释(仅此端点触发;501 = 未实现,详情照常)
+	if d.KeyReadFunc != nil {
+		if explain, err := d.KeyReadFunc(pkg, key); err == nil && explain != nil {
+			out["explain"] = explain
 		}
-		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
-			httpError(w, http.StatusNotImplemented, "keyRead not implemented")
-			return
-		}
+	}
+	writeJSON(w, out)
+}
+
+// deletePackageKey 单键删除(幂等;键不存在 = 200,包不存在 = 404)
+func (d *Deps) deletePackageKey(w http.ResponseWriter, r *http.Request) {
+	pkg, key := r.PathValue("name"), r.PathValue("key")
+	if !validKeyName(key) {
+		httpError(w, http.StatusBadRequest, "invalid key name")
+		return
+	}
+	if _, err := d.Packages.GetPackage(pkg); err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := d.Packages.Keys().Delete(pkg, key); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"detail": detail})
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // packageKeyForm 添加表单声明
@@ -793,7 +815,7 @@ func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
 		return
 	}
-	written, msg, errs, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
+	ids, errs, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
 	if err != nil {
 		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
 			httpError(w, http.StatusNotImplemented, "keySubmit not implemented")
@@ -802,10 +824,10 @@ func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
 		writeKeyErr(w, err)
 		return
 	}
-	if written == nil {
-		written = []string{}
+	if ids == nil {
+		ids = []string{}
 	}
-	out := map[string]any{"ok": true, "written": written, "message": msg}
+	out := map[string]any{"ok": true, "ids": ids}
 	if len(errs) > 0 {
 		// 字段级拒绝:处理成功(200)但提交未通过,GUI 据此定位输入框
 		out["ok"] = false
@@ -838,12 +860,15 @@ func (d *Deps) runPackageTask(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotImplemented, "task runner unavailable")
 		return
 	}
-	took, err := d.RunTaskFunc(r.PathValue("name"), r.PathValue("task"))
+	results, err := d.RunTaskFunc(r.PathValue("name"), r.PathValue("task"), r.URL.Query().Get("key"))
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "duration_ms": took.Milliseconds()})
+	if results == nil {
+		results = []TaskRunResult{}
+	}
+	writeJSON(w, map[string]any{"ok": true, "results": results})
 }
 
 func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {

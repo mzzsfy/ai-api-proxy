@@ -190,7 +190,7 @@ const jsProtoSrc = `module.exports = function (config) {
 		return {
 			url: config.base_url + (ant ? "/v1/messages" : "/v1/chat/completions"),
 			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key("api_key") },
+			headers: { "Content-Type": "application/json", "Authorization": "Bearer " + util.key().api_key },
 			body: entry,
 			stream: ctx.vars.entryStream,
 			transport: (config.transport && config.transport !== "direct") ? config.transport : null
@@ -302,9 +302,9 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc})); err != nil {
 		t.Fatal(err)
 	}
-	// 包级密钥 + 包参数(v2 连接信息归属包;行 params 仅覆盖差异槽)
+	// 包级密钥(单键 = api_key 条目;data 为 map 形态)+ 包参数(v2 连接信息归属包;行 params 仅覆盖差异槽)
 	for _, pkg := range []string{"js-openai", "js-anthropic"} {
-		if err := app.AdminDeps.Packages.Keys().Merge(pkg, map[string]any{"api_key": upstreamAPIKey}); err != nil {
+		if _, err := app.AdminDeps.Packages.Keys().Set(pkg, "api_key", map[string]any{"api_key": upstreamAPIKey}); err != nil {
 			t.Fatal(err)
 		}
 		proto := "openai-completions"

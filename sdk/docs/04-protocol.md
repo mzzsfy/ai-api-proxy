@@ -111,9 +111,9 @@ module.exports = function (config) {
 | 执行时机 | 每个请求热路径 | 定时/加载/凭据操作 |
 | 网络 | 无(host 执行唯一上游请求) | 有(ctx.http.run 限出站) |
 | 参数 | configSchema(经 config/Upstream.Params 注入) | settings 声明(经 ctx.settings 注入) |
-| 凭据 | util.secret 只读 secrets;util.key 只读 keys | ctx.keys 读写 keys |
+| 凭据 | util.key() 只读当前注入键 data | ctx.keys.set/merge 写当前键;keySubmit 创建条目 |
 
-protocol/filter 里不要刷 token——那是 hooks 刷新任务 + keys 的事;buildRequest 里 `util.key(name)` 读到的是最新值,刷新任务写完下个请求自然生效。
+protocol/filter 里不要刷 token——那是 hooks 刷新任务 + keys 的事;buildRequest 里 `util.key()` 返回本次请求注入键的 data(请求级 round-robin 选键),刷新任务写完下个请求自然生效。
 
 ## 六、本地测试与示例
 

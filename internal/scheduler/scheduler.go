@@ -15,8 +15,8 @@ const Workers = 2
 // TickInterval tick 间隔(对齐分钟)
 const TickInterval = 60 * time.Second
 
-// Runner 单任务执行器(宿主注入:构建 HooksRuntime 并 RunTask)
-type Runner func(pkgName string, task plugin.HooksTask, at time.Time) error
+// Runner 单任务执行器(宿主注入:键池逐键循环执行;keyID 空 = 全键,任务级串行由 busy 承担)
+type Runner func(pkgName string, task plugin.HooksTask, at time.Time, keyID string) error
 
 // PackageSource 任务声明来源(插件注册中心最小面)
 type PackageSource interface {
@@ -143,7 +143,7 @@ func (s *Scheduler) tick(due time.Time) {
 			}()
 			s.sem <- struct{}{}
 			defer func() { <-s.sem }()
-			if err := s.run(d.e.pkgName, d.e.task, due); err != nil {
+			if err := s.run(d.e.pkgName, d.e.task, due, ""); err != nil {
 				log.Printf("scheduler: %s: %v", d.key, err)
 			}
 		}()
