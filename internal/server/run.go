@@ -329,11 +329,14 @@ func Build(cfg *Config) (*App, error) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	return &App{
+	// 手动触发任务:闭包引用 app,调用时机晚于装配(startHooks 启动调度器)
+	app := &App{
 		Cfg: cfg, St: st, Gateway: gw, AdminSvc: adminSvc, AdminDeps: adminDeps,
 		Recorder: recorder, Registry: reg, Mux: mux, trMgr: trMgr,
 		History: hist, pluginEvictGate: gate,
-	}, nil
+	}
+	adminDeps.RunTaskFunc = app.RunTaskOnce
+	return app, nil
 }
 
 // hooks 启动:装配回调、启动调度器、对已加载包补发 onLoad(启动恢复路径)

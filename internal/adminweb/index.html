@@ -53,6 +53,15 @@
   button.pri:hover { filter:brightness(1.06); }
   button.danger { color:var(--err); }
   button.danger:hover { border-color:var(--err); }
+  /* 异步请求中:文字隐藏转圈,禁点 */
+  button.spin { color:transparent !important; pointer-events:none; position:relative; }
+  button.spin::after {
+    content:""; position:absolute; left:50%; top:50%; width:11px; height:11px; margin:-5.5px 0 0 -5.5px;
+    border:2px solid var(--dim); border-top-color:var(--acc); border-radius:50%;
+    animation:btnspin .7s linear infinite;
+  }
+  @keyframes btnspin { to { transform:rotate(360deg); } }
+  button:disabled { opacity:.75; cursor:default; }
   .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
   .muted { color:var(--dim); font-size:12px; }
   .row { margin:12px 0; }
@@ -221,6 +230,12 @@ function msg(ok, text) {
   clearTimeout(el._t);
   el._t = setTimeout(() => el.style.display = "none", 3200);
 }
+/* 异步按钮防重:点击即转圈禁点,完成/失败恢复 */
+async function withSpin(btn, fn) {
+  if (!btn || btn.classList.contains("spin")) return;
+  btn.classList.add("spin"); btn.disabled = true;
+  try { await fn(); } finally { btn.classList.remove("spin"); btn.disabled = false; }
+}
 
 /* ─── 页内模态:Promise 化确认/输入(替代原生 confirm/prompt;Esc/遮罩=取消,Enter=确认) ─── */
 function uiModal(opts) {
@@ -341,10 +356,10 @@ async function showUpstreams() {
   $("#newu").onclick = () => editModel(basePkgs, transports);
   document.querySelectorAll("[data-e]").forEach(b => b.onclick = () => editModel(basePkgs, transports, ups.find(u => u.id == b.dataset.e)));
   document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => openChatTest(ups.find(u => u.id == b.dataset.c)));
-  document.querySelectorAll("[data-t]").forEach(b => b.onclick = async () => {
+  document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => withSpin(b, async () => {
     try { const r = await api.post(`/models/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${r.latency_ms}ms` : ("失败: " + r.error)); }
     catch (err) { msg(false, err.message); }
-  });
+  }));
   document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
     if (!(await uiConfirm("删除模型行", `删除该模型行(${b.dataset.d})?删除后该模型的调用立即失败。`))) return;
     try { await api.del(`/models/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
@@ -369,7 +384,7 @@ function openChatTest(u) {
       </div>
     </div>`;
   $("#chat-close").onclick = () => main.innerHTML = "";
-  $("#chat-send").onclick = async () => {
+  $("#chat-send").onclick = () => withSpin($("#chat-send"), async () => {
     const message = $("#chat-msg").value;
     const out = $("#chat-out");
     out.textContent = "请求中…";
@@ -382,7 +397,7 @@ function openChatTest(u) {
       out.textContent = "请求失败: " + err.message;
       out.style.color = "var(--err)";
     }
-  };
+  });
 }
 
 /* 模型行编辑:v2 单包绑定;插件参数(base_url/transport/filter 参数等声明槽)以行 params JSON 覆盖 */
@@ -619,9 +634,23 @@ function renderTasksPane(name) {
         ${t.next ? `<span class="muted">自调度(next 链)</span>` : `<input data-tcron="${esc(t.name)}" value="${esc(t.cron || "")}" style="width:150px" placeholder="cron 表达式">`}
         <label class="muted" style="font-size:12px">启用 <input type="checkbox" data-tdis="${esc(t.name)}" ${t.enabled === false ? "" : "checked"}></label>
         ${t.overridden ? `<span class="muted" style="font-size:11px">已覆盖</span>` : ""}
+        <button data-trun="${esc(t.name)}">测试</button> <span data-trres="${esc(t.name)}" class="muted"></span>
       </div>`).join("") || `<div class="muted">此包无定时任务</div>`}
     <div class="row"><button class="pri" id="tasksave">保存任务改动</button></div>`;
   $("#tasksave").onclick = () => saveSettings(name, "tasks");
+  document.querySelectorAll("[data-trun]").forEach(b => b.onclick = () => withSpin(b, async () => {
+    const tn = b.dataset.trun;
+    const res = document.querySelector(`[data-trres="${CSS.escape(tn)}"]`);
+    try {
+      const r = await api.post(`/packages/${name}/tasks/${encodeURIComponent(tn)}/run`, {});
+      res.textContent = `✓ ${r.duration_ms}ms`;
+      res.style.color = "var(--ok)";
+      msg(true, `任务 ${tn} 执行成功(${r.duration_ms}ms)`);
+    } catch (err) {
+      res.textContent = "✗ " + err.message;
+      res.style.color = "var(--err)";
+    }
+  }));
 }
 
 /* 配置/任务保存:后端 PUT 是全量覆盖语义,保存时必须双收集(两 pane 常驻 DOM),只传单边会清空另一侧覆盖;409 自动刷新重试 */
@@ -976,7 +1005,7 @@ async function showMonitor() {
   renderDimTable("byup", aggregateDim(series, "by_upstream"), false);
   renderDimTable("bytg", aggregateDim(series, "by_target"), true);
   $("#monrf").onclick = showMonitor;
-  document.querySelectorAll("[data-tt]").forEach(b => b.onclick = async () => {
+  document.querySelectorAll("[data-tt]").forEach(b => b.onclick = () => withSpin(b, async () => {
     const span = $("#tr-" + CSS.escape(b.dataset.tt));
     span.textContent = "测试中…";
     try {
@@ -984,7 +1013,7 @@ async function showMonitor() {
       span.textContent = r.ok ? `通 ${r.latency_ms}ms` : `断: ${r.error}`;
       span.style.color = r.ok ? "var(--ok)" : "var(--err)";
     } catch (err) { span.textContent = err.message; span.style.color = "var(--err)"; }
-  });
+  }));
 }
 
 /* aggregateDim 时序维度聚合:键 → {requests, errors, maxConc} */

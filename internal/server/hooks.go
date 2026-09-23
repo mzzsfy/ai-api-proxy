@@ -83,27 +83,64 @@ func settingsSnapshot(pkgs *plugin.Registry, pkgName string) map[string]any {
 	return effectiveSettings(decl, pkgs.SettingsOverrides(pkgName))
 }
 
-// wireHooks 装配 hooks 通道:注册 onLoad/onChange 回调并启动调度器
-func wireHooks(app *App) *scheduler.Scheduler {
-	exec := &httpExecutor{trMgr: app.trMgr}
-	pkgs := app.AdminDeps.Packages
+// hooksDeps 包运行时依赖(调度器与手动触发共用同一通道)
+func (a *App) hooksDeps(pkgName string) plugin.HooksDeps {
+	pkgs := a.AdminDeps.Packages
 	// 闸门在装配期定档(Build 注入;测试装配路径惰性兜底为进程级单例,避免"每次新 gate 恒满桶"限流失效)
-	gate := app.pluginEvictGate
+	gate := a.pluginEvictGate
 	if gate == nil {
 		gate = sharedEvictGate()
 	}
-	evict := gatedEvict(gate, evictForwarder(app.trMgr))
-	deps := func(pkgName string) plugin.HooksDeps {
-		return plugin.HooksDeps{
-			PackageName: pkgName,
-			HTTP:        exec,
-			Keys:        pkgs.Keys(),
-			Storage:     &kvStorage{db: app.St.DB(), ns: pkgName},
-			Log:         hooksLog(pkgName),
-			// 插件定时任务主动失效上报:同一命令转发(限流闸门;仅失效不触发重试)
-			TransportEvict: evict,
+	return plugin.HooksDeps{
+		PackageName: pkgName,
+		HTTP:        &httpExecutor{trMgr: a.trMgr},
+		Keys:        pkgs.Keys(),
+		Storage:     &kvStorage{db: a.St.DB(), ns: pkgName},
+		Log:         hooksLog(pkgName),
+		// 插件定时任务主动失效上报:同一命令转发(限流闸门;仅失效不触发重试)
+		TransportEvict: gatedEvict(gate, evictForwarder(a.trMgr)),
+	}
+}
+
+// RunTaskOnce 手动触发任务一次(同步;与调度器共用执行通道,不占用同包串行位)
+func (a *App) RunTaskOnce(pkgName, taskName string) (time.Duration, error) {
+	pkgs := a.AdminDeps.Packages
+	pkg, err := pkgs.GetPackage(pkgName)
+	if err != nil {
+		return 0, err
+	}
+	if !pkgs.IsEnabled(pkgName) {
+		return 0, fmt.Errorf("package %s disabled", pkgName)
+	}
+	h := pkg.Manifest.Parts.Hooks
+	if h == nil {
+		return 0, fmt.Errorf("package %s has no hooks", pkgName)
+	}
+	var tk plugin.HooksTask
+	found := false
+	for _, t := range h.Tasks {
+		if t.Name == taskName {
+			tk, found = t, true
+			break
 		}
 	}
+	if !found {
+		return 0, fmt.Errorf("task %q not declared", taskName)
+	}
+	start := time.Now()
+	rt, err := plugin.LoadTask(pkg, tk, a.hooksDeps(pkgName), settingsSnapshot(pkgs, pkgName))
+	if err != nil {
+		return 0, err
+	}
+	if err := rt.RunTask(tk, time.Now()); err != nil {
+		return time.Since(start), err
+	}
+	return time.Since(start), nil
+}
+
+// wireHooks 装配 hooks 通道:注册 onLoad/onChange 回调并启动调度器
+func wireHooks(app *App) *scheduler.Scheduler {
+	pkgs := app.AdminDeps.Packages
 	// onLoad 回调(安装/升级/启用;异步,失败不阻断加载)
 	pkgs.OnLoad = func(pkg *plugin.Package, previous map[string]any) {
 		if !pkgs.IsEnabled(pkg.Manifest.Name) || pkg.Manifest.Parts.Hooks == nil {
@@ -112,7 +149,7 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		if _, ok := pkg.Files["init.js"]; !ok {
 			return
 		}
-		rt, err := plugin.LoadInit(pkg, deps(pkg.Manifest.Name), settingsSnapshot(pkgs, pkg.Manifest.Name))
+		rt, err := plugin.LoadInit(pkg, app.hooksDeps(pkg.Manifest.Name), settingsSnapshot(pkgs, pkg.Manifest.Name))
 		if err != nil {
 			log.Printf("hooks: %s: load: %v", pkg.Manifest.Name, err)
 			return
@@ -129,7 +166,7 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		if !pkgs.IsEnabled(pkgName) {
 			return nil
 		}
-		rt, err := plugin.LoadTask(pkg, task, deps(pkgName), settingsSnapshot(pkgs, pkgName))
+		rt, err := plugin.LoadTask(pkg, task, app.hooksDeps(pkgName), settingsSnapshot(pkgs, pkgName))
 		if err != nil {
 			return err
 		}

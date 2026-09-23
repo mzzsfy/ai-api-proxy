@@ -163,6 +163,66 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	}
 }
 
+func TestHooks_TaskManualRun(t *testing.T) {
+	// Given 已装 hooks 包 When POST tasks/{task}/run Then 同步执行一次(keys 写窗生效/未声明 400/停用 400/无 hooks 400)
+	ctx := context.Background()
+	pkgs, st := testRegistry(t)
+	wire := &App{AdminDeps: newAdminDeps(pkgs), St: st}
+	sched := wireHooks(wire)
+	defer sched.Stop()
+	wire.AdminDeps.RunTaskFunc = wire.RunTaskOnce
+	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
+		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.merge({token:ctx.task});}}`,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // 等 onLoad 回调(无 init.js,无副作用)
+	mux := wire.AdminDeps.Mux()
+	runTask := func(pkg, task string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/api/packages/"+pkg+"/tasks/"+task+"/run", nil))
+		return w
+	}
+	// 正常触发:200 + keys 写窗生效
+	w := runTask("checkin", "signIn")
+	if w.Code != http.StatusOK || !containsStr(w.Body.String(), `"ok":true`) {
+		t.Fatalf("run status %d: %s", w.Code, w.Body.String())
+	}
+	if v, _ := pkgs.Keys().Get("checkin", "token"); v != "signIn" {
+		t.Fatalf("task keys: %v", v)
+	}
+	if !containsStr(w.Body.String(), "duration_ms") {
+		t.Fatalf("duration missing: %s", w.Body.String())
+	}
+	// 未声明任务 400
+	if w = runTask("checkin", "nope"); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown task status %d: %s", w.Code, w.Body.String())
+	}
+	// 停用包 400
+	if err := pkgs.Enable(ctx, "checkin", false); err != nil {
+		t.Fatal(err)
+	}
+	if w = runTask("checkin", "signIn"); w.Code != http.StatusBadRequest || !containsStr(w.Body.String(), "disabled") {
+		t.Fatalf("disabled status %d: %s", w.Code, w.Body.String())
+	}
+	_ = pkgs.Enable(ctx, "checkin", true)
+	// 无 hooks 部件包 400
+	protoManifest := `{"manifestVersion":1,"name":"plain","version":"0.1.0","parts":{
+		"protocol":{"protocol":"openai-completions"}}}`
+	plainAAP, err := plugin.BuildAAP(mustManifest(t, protoManifest), map[string][]byte{
+		plugin.ProtocolEntry: []byte("module.exports=function(){return {buildRequest:function(c,e){return {url:config.base_url}},mapResponse:function(c,b){return b;}}}"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pkgs.Install(ctx, plainAAP); err != nil {
+		t.Fatal(err)
+	}
+	if w = runTask("plain", "x"); w.Code != http.StatusBadRequest || !containsStr(w.Body.String(), "no hooks") {
+		t.Fatalf("no-hooks status %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	// Given keys 有值 When GET 管理 keys 路由 Then 明文输出(键名+值)
 	pkgs, _ := testRegistry(t)

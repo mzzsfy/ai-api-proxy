@@ -53,6 +53,8 @@ type Deps struct {
 	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
 	// KeySubmitFunc 表单提交(回调内 ctx.keys.merge 写入;written 收集;errors=字段级拒绝)
 	KeySubmitFunc func(pkg string, values map[string]any) ([]string, any, map[string]any, error)
+	// RunTaskFunc 手动触发 hooks 任务一次(测试按钮;同步执行,返回耗时)
+	RunTaskFunc func(pkg, task string) (time.Duration, error)
 }
 
 // fetch 拉取实现取依赖覆写,缺省内置实现
@@ -80,6 +82,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-action", d.packageKeyFormAction)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-submit", d.packageKeyFormSubmit)
+	mux.HandleFunc("POST /admin/api/packages/{name}/tasks/{task}/run", d.runPackageTask)
 	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
 	mux.HandleFunc("GET /admin/api/models", d.listUpstreams)
@@ -827,6 +830,20 @@ func writeKeyErr(w http.ResponseWriter, err error) {
 	default:
 		httpError(w, http.StatusBadRequest, err.Error())
 	}
+}
+
+// runPackageTask 手动触发 hooks 任务一次(同步执行;供任务行"测试"按钮)
+func (d *Deps) runPackageTask(w http.ResponseWriter, r *http.Request) {
+	if d.RunTaskFunc == nil {
+		httpError(w, http.StatusNotImplemented, "task runner unavailable")
+		return
+	}
+	took, err := d.RunTaskFunc(r.PathValue("name"), r.PathValue("task"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "duration_ms": took.Milliseconds()})
 }
 
 func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {
