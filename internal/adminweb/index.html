@@ -320,6 +320,7 @@ function shell(page, mainHTML) {
     sessionStorage.removeItem("in"); show("login");
   };
 }
+let navGen = 0; // 导航代次:页函数首个 await 后写 DOM 前校验,慢页后到不覆盖新页
 async function show(page) {
   if (page === "login") {
     $("#app").innerHTML = `
@@ -352,8 +353,9 @@ async function show(page) {
   }
   shell(page, `<h2>${PAGE_NAMES[page]}</h2><div class="muted">载入中…</div>`);
   // 页面加载统一兜底:失败(如服务重启中)渲染错误态+重试,避免卡死"载入中…"
+  const gen = ++navGen;
   try {
-    await PAGES[page]();
+    await PAGES[page](gen);
   } catch (err) {
     const main = $("#main");
     if (err && err.message === "登录已过期") return; // 401 已跳登录页
@@ -364,8 +366,10 @@ async function show(page) {
   }
 }
 /* ─── 模型管理(v2:行名即模型名,单包绑定,参数=行 params 覆盖包参数) ─── */
-async function showUpstreams() {
+async function showUpstreams(gen) {
+  gen = gen === undefined ? ++navGen : gen; // 重载型调用推进代次
   const [ups, pkgs, transports] = await Promise.all([api.get("/models"), api.get("/packages"), api.get("/transports")]);
+  if (gen !== navGen) return;
   const basePkgs = pkgs.filter(p => p.hasProtocol);
   $("#main").innerHTML = `
     <h2>模型管理</h2>
@@ -520,8 +524,10 @@ function editModel(basePkgs, transports, u, existing = []) {
   main.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 /* ─── 插件管理:包生命周期(导入/导出/启停/卸载)+ 管理入口 ─── */
-async function showPackages() {
+async function showPackages(gen) {
+  gen = gen === undefined ? ++navGen : gen;
   const pkgs = await api.get("/packages");
+  if (gen !== navGen) return;
   $("#main").innerHTML = `
     <h2>插件管理</h2>
     <div class="row">
@@ -606,8 +612,10 @@ function bindImport() {
 /* ─── 插件配置:左包选择 + 右详情 tabs(配置|keys|任务) ─── */
 const plugConfState = { pkg: null, settings: null }; // settings: {version, config[], tasks[], noHooks}
 
-async function showPlugConf(selectName) {
+async function showPlugConf(selectName, gen) {
+  gen = gen === undefined ? ++navGen : gen;
   const pkgs = await api.get("/packages");
+  if (gen !== navGen) return;
   const cached = plugConfState.pkg && pkgs.some(p => p.name === plugConfState.pkg) ? plugConfState.pkg : "";
   const name = selectName || cached || (pkgs[0] && pkgs[0].name) || "";
   plugConfState.pkg = name;
@@ -976,7 +984,8 @@ const HIST_RANGES = [
   { label: "自定义", ms: -1 },
 ];
 
-async function showHistory() {
+async function showHistory(gen) {
+  gen = gen === undefined ? ++navGen : gen;
   $("#main").innerHTML = `
     <div class="titlerow"><h2>请求历史</h2><button id="histrf">刷新</button></div>
     <div class="row">
@@ -997,7 +1006,7 @@ async function showHistory() {
   $("#his-range").onchange = e => { toggleHistCustom(+e.target.value); histState.offset = 0; loadHistory(); };
   $("#his-q").onclick = () => { histState.offset = 0; loadHistory(); };
   toggleHistCustom(+$("#his-range").value);
-  loadHistory();
+  loadHistory(gen);
 }
 
 function toggleHistCustom(ms) { $("#his-custom").style.display = ms < 0 ? "" : "none"; }
@@ -1016,7 +1025,8 @@ function histTimeRange() {
   return {};
 }
 
-async function loadHistory() {
+async function loadHistory(gen) {
+  gen = gen === undefined ? navGen : gen; // 查询类调用不带 gen,始终生效
   const q = new URLSearchParams({ limit: histState.limit, offset: histState.offset });
   const model = $("#his-model").value.trim(), upstream = $("#his-upstream").value.trim();
   if (model) q.set("model", model);
@@ -1026,8 +1036,11 @@ async function loadHistory() {
   if (range.start) q.set("start", range.start);
   if (range.end) q.set("end", range.end);
   let r;
+  const box = $("#his-table");
+  if (!box) return; // 页面已被导航切换重建
   try { r = await api.get("/history?" + q); }
-  catch (err) { $("#his-table").innerHTML = `<div class="empty">加载失败: ${esc(err.message)}</div>`; return; }
+  catch (err) { box.innerHTML = `<div class="empty">加载失败: ${esc(err.message)}</div>`; return; }
+  if (gen !== navGen) return;
   const items = r.items || [];
   $("#his-total").textContent = `共 ${fmt(r.total)} 条`;
   $("#his-table").innerHTML = items.length ? `<table>
@@ -1079,18 +1092,21 @@ async function openHistoryDetail(id) {
 }
 
 /* ─── 监控 ─── */
-async function showMonitor() {
+async function showMonitor(gen) {
+  gen = gen === undefined ? ++navGen : gen;
   $("#main").innerHTML = `<h2>监控</h2><div class="muted">载入中…</div>`;
   let m, series, transports;
   try {
     [m, series, transports] = await Promise.all([
       api.get("/metrics/live"), api.get("/metrics/series?minutes=60"), api.get("/transports")]);
   } catch (err) {
+    if (gen !== navGen) return;
     $("#main").innerHTML = `<h2>监控</h2>
       <div class="empty">监控数据加载失败: ${esc(err.message)}<br><button class="pri" id="monretry">重试</button></div>`;
     $("#monretry").onclick = showMonitor;
     return;
   }
+  if (gen !== navGen) return;
   series = series || [];
   const reqs = series.map(p => p.requests);
   const concs = series.map(p => p.max_concurrent || 0);
