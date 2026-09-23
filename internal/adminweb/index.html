@@ -31,7 +31,8 @@
   a:hover { text-decoration:underline; }
   h2 { font-size:18px; font-weight:650; letter-spacing:-0.01em; margin:2px 0 16px; }
   h3 { font-size:13.5px; font-weight:650; margin:22px 0 8px; }
-  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:13px; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:13px;
+          display:block; overflow-x:auto; }
   th { text-align:left; font-weight:600; color:var(--dim); font-size:12px; padding:6px 10px;
        border-bottom:1px solid var(--line); white-space:nowrap; }
   td { padding:6px 10px; border-bottom:1px solid var(--line-soft); vertical-align:middle; }
@@ -48,6 +49,7 @@
     border:1px solid var(--line); border-radius:6px; padding:5px 13px; cursor:pointer;
   }
   button:hover { border-color:var(--dim); }
+  td button { white-space:nowrap; }
   button:focus-visible, a:focus-visible, input:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
   button.pri { background:var(--acc); border-color:var(--acc); color:var(--acc-ink); font-weight:600; }
   button.pri:hover { filter:brightness(1.06); }
@@ -218,7 +220,11 @@ const api = {
       opt.headers["Content-Type"] = "application/json";
     }
     const r = await fetch("/admin/api" + path, opt);
-    if (r.status === 401) { show("login"); throw new Error("登录已过期"); }
+    if (r.status === 401) {
+      // 已在登录页(如登录失败)不重渲染,保留用户输入
+      if (!document.querySelector("#lf")) show("login");
+      throw new Error("登录已过期");
+    }
     const data = raw ? await r.text() : await r.json();
     if (!r.ok) throw new Error(data.error || data.message || ("HTTP " + r.status));
     return data;
@@ -329,7 +335,15 @@ function show(page) {
     $("#lf").onsubmit = async e => {
       e.preventDefault();
       try {
-        await api.post("/login", { user: $("#u").value, password: $("#p").value });
+        const r = await fetch("/admin/api/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user: $("#u").value, password: $("#p").value }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          const why = { "invalid credentials": "用户名或口令错误", "locked, retry later": "失败次数过多,请 1 分钟后再试" };
+          throw new Error(why[d.error] || d.error || ("HTTP " + r.status));
+        }
         sessionStorage.setItem("in", "1"); show("ups");
       } catch (err) { msg(false, err.message); }
     };
@@ -355,7 +369,7 @@ async function showUpstreams() {
           <button data-e="${u.id}">编辑</button>
           <button data-c="${u.id}" data-n="${esc(u.name)}">对话测试</button>
           <button data-t="${u.id}">测试</button>
-          <button class="danger" data-d="${u.id}">删除</button>
+          <button class="danger" data-d="${u.id}" data-n="${esc(u.name)}">删除</button>
         </td></tr>`).join("")}</table>`
       : `<div class="empty">还没有模型行。点"新建模型行"添加:模型名 + 插件包;连接信息(地址/密钥)配置在插件的参数与密钥里。</div>`}
     <div id="editor"></div>`;
@@ -367,7 +381,7 @@ async function showUpstreams() {
     catch (err) { msg(false, err.message); }
   }));
   document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
-    if (!(await uiConfirm("删除模型行", `删除该模型行(${b.dataset.d})?删除后该模型的调用立即失败。`))) return;
+    if (!(await uiConfirm("删除模型行", `删除模型行 ${b.dataset.n}?(ID ${b.dataset.d})删除后该模型的调用立即失败。`))) return;
     try { await api.del(`/models/${b.dataset.d}`); msg(true, "已删除"); showUpstreams(); }
     catch (err) { msg(false, err.message); }
   });
@@ -389,6 +403,7 @@ function openChatTest(u) {
         <div class="out" id="chat-out">响应将显示在这里。</div>
       </div>
     </div>`;
+  main.scrollIntoView({ behavior: "smooth", block: "start" });
   $("#chat-close").onclick = () => main.innerHTML = "";
   $("#chat-send").onclick = () => withSpin($("#chat-send"), async () => {
     const message = $("#chat-msg").value;
@@ -446,12 +461,12 @@ function editModel(basePkgs, transports, u, existing = []) {
           </div>
           <div id="model-list"></div>
         </div>` : `模型名 <input id="un" value="${esc(u.name)}" readonly title="name/plugin 不可改;如需修改请删除后重建" style="width:260px">`}
-      插件包 <select id="up">${basePkgs.map(p => `<option ${u.plugin === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+      插件包 <select id="up" ${isNew ? "" : "disabled title=\"name/plugin 不可修改\""}>${basePkgs.map(p => `<option ${u.plugin === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
       启用 <input id="ue" type="checkbox" ${u.enabled ? "checked" : ""}>
     </div>
     <div class="muted" style="margin:6px 0">连接信息(地址/密钥)配置在插件包的「参数 / 密钥」里;下方参数按行覆盖,transport 可选命名传输实例:</div>
     <div class="row">transport(行覆盖)<select id="utr">${trOpts}</select></div>
-    <div class="row">参数 JSON(行覆盖,如 filter 参数/自定义槽)<br><textarea id="uparams" rows="4" style="width:420px;font-family:monospace" placeholder='{"model":"rewritten-name"}'>${esc(JSON.stringify(Object.fromEntries(Object.entries(u.params || {}).filter(([k]) => k !== "transport")), null, 2))}</textarea></div>
+    <div class="row">参数 JSON(行覆盖;可用槽位以包声明为准,见插件配置页)<br><textarea id="uparams" rows="4" style="width:420px;font-family:monospace" placeholder='{"槽名": "值"}'>${esc(JSON.stringify(Object.fromEntries(Object.entries(u.params || {}).filter(([k]) => k !== "transport")), null, 2))}</textarea></div>
     <div class="row"><button class="pri" id="saveu">保存</button> <button id="cancelu">取消</button></div>`;
   if (isNew) {
     $("#model-add").onclick = addModelNames;
@@ -491,6 +506,7 @@ function editModel(basePkgs, transports, u, existing = []) {
     msg(true, names.length > 1 ? `已保存 ${names.length} 个模型行` : "已保存");
     main.innerHTML = ""; showUpstreams();
   };
+  main.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 /* ─── 插件管理:包生命周期(导入/导出/启停/卸载)+ 管理入口 ─── */
 async function showPackages() {
@@ -675,8 +691,28 @@ function renderConfigPane(name) {
       const typ = sch.type === "int" || sch.type === "number" ? "number" : "text";
       return `<div class="slot">${label}<input type="${typ}" data-s="${esc(slot.name)}" value="${esc(v)}"></div>`;
     }).join("") || `<div class="muted">此包未声明配置项</div>`}
-    <div class="row"><button class="pri" id="cfgsave">保存配置</button> <span class="muted" id="cfgver">version ${st.version}</span></div>`;
+    <div class="row"><button class="pri" id="cfgsave">保存配置</button> <button id="cfgreset">恢复默认</button> <span class="muted" id="cfgver">version ${st.version}</span></div>`;
   $("#cfgsave").onclick = () => saveSettings(name, "config");
+  $("#cfgreset").onclick = () => resetConfigDefaults(name);
+}
+
+/* 恢复默认:有 default 的槽回填(后端剥离 default 等值),无 default 的槽标记跳过收集(全量提交=清除覆盖);改值后即保存 */
+function resetConfigDefaults(name) {
+  const st = plugConfState.settings;
+  if (!st || st.noHooks) return;
+  (st.config || []).forEach(slot => {
+    const inp = document.querySelector(`#pane-config [data-s="${CSS.escape(slot.name)}"]`);
+    if (!inp) return;
+    const dflt = slot.schema ? slot.schema.default : undefined;
+    if (dflt === undefined || dflt === null) {
+      inp.dataset.restoreSkip = "1";
+      if (inp.type === "checkbox") inp.checked = false; else inp.value = "";
+    } else {
+      delete inp.dataset.restoreSkip;
+      if (inp.type === "checkbox") inp.checked = !!dflt; else inp.value = String(dflt);
+    }
+  });
+  saveSettings(name, "config");
 }
 
 function renderTasksPane(name) {
@@ -697,9 +733,22 @@ function renderTasksPane(name) {
     const res = document.querySelector(`[data-trres="${CSS.escape(tn)}"]`);
     try {
       const r = await api.post(`/packages/${name}/tasks/${encodeURIComponent(tn)}/run`, {});
-      res.textContent = `✓ ${r.duration_ms}ms`;
-      res.style.color = "var(--ok)";
-      msg(true, `任务 ${tn} 执行成功(${r.duration_ms}ms)`);
+      const rs = r.results || [];
+      const total = rs.reduce((a, x) => a + (x.duration_ms || 0), 0);
+      const fails = rs.filter(x => !x.ok);
+      if (fails.length) {
+        res.textContent = `✗ ${fails.length}/${rs.length} 键失败 · ${total}ms`;
+        res.style.color = "var(--err)";
+        msg(false, `任务 ${tn} 部分失败: ${fails.map(x => `${x.key || "(键)"}: ${x.error || "未知错误"}`).join("; ")}`);
+      } else if (!rs.length) {
+        res.textContent = "✓ 无键执行";
+        res.style.color = "var(--ok)";
+        msg(true, `任务 ${tn} 执行完成(键池为空)`);
+      } else {
+        res.textContent = `✓ ${rs.length} 键 · ${total}ms`;
+        res.style.color = "var(--ok)";
+        msg(true, `任务 ${tn} 执行成功(${rs.length} 键,共 ${total}ms)`);
+      }
     } catch (err) {
       res.textContent = "✗ " + err.message;
       res.style.color = "var(--err)";
@@ -713,6 +762,7 @@ async function saveSettings(name, which) {
   if (!st || st.noHooks) return;
   const config = {};
   document.querySelectorAll("#pane-config [data-s]").forEach(inp => {
+    if (inp.dataset.restoreSkip) return; // 恢复默认:跳过收集=全量提交清除该槽覆盖
     if (inp.type === "checkbox") config[inp.dataset.s] = inp.checked;
     else if (inp.type === "number") config[inp.dataset.s] = Number(inp.value);
     else config[inp.dataset.s] = inp.value;
@@ -730,8 +780,11 @@ async function saveSettings(name, which) {
   try {
     const r = await api.put(`/packages/${name}/settings`, { config, tasks, version: st.version });
     msg(true, which === "config" ? "配置已保存" : "任务已保存");
-    plugConfState.settings.version = r.version;
-    const ver = $("#cfgver"); if (ver) ver.textContent = `version ${r.version}`;
+    // 重渲染两 pane:同步服务端展开视图(覆盖标记/默认值),并清除恢复默认的跳过标记
+    const loaded = { keys: true, code: true, mon: true, config: false, tasks: false };
+    await loadSettingsPanes(name, loaded);
+    document.querySelectorAll(".tabs a").forEach(x => x.classList.toggle("on", x.dataset.tab === which));
+    document.querySelectorAll(".tabpane").forEach(x => x.classList.toggle("on", x.id === "pane-" + which));
   } catch (err) {
     if (String(err.message).includes("version mismatch")) {
       // 乐观锁过期:自动刷新缓存与表单,提示重试
@@ -799,8 +852,12 @@ function renderKeyRows(name, kv, hooks) {
     } catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-kdel]").forEach(b => b.onclick = async () => {
-    if (!confirm(`删除键 ${b.dataset.kdel}?`)) return;
-    try { await api.del(`/packages/${name}/keys/${encodeURIComponent(b.dataset.kdel)}`); renderKeysPane(name); }
+    if (!(await uiConfirm("删除键", `删除键 ${b.dataset.kdel}?`))) return;
+    try {
+      await api.del(`/packages/${name}/keys/${encodeURIComponent(b.dataset.kdel)}`);
+      msg(true, "已删除");
+      renderKeysPane(name);
+    }
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-krestore]").forEach(b => b.onclick = async () => {
@@ -849,10 +906,10 @@ async function renderKeyForm(name) {
   $("#keyformfields").innerHTML = (f.fields || []).map((slot, i) => {
     const nm = esc(slot.name || slot.description || "f" + i);
     const label = `<label>${esc(slot.description || slot.name || "字段 " + (i + 1))}${slot.required ? " *" : ""}</label>`;
-    if (slot.type === "bool") return `${label}<input type="checkbox" data-f="${i}" data-nm="${nm}">`;
-    if (slot.type === "enum") return `${label}<select data-f="${i}" data-nm="${nm}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select>`;
+    if (slot.type === "bool") return `<div class="slot">${label}<input type="checkbox" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
+    if (slot.type === "enum") return `<div class="slot">${label}<select data-f="${i}" data-nm="${nm}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select><span class="ferr" data-ferr="${i}"></span></div>`;
     const typ = slot.type === "int" || slot.type === "number" ? "number" : "text";
-    return `${label}<input type="${typ}" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span>`;
+    return `<div class="slot">${label}<input type="${typ}" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
   }).join("");
   const values = () => {
     const out = {};
