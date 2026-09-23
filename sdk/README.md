@@ -11,6 +11,27 @@ JS 部件开发工具集。部件契约与宿主面以 `ai-api-proxy.d.ts` 为�
 | [03 参数配置与 keys](docs/03-settings-keys.md) | settings 声明构建器与覆盖链、凭据(keys)生命周期与五钩子、手动管理兜底 |
 | [04 自定义代理协议](docs/04-protocol.md) | protocol 部件:两槽位、四钩子契约、对称性校验、configSchema/factory |
 
+## 插件包文件结构
+
+.aap 包 = zip。无单入口,文件按约定路径寻址、按需存在,manifest 不写 entry:
+
+```
+my-package/
+├── manifest.json          # 必需;包声明
+├── protocol.js            # protocol 部件(主包恰一)
+├── filters/
+│   └── <name>.js          # filter 部件(0..n,name 即路径)
+├── init.js                # 可选;加载钩子
+├── keys.js                # 可选;凭据五钩子
+├── settings.js            # 可选;hooks 参数声明
+├── tasks/
+│   └── <name>.js          # 定时任务体(路径即任务名)
+└── lib/
+    └── *.js               # 共享常量,包内 require
+```
+
+require 语义、crontab 行共用 entry 的例外、校验红线见 [01 文档](docs/01-getting-started.md)。
+
 ## 部件形态速览
 
 - protocol(主包恰一):**声明式单协议**。manifest 用 `parts.protocol.protocol` 声明唯一协议槽
