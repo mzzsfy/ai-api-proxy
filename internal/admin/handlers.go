@@ -348,7 +348,7 @@ func (d *Deps) deletePackage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(refs) > 0 {
-		httpError(w, http.StatusConflict, "package referenced by: "+strings.Join(refs, ","))
+		httpError(w, http.StatusConflict, "包被以下模型行引用: "+strings.Join(refs, ","))
 		return
 	}
 	if err := d.Packages.Delete(r.Context(), name); err != nil {
@@ -643,7 +643,7 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(refs) > 0 {
-			httpError(w, http.StatusConflict, "package referenced by: "+strings.Join(refs, ","))
+			httpError(w, http.StatusConflict, "包被以下模型行引用: "+strings.Join(refs, ","))
 			return
 		}
 	}

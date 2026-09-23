@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ai-api-proxy 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230F766E'/%3E%3Ctext x='16' y='22' font-size='16' font-family='monospace' fill='white' text-anchor='middle'%3Eai%3C/text%3E%3C/svg%3E">
 <style>
   /* 主题 token:浅色默认,html[data-theme=dark] 整组覆盖;canvas 用色经 JS 读变量 */
   :root {
@@ -182,7 +183,7 @@
   .chatbox .out { font-family:var(--mono); font-size:12.5px; line-height:1.6; white-space:pre-wrap;
                   background:var(--bg-hover); border:1px solid var(--line-soft); border-radius:8px;
                   padding:12px 14px; max-height:360px; overflow:auto; min-height:60px; }
-  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
 </head>
 <body>
@@ -193,6 +194,8 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => new Intl.NumberFormat("en-US").format(n);
+/* fmtDur 时长人性化:ms → ms/s/m+s */
+const fmtDur = ms => ms == null ? "—" : ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m${Math.round(ms % 60000 / 1000)}s`;
 
 /* ─── 主题:双主题切换 + canvas 重绘注册 ─── */
 const THEME_KEY = "theme";
@@ -219,7 +222,9 @@ const api = {
       opt.body = typeof body === "string" ? body : JSON.stringify(body);
       opt.headers["Content-Type"] = "application/json";
     }
-    const r = await fetch("/admin/api" + path, opt);
+    let r;
+    try { r = await fetch("/admin/api" + path, opt); }
+    catch (e) { throw new Error("无法连接服务(网络错误或服务未运行)"); }
     if (r.status === 401) {
       // 已在登录页(如登录失败)不重渲染,保留用户输入
       if (!document.querySelector("#lf")) show("login");
@@ -266,23 +271,31 @@ function uiModal(opts) {
     let settled = false;
     const field = mask.querySelector(".modal-input");
     if (field) { field.value = opts.value || ""; }
+    const prevFocus = document.activeElement;
     document.body.appendChild(mask);
     const done = v => {
       if (settled) return;
       settled = true;
       mask.remove();
       document.removeEventListener("keydown", onKey);
+      if (prevFocus && prevFocus.focus) prevFocus.focus(); // 焦点归还触发元素
       resolve(v);
     };
     const onKey = e => {
       if (e.key === "Escape") done(null);
-      else if (e.key === "Enter") done(field ? field.value : true);
+      else if (e.key === "Enter") {
+        // 焦点在弹窗按钮上时交给原生激活(确认框默认聚焦取消,Enter=取消,safe-to-fail)
+        const btn = document.activeElement && document.activeElement.closest && document.activeElement.closest(".modal button[data-act]");
+        if (btn) return;
+        done(field ? field.value : true);
+      }
     };
     document.addEventListener("keydown", onKey);
     mask.addEventListener("mousedown", e => { if (!mask.querySelector(".modal").contains(e.target)) done(null); });
     mask.querySelector("[data-act=cancel]").onclick = () => done(null);
     mask.querySelector("[data-act=ok]").onclick = () => done(field ? field.value : true);
-    if (field) field.select(); else mask.querySelector("[data-act=ok]").focus();
+    // 确认框(无输入)默认聚焦取消:误触 Enter/空格不会执行不可逆操作
+    if (field) field.select(); else mask.querySelector("[data-act=cancel]").focus();
   });
 }
 const uiConfirm = (title, body) => uiModal({ title: title, body: body }).then(v => v === true);
@@ -322,6 +335,7 @@ function shell(page, mainHTML) {
 }
 let navGen = 0; // 导航代次:页函数首个 await 后写 DOM 前校验,慢页后到不覆盖新页
 async function show(page) {
+  document.title = (page === "login" ? "控制台登录" : PAGE_NAMES[page] || "控制台") + " · ai-api-proxy";
   if (page === "login") {
     $("#app").innerHTML = `
       <div class="gate"><div class="panel">
@@ -392,7 +406,7 @@ async function showUpstreams(gen) {
   document.querySelectorAll("[data-e]").forEach(b => b.onclick = () => editModel(basePkgs, transports, ups.find(u => u.id == b.dataset.e)));
   document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => openChatTest(ups.find(u => u.id == b.dataset.c)));
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => withSpin(b, async () => {
-    try { const r = await api.post(`/models/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${r.latency_ms}ms` : ("失败: " + r.error)); }
+    try { const r = await api.post(`/models/${b.dataset.t}/test`, {}); msg(r.ok, r.ok ? `连通 ${fmtDur(r.latency_ms)}` : ("失败: " + r.error)); }
     catch (err) { msg(false, err.message); }
   }));
   document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
@@ -422,11 +436,12 @@ function openChatTest(u) {
   $("#chat-close").onclick = () => main.innerHTML = "";
   $("#chat-send").onclick = () => withSpin($("#chat-send"), async () => {
     const message = $("#chat-msg").value;
+    if (!message.trim()) { msg(false, "请输入消息内容"); return; }
     const out = $("#chat-out");
     out.textContent = "请求中…";
     try {
       const r = await api.post(`/models/${u.id}/chat-test`, { message });
-      const head = `${r.ok ? "成功" : "失败"} · status ${r.status ?? "-"} · ${r.latency_ms}ms`;
+      const head = `${r.ok ? "成功" : "失败"} · status ${r.status ?? "-"} · ${fmtDur(r.latency_ms)}`;
       out.textContent = head + "\n\n" + (r.body ? JSON.stringify(r.body, null, 2) : (r.error || ""));
       out.style.color = r.ok ? "var(--ink)" : "var(--err)";
     } catch (err) {
@@ -492,7 +507,7 @@ function editModel(basePkgs, transports, u, existing = []) {
   }
   $("#utr").value = curTransport;
   $("#cancelu").onclick = () => main.innerHTML = "";
-  $("#saveu").onclick = async () => {
+  $("#saveu").onclick = () => withSpin($("#saveu"), async () => {
     let extra = {};
     try { extra = JSON.parse($("#uparams").value || "{}"); }
     catch (e) { msg(false, "参数 JSON 非法"); return; }
@@ -520,7 +535,7 @@ function editModel(basePkgs, transports, u, existing = []) {
     }
     msg(true, names.length > 1 ? `已保存 ${names.length} 个模型行` : "已保存");
     main.innerHTML = ""; showUpstreams();
-  };
+  });
   main.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 /* ─── 插件管理:包生命周期(导入/导出/启停/卸载)+ 管理入口 ─── */
@@ -557,7 +572,7 @@ async function showPackages(gen) {
   // 启停
   document.querySelectorAll("[data-toggle]").forEach(b => b.onclick = async () => {
     const on = b.dataset.on !== "1";
-    try { await api.post(`/packages/${b.dataset.toggle}/enable`, { enabled: on }); showPackages(); }
+    try { await api.post(`/packages/${b.dataset.toggle}/enable`, { enabled: on }); msg(true, on ? "已启用" : "已停用"); showPackages(); }
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
@@ -703,15 +718,15 @@ function renderConfigPane(name) {
   $("#pane-config").innerHTML = `
     ${(st.config || []).map(slot => {
       const sch = slot.schema || {};
-      const label = `<label>${esc(sch.description || slot.name)} <span style="font-size:11px">${esc(slot.name)}${slot.overridden ? " · 已覆盖" : ""}</span></label>`;
+      const label = `<label for="cfg-${esc(slot.name)}">${esc(sch.description || slot.name)} <span style="font-size:11px">${esc(slot.name)}${slot.overridden ? " · 已覆盖" : ""}</span></label>`;
       const v = slot.value === undefined || slot.value === null ? "" : slot.value;
-      if (sch.type === "bool") return `<div class="slot">${label}<input type="checkbox" data-s="${esc(slot.name)}" ${slot.value ? "checked" : ""}></div>`;
-      if (sch.type === "enum") return `<div class="slot">${label}<select data-s="${esc(slot.name)}">${(sch.values || []).map(x => `<option ${x === slot.value ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></div>`;
+      if (sch.type === "bool") return `<div class="slot">${label}<input id="cfg-${esc(slot.name)}" type="checkbox" data-s="${esc(slot.name)}" ${slot.value ? "checked" : ""}></div>`;
+      if (sch.type === "enum") return `<div class="slot">${label}<select id="cfg-${esc(slot.name)}" data-s="${esc(slot.name)}">${(sch.values || []).map(x => `<option ${x === slot.value ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></div>`;
       const typ = sch.type === "int" || sch.type === "number" ? "number" : "text";
-      return `<div class="slot">${label}<input type="${typ}" data-s="${esc(slot.name)}" value="${esc(v)}"></div>`;
+      return `<div class="slot">${label}<input id="cfg-${esc(slot.name)}" type="${typ}" data-s="${esc(slot.name)}" value="${esc(v)}"></div>`;
     }).join("") || `<div class="muted">此包未声明配置项</div>`}
-    <div class="row"><button class="pri" id="cfgsave">保存配置</button> <button id="cfgreset">恢复默认</button> <span class="muted" id="cfgver">version ${st.version}</span></div>`;
-  $("#cfgsave").onclick = () => saveSettings(name, "config");
+    <div class="row"><button class="pri" id="cfgsave">保存配置</button> <button id="cfgreset">恢复默认</button> <span class="muted" id="cfgver">${st.version ? "更新于 " + new Date(st.version).toLocaleTimeString() : "未定制(默认值)"}</span></div>`;
+  $("#cfgsave").onclick = () => withSpin($("#cfgsave"), () => saveSettings(name, "config"));
   $("#cfgreset").onclick = () => resetConfigDefaults(name);
 }
 
@@ -745,8 +760,8 @@ function renderTasksPane(name) {
         ${t.overridden ? `<span class="muted" style="font-size:11px">已覆盖</span>` : ""}
         <button data-trun="${esc(t.name)}">测试</button> <span data-trres="${esc(t.name)}" class="muted"></span>
       </div>`).join("") || `<div class="muted">此包无定时任务</div>`}
-    <div class="row"><button class="pri" id="tasksave">保存任务改动</button></div>`;
-  $("#tasksave").onclick = () => saveSettings(name, "tasks");
+    ${(st.tasks || []).length ? `<div class="row"><button class="pri" id="tasksave">保存任务改动</button></div>` : ""}`;
+  const tsave = $("#tasksave"); if (tsave) tsave.onclick = () => saveSettings(name, "tasks");
   document.querySelectorAll("[data-trun]").forEach(b => b.onclick = () => withSpin(b, async () => {
     const tn = b.dataset.trun;
     const res = document.querySelector(`[data-trres="${CSS.escape(tn)}"]`);
@@ -756,7 +771,7 @@ function renderTasksPane(name) {
       const total = rs.reduce((a, x) => a + (x.duration_ms || 0), 0);
       const fails = rs.filter(x => !x.ok);
       if (fails.length) {
-        res.textContent = `✗ ${fails.length}/${rs.length} 键失败 · ${total}ms`;
+        res.textContent = `✗ ${fails.length}/${rs.length} 键失败 · ${fmtDur(total)}`;
         res.style.color = "var(--err)";
         msg(false, `任务 ${tn} 部分失败: ${fails.map(x => `${x.key || "(键)"}: ${x.error || "未知错误"}`).join("; ")}`);
       } else if (!rs.length) {
@@ -764,7 +779,7 @@ function renderTasksPane(name) {
         res.style.color = "var(--ok)";
         msg(true, `任务 ${tn} 执行完成(键池为空)`);
       } else {
-        res.textContent = `✓ ${rs.length} 键 · ${total}ms`;
+        res.textContent = `✓ ${rs.length} 键 · ${fmtDur(total)}`;
         res.style.color = "var(--ok)";
         msg(true, `任务 ${tn} 执行成功(${rs.length} 键,共 ${total}ms)`);
       }
@@ -844,7 +859,7 @@ async function renderKeysPane(name) {
       $("#keymanual").style.display = "block";
       prefillNewKey(kv);
     }
-    $("#addkey").onclick = () => addKey(name);
+    $("#addkey").onclick = () => withSpin($("#addkey"), () => addKey(name));
   } catch (err) { msg(false, err.message); }
 }
 
@@ -880,9 +895,11 @@ function renderKeyRows(name, kv, hooks) {
     catch (err) { msg(false, err.message); }
   });
   document.querySelectorAll("[data-krestore]").forEach(b => b.onclick = async () => {
+    if (!(await uiConfirm("恢复上一版", `将键 ${b.dataset.krestore} 的当前值与 prev 交换,确认恢复?`))) return;
     try {
       const d = await api.get(`/packages/${name}/keys/${encodeURIComponent(b.dataset.krestore)}/detail`);
       await api.put(`/packages/${name}/keys/${encodeURIComponent(b.dataset.krestore)}`, { value: d.prev, baseUpdatedAt: Number(d.updatedAt || 0) });
+      msg(true, "已恢复上一版");
       renderKeysPane(name);
     } catch (err) { msg(false, err.message); }
   });
@@ -895,7 +912,7 @@ async function editKey(name, kv, key) {
   let val;
   try { val = JSON.parse(v); } catch { msg(false, "值不是合法 JSON"); return; }
   api.put(`/packages/${name}/keys/${encodeURIComponent(key)}`, { value: val, baseUpdatedAt: Number(cur ? cur.updatedAt : 0) })
-    .then(() => renderKeysPane(name))
+    .then(() => { msg(true, "已保存"); renderKeysPane(name); })
     .catch(err => msg(false, err.message));
 }
 
@@ -924,11 +941,11 @@ async function renderKeyForm(name) {
   $("#keyformbox").style.display = "block";
   $("#keyformfields").innerHTML = (f.fields || []).map((slot, i) => {
     const nm = esc(slot.name || slot.description || "f" + i);
-    const label = `<label>${esc(slot.description || slot.name || "字段 " + (i + 1))}${slot.required ? " *" : ""}</label>`;
-    if (slot.type === "bool") return `<div class="slot">${label}<input type="checkbox" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
-    if (slot.type === "enum") return `<div class="slot">${label}<select data-f="${i}" data-nm="${nm}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select><span class="ferr" data-ferr="${i}"></span></div>`;
+    const label = `<label for="kf-${i}">${esc(slot.description || slot.name || "字段 " + (i + 1))}${slot.required ? " *" : ""}</label>`;
+    if (slot.type === "bool") return `<div class="slot">${label}<input id="kf-${i}" type="checkbox" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
+    if (slot.type === "enum") return `<div class="slot">${label}<select id="kf-${i}" data-f="${i}" data-nm="${nm}">${(slot.values || []).map(v => `<option>${esc(v)}</option>`).join("")}</select><span class="ferr" data-ferr="${i}"></span></div>`;
     const typ = slot.type === "int" || slot.type === "number" ? "number" : "text";
-    return `<div class="slot">${label}<input type="${typ}" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
+    return `<div class="slot">${label}<input id="kf-${i}" type="${typ}" data-f="${i}" data-nm="${nm}"><span class="ferr" data-ferr="${i}"></span></div>`;
   }).join("");
   const values = () => {
     const out = {};
@@ -1047,9 +1064,9 @@ async function loadHistory(gen) {
     <tr><th>时间</th><th>模型</th><th>上游</th><th>目标</th><th>状态</th><th>耗时</th><th>路径</th></tr>
     ${items.map(e => `<tr data-id="${e.id}" style="cursor:pointer">
       <td class="num">${new Date(e.ts).toLocaleString()}</td>
-      <td>${esc(e.model)}</td><td>${esc(e.upstream)}</td><td>${esc(e.target || "—")}</td>
+      <td>${esc(e.model)}</td><td>${esc(e.upstream || "—")}</td><td>${esc(e.target || "—")}</td>
       <td class="num" style="${histStatusColor(e.status)}">${e.status}</td>
-      <td class="num">${fmt(e.duration_ms)}ms</td>
+      <td class="num">${fmtDur(e.duration_ms)}</td>
       <td>${esc(e.path)}${e.stream ? ' <span class="badge">流</span>' : ""}</td>
     </tr>`).join("")}</table>${histPagerHTML(r)}` : `<div class="empty">暂无请求历史</div>`;
   document.querySelectorAll("#his-table tr[data-id]").forEach(tr => tr.onclick = () => openHistoryDetail(tr.dataset.id));
@@ -1082,7 +1099,7 @@ async function openHistoryDetail(id) {
   box.innerHTML = `
     <div class="card">
       <div class="titlerow"><h3 style="margin:0">#${e.id} ${esc(e.method)} ${esc(e.path)}</h3><button id="his-close">关闭</button></div>
-      <div class="row muted">${new Date(e.ts).toLocaleString()} · 模型 ${esc(e.model || "—")} · 上游 ${esc(e.upstream || "—")} · 目标 ${esc(e.target || "—")} · 状态 ${e.status} · ${fmt(e.duration_ms)}ms${e.stream ? " · 流式" : ""}</div>
+      <div class="row muted">${new Date(e.ts).toLocaleString()} · 模型 ${esc(e.model || "—")} · 上游 ${esc(e.upstream || "—")} · 目标 ${esc(e.target || "—")} · 状态 ${e.status} · ${fmtDur(e.duration_ms)}${e.stream ? " · 流式" : ""}</div>
       <h3>请求体</h3>
       <pre class="log">${esc(pretty(e.request_body))}</pre>
       <h3>响应体${e.stream ? "(流式不记录)" : ""}</h3>
@@ -1166,7 +1183,7 @@ async function showMonitor(gen) {
     span.textContent = "测试中…";
     try {
       const r = await api.post(`/transports/${b.dataset.tt}/test`, {});
-      span.textContent = r.ok ? `通 ${r.latency_ms}ms` : `断: ${r.error}`;
+      span.textContent = r.ok ? `通 ${fmtDur(r.latency_ms)}` : `断: ${r.error}`;
       span.style.color = r.ok ? "var(--ok)" : "var(--err)";
     } catch (err) { span.textContent = err.message; span.style.color = "var(--err)"; }
   }));
@@ -1191,7 +1208,7 @@ function aggregateDim(series, field) {
 function renderDimTable(holder, dim, withConc) {
   const keys = Object.keys(dim).sort((a, b) => dim[b].requests - dim[a].requests);
   const box = $("#" + holder);
-  if (!keys.length) { box.innerHTML = `<div class="empty">暂无数据</div>`; return; }
+  if (!keys.length) { box.innerHTML = `<div class="muted">暂无数据</div>`; return; }
   box.innerHTML = `<table>
     <tr><th>键</th><th>请求数</th><th>错误数</th><th>错误率</th>${withConc ? "<th>并发峰值</th>" : ""}</tr>
     ${keys.map(k => {
