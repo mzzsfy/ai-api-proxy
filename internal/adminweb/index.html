@@ -319,7 +319,7 @@ function shell(page, mainHTML) {
     sessionStorage.removeItem("in"); show("login");
   };
 }
-function show(page) {
+async function show(page) {
   if (page === "login") {
     $("#app").innerHTML = `
       <div class="gate"><div class="panel">
@@ -350,7 +350,17 @@ function show(page) {
     return;
   }
   shell(page, `<h2>${PAGE_NAMES[page]}</h2><div class="muted">载入中…</div>`);
-  PAGES[page]();
+  // 页面加载统一兜底:失败(如服务重启中)渲染错误态+重试,避免卡死"载入中…"
+  try {
+    await PAGES[page]();
+  } catch (err) {
+    const main = $("#main");
+    if (err && err.message === "登录已过期") return; // 401 已跳登录页
+    if (!main.innerHTML.includes("载入中")) return;  // 页面自身已渲染错误态(如监控页)
+    main.innerHTML = `<h2>${PAGE_NAMES[page]}</h2>
+      <div class="empty">页面数据加载失败: ${esc(err.message)}<br><button class="pri" id="page-retry">重试</button></div>`;
+    $("#page-retry").onclick = () => show(page);
+  }
 }
 /* ─── 模型管理(v2:行名即模型名,单包绑定,参数=行 params 覆盖包参数) ─── */
 async function showUpstreams() {
@@ -429,7 +439,7 @@ function editModel(basePkgs, transports, u, existing = []) {
   const trOpts = ['<option value="">direct(内置直连)</option>']
     .concat((transports || []).map(t => `<option value="${esc(t.name)}">${esc(t.name)}</option>`)).join("");
   const curTransport = (u.params && u.params.transport) || "";
-  const splitModelNames = raw => raw.split(/[\s,，]+/).map(s => s.trim()).filter(Boolean);
+  const splitModelNames = raw => raw.split(/[\s,，、;；]+/).map(s => s.trim()).filter(Boolean);
   const modelNames = isNew ? [] : null;
   const renderModelRows = () => {
     $("#model-list").innerHTML = modelNames.map((name, i) => `
