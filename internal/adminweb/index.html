@@ -918,7 +918,7 @@ async function renderKeyForm(name) {
       if (!el) return;
       const nm = el.dataset.nm || slot.name || slot.description || `f${i}`;
       if (el.type === "checkbox") out[nm] = el.checked;
-      else if (el.type === "number") out[nm] = Number(el.value);
+      else if (el.type === "number") out[nm] = el.value === "" ? undefined : Number(el.value);
       else out[nm] = el.value;
     });
     return out;
