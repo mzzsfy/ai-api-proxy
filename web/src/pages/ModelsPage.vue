@@ -11,19 +11,26 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NInputNumber,
   NModal,
   NSelect,
   NTag,
   useMessage,
   type DataTableColumns,
 } from 'naive-ui'
-import { AddOutline, ChatbubbleEllipsesOutline, PlayOutline, TrashOutline } from '@vicons/ionicons5'
+import {
+  AddOutline,
+  ChatbubbleEllipsesOutline,
+  GitNetworkOutline,
+  PlayOutline,
+  TrashOutline,
+} from '@vicons/ionicons5'
 import { api } from '@/services/api'
-import type { ModelRow } from '@/services/types'
+import type { DiscoveryHit, DiscoveryRule, GroupMember, ModelGroup } from '@/services/types'
 
 const message = useMessage()
 
-const modelsQuery = useQuery({ queryKey: ['models'], queryFn: api.models.list })
+const groupsQuery = useQuery({ queryKey: ['groups'], queryFn: api.groups.list })
 const packagesQuery = useQuery({ queryKey: ['packages'], queryFn: api.packages.list })
 const transportsQuery = useQuery({ queryKey: ['transports'], queryFn: api.transports.list })
 
@@ -36,10 +43,10 @@ const pluginOptions = computed(() =>
   (packagesQuery.data.value ?? []).filter((p) => p.hasProtocol).map((p) => ({ label: p.title || p.name, value: p.name })),
 )
 
-// 编辑态: name/plugin 不可改, transport 从 params 拆出独立编辑
+// ── 组编辑(抽屉;plugin 编辑态不可改, transport 从 params 拆出独立编辑)──
 const editOpen = ref(false)
 const editId = ref<number | null>(null)
-const editName = ref('')
+const editPrefix = ref('')
 const editPlugin = ref('')
 const editEnabled = ref(true)
 const editTransport = ref('')
@@ -52,7 +59,7 @@ function paramsWithoutTransport(params: Record<string, unknown>): string {
 
 function openCreate() {
   editId.value = null
-  editName.value = ''
+  editPrefix.value = ''
   editPlugin.value = pluginOptions.value[0]?.value ?? ''
   editEnabled.value = true
   editTransport.value = ''
@@ -60,9 +67,9 @@ function openCreate() {
   editOpen.value = true
 }
 
-function openEdit(row: ModelRow) {
+function openEdit(row: ModelGroup) {
   editId.value = row.id
-  editName.value = row.name
+  editPrefix.value = row.prefix
   editPlugin.value = row.plugin
   editEnabled.value = row.enabled
   editTransport.value = typeof row.params['transport'] === 'string' ? row.params['transport'] : ''
@@ -80,30 +87,18 @@ async function saveEdit() {
   }
   if (editTransport.value) params['transport'] = editTransport.value
   else delete params['transport']
-
+  if (!editPrefix.value.trim()) {
+    message.error('前缀不能为空')
+    return
+  }
   try {
     if (editId.value === null) {
-      const names = parseBatchNames(editName.value)
-      if (!names.length) {
-        message.error('模型名不能为空')
-        return
-      }
-      let saved = 0
-      let firstError = ''
-      for (const name of names) {
-        try {
-          await api.models.create({ id: 0, name, plugin: editPlugin.value, params, enabled: editEnabled.value })
-          saved += 1
-        } catch (err) {
-          firstError ||= err instanceof Error ? err.message : '未知错误'
-        }
-      }
-      if (saved === names.length) message.success(`已保存 ${saved}/${names.length}`)
-      else message.error(`已保存 ${saved}/${names.length}, 首个失败: ${firstError}`)
+      await api.groups.create({ prefix: editPrefix.value.trim(), plugin: editPlugin.value, params, enabled: editEnabled.value })
+      message.success('已创建组')
     } else {
-      await api.models.update(editId.value, {
+      await api.groups.update(editId.value, {
         id: editId.value,
-        name: editName.value,
+        prefix: editPrefix.value.trim(),
         plugin: editPlugin.value,
         params,
         enabled: editEnabled.value,
@@ -111,25 +106,33 @@ async function saveEdit() {
       message.success('已保存')
     }
     editOpen.value = false
-    await modelsQuery.refetch()
+    await groupsQuery.refetch()
   } catch (err) {
     message.error(err instanceof Error ? err.message : '保存失败')
   }
 }
 
-function parseBatchNames(raw: string): string[] {
-  const names = raw.split(/[,，;；、\s]+/).map((s) => s.trim()).filter(Boolean)
-  return [...new Set(names)]
+// ── 组级测试/对话测试/删除 ──
+async function runTest(row: ModelGroup) {
+  try {
+    const result = await api.groups.test(row.id)
+    if (result.ok) message.success(`${row.prefix} 连通 ${result.latency_ms}ms`)
+    else message.error(`${row.prefix} 失败: ${result.error ?? '未知错误'}`)
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '测试失败')
+  }
 }
 
 const chatOpen = ref(false)
-const chatModelId = ref<number | null>(null)
+const chatGroupId = ref<number | null>(null)
+const chatGroupLabel = ref('')
 const chatMessage = ref('')
 const chatBusy = ref(false)
 const chatResult = ref<string>('')
 
-function openChatTest(row: ModelRow) {
-  chatModelId.value = row.id
+function openChatTest(row: ModelGroup) {
+  chatGroupId.value = row.id
+  chatGroupLabel.value = row.prefix
   chatMessage.value = ''
   chatResult.value = ''
   chatOpen.value = true
@@ -140,10 +143,10 @@ async function runChatTest() {
     message.warning('请输入测试消息')
     return
   }
-  if (chatModelId.value === null || chatBusy.value) return
+  if (chatGroupId.value === null || chatBusy.value) return
   chatBusy.value = true
   try {
-    const result = await api.models.chatTest(chatModelId.value, chatMessage.value)
+    const result = await api.groups.chatTest(chatGroupId.value, chatMessage.value)
     const bodyText = typeof result.body === 'string' ? result.body : JSON.stringify(result.body, null, 2)
     chatResult.value = [
       `ok: ${result.ok}`,
@@ -159,34 +162,209 @@ async function runChatTest() {
   }
 }
 
-const deleting = ref<ModelRow | null>(null)
+const deleting = ref<ModelGroup | null>(null)
 
 async function confirmDelete() {
   if (!deleting.value) return
   try {
-    await api.models.remove(deleting.value.id)
+    await api.groups.remove(deleting.value.id)
     message.success('已删除')
     deleting.value = null
-    await modelsQuery.refetch()
+    await groupsQuery.refetch()
   } catch (err) {
     message.error(err instanceof Error ? err.message : '删除失败')
   }
 }
 
-async function runTest(row: ModelRow) {
+// ── 成员管理(弹窗)──
+const membersOpen = ref(false)
+const membersGroup = ref<ModelGroup | null>(null)
+const membersQuery = useQuery({
+  queryKey: computed(() => ['members', membersGroup.value?.id]),
+  queryFn: () => api.groups.members(membersGroup.value!.id),
+  enabled: computed(() => membersGroup.value !== null),
+})
+const newMemberName = ref('')
+const newMemberEnabled = ref(false)
+
+function openMembers(row: ModelGroup) {
+  membersGroup.value = row
+  newMemberName.value = ''
+  newMemberEnabled.value = false
+  membersOpen.value = true
+}
+
+async function addMember() {
+  const name = newMemberName.value.trim()
+  if (!name || !membersGroup.value) {
+    message.error('成员名不能为空')
+    return
+  }
   try {
-    const result = await api.models.test(row.id)
-    if (result.ok) message.success(`${row.name} 连通 ${result.latency_ms}ms`)
-    else message.error(`${row.name} 失败: ${result.error ?? '未知错误'}`)
+    await api.groups.createMember(membersGroup.value.id, { name, enabled: newMemberEnabled.value })
+    newMemberName.value = ''
+    await membersQuery.refetch()
   } catch (err) {
-    message.error(err instanceof Error ? err.message : '测试失败')
+    message.error(err instanceof Error ? err.message : '添加失败')
   }
 }
 
-const columns: DataTableColumns<ModelRow> = [
+async function toggleMember(member: GroupMember) {
+  if (!membersGroup.value) return
+  try {
+    await api.groups.updateMember(member.id, { group_id: member.group_id, name: member.name, enabled: !member.enabled })
+    await membersQuery.refetch()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '更新失败')
+  }
+}
+
+const deletingMember = ref<GroupMember | null>(null)
+
+async function confirmDeleteMember() {
+  if (!deletingMember.value) return
+  try {
+    await api.groups.removeMember(deletingMember.value.id)
+    deletingMember.value = null
+    await membersQuery.refetch()
+    await groupsQuery.refetch()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '删除失败')
+  }
+}
+
+const memberColumns: DataTableColumns<GroupMember> = [
   { title: 'ID', key: 'id', width: 70 },
-  { title: '模型名', key: 'name', width: 200, ellipsis: { tooltip: true } },
-  { title: '插件包', key: 'plugin', width: 160 },
+  { title: '短名', key: 'name', ellipsis: { tooltip: true } },
+  {
+    title: '状态',
+    key: 'enabled',
+    width: 80,
+    render: (row) =>
+      h(NTag, { size: 'small', type: row.enabled ? 'success' : 'default' }, { default: () => (row.enabled ? '启用' : '停用') }),
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 140,
+    render: (row) => [
+      h(NButton, { size: 'small', onClick: () => toggleMember(row) }, { default: () => (row.enabled ? '停用' : '启用') }),
+      h(
+        NButton,
+        { size: 'small', type: 'error', quaternary: true, style: 'margin-left:6px', onClick: () => (deletingMember.value = row) },
+        { icon: () => h(NIcon, { component: TrashOutline }) },
+      ),
+    ],
+  },
+]
+
+// ── 模型发现(弹窗:规则管道 + 预览 + 导入)──
+interface RuleRow {
+  op: 'only' | 'exclude' | 'rename' | 'limit'
+  regex: string
+  from: string
+  to: string
+  limit: number | null
+}
+
+function emptyRule(): RuleRow {
+  return { op: 'only', regex: '', from: '', to: '', limit: null }
+}
+
+const discoverOpen = ref(false)
+const discoverGroup = ref<ModelGroup | null>(null)
+const discoverRules = ref<RuleRow[]>([emptyRule()])
+const discoverEnabled = ref(false)
+const discoverBusy = ref(false)
+const discoverPreview = ref<DiscoveryHit[] | null>(null)
+const discoverFetched = ref(0)
+
+const opOptions = [
+  { label: 'only(保留匹配)', value: 'only' },
+  { label: 'exclude(丢弃匹配)', value: 'exclude' },
+  { label: 'rename(改名)', value: 'rename' },
+  { label: 'limit(截断)', value: 'limit' },
+]
+
+function openDiscover(row: ModelGroup) {
+  discoverGroup.value = row
+  discoverRules.value = [emptyRule()]
+  discoverEnabled.value = false
+  discoverPreview.value = null
+  discoverFetched.value = 0
+  discoverOpen.value = true
+}
+
+function toRequestRules(rules: RuleRow[]): DiscoveryRule[] {
+  return rules.map((r) => {
+    switch (r.op) {
+      case 'rename':
+        return { op: r.op, from: r.from, to: r.to }
+      case 'limit':
+        return { op: r.op, limit: r.limit ?? 50 }
+      default:
+        return { op: r.op, regex: r.regex }
+    }
+  })
+}
+
+async function runDiscover(apply: boolean) {
+  if (!discoverGroup.value || discoverBusy.value) return
+  if (!apply && discoverPreview.value !== null) {
+    // 已预览过再点预览:直接复用,避免重复外呼
+    return
+  }
+  discoverBusy.value = true
+  try {
+    const result = await api.groups.discover(discoverGroup.value.id, toRequestRules(discoverRules.value), discoverEnabled.value, apply)
+    discoverPreview.value = result.models
+    discoverFetched.value = result.fetched_total
+    if (apply) {
+      message.success(`导入完成: 新建 ${result.applied?.created ?? 0},跳过 ${result.applied?.skipped ?? 0}`)
+      await groupsQuery.refetch()
+      if (membersGroup.value?.id === discoverGroup.value.id) await membersQuery.refetch()
+      discoverOpen.value = false
+    } else {
+      message.success(`上游共 ${result.fetched_total} 个模型,匹配 ${result.models.length} 个`)
+    }
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '发现失败')
+  } finally {
+    discoverBusy.value = false
+  }
+}
+
+function rulePlaceholder(field: 'regex' | 'from' | 'to', op: RuleRow['op']): string {
+  if (op === 'rename') return field === 'from' ? '^gemini-' : '替换为(可空)'
+  return field === 'regex' ? '^gemini' : ''
+}
+
+const discoverColumns: DataTableColumns<DiscoveryHit> = [
+  { title: '上游模型名', key: 'upstream_name', ellipsis: { tooltip: true } },
+  { title: '落库成员名', key: 'member_name', ellipsis: { tooltip: true } },
+  {
+    title: '动作',
+    key: 'action',
+    width: 200,
+    render: (row) =>
+      h('span', null, [
+        h(
+          NTag,
+          { size: 'small', type: row.action === 'create' ? 'success' : 'default' },
+          { default: () => (row.action === 'create' ? '新建' : '已存在跳过') },
+        ),
+        row.action === 'create' && row.poll_groups > 0
+          ? h('span', { style: 'margin-left:6px;color:var(--n-warning-color, #f0a020)' }, `轮询×${row.poll_groups + 1}`)
+          : null,
+      ]),
+  },
+]
+
+// ── 组表格 ──
+const columns: DataTableColumns<ModelGroup> = [
+  { title: 'ID', key: 'id', width: 70 },
+  { title: '前缀', key: 'prefix', width: 160, ellipsis: { tooltip: true } },
+  { title: '插件包', key: 'plugin', width: 180 },
   {
     title: 'params',
     key: 'params',
@@ -202,9 +380,11 @@ const columns: DataTableColumns<ModelRow> = [
   {
     title: '操作',
     key: 'actions',
-    width: 280,
+    width: 400,
     render: (row) => [
-      h(NButton, { size: 'small', onClick: () => openEdit(row) }, { default: () => '编辑' }),
+      h(NButton, { size: 'small', onClick: () => openMembers(row) }, { default: () => '成员' }),
+      h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openDiscover(row) }, { icon: () => h(NIcon, { component: GitNetworkOutline }) }),
+      h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openEdit(row) }, { default: () => '编辑' }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => runTest(row) }, { icon: () => h(NIcon, { component: PlayOutline }) }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openChatTest(row) }, { icon: () => h(NIcon, { component: ChatbubbleEllipsesOutline }) }),
       h(NButton, { size: 'small', type: 'error', quaternary: true, style: 'margin-left:6px', onClick: () => (deleting.value = row) }, { icon: () => h(NIcon, { component: TrashOutline }) }),
@@ -218,30 +398,26 @@ const columns: DataTableColumns<ModelRow> = [
     <div class="page-header">
       <div>
         <h1>模型管理</h1>
-        <p class="subtitle">共 {{ modelsQuery.data.value?.length ?? 0 }} 行</p>
+        <p class="subtitle">共 {{ groupsQuery.data.value?.length ?? 0 }} 组;请求支持「前缀/成员名」全路径或无歧义短名</p>
       </div>
       <NButton type="primary" @click="openCreate">
         <template #icon><NIcon :component="AddOutline" /></template>
-        新建模型行
+        新建模型组
       </NButton>
     </div>
 
     <NDataTable
       :columns="columns"
-      :data="modelsQuery.data.value ?? []"
-      :loading="modelsQuery.isLoading.value"
+      :data="groupsQuery.data.value ?? []"
+      :loading="groupsQuery.isLoading.value"
       size="small"
     />
 
     <NDrawer v-model:show="editOpen" :width="480" placement="right">
-      <NDrawerContent :title="editId === null ? '新建模型行' : `编辑 #${editId}`" closable>
+      <NDrawerContent :title="editId === null ? '新建模型组' : `编辑组 #${editId}`" closable>
         <NForm label-placement="top">
-          <NFormItem label="模型名(新建支持批量: 逗号/空格分隔)">
-            <NInput
-              v-model:value="editName"
-              :disabled="editId !== null"
-              :placeholder="editId === null ? 'gpt-4o, claude-sonnet …' : ''"
-            />
+          <NFormItem label="前缀(全路径请求的命名空间,不可含 /)">
+            <NInput v-model:value="editPrefix" placeholder="opencode" />
           </NFormItem>
           <NFormItem v-if="editId !== null" label="插件包">
             <NInput :value="editPlugin" disabled />
@@ -264,9 +440,74 @@ const columns: DataTableColumns<ModelRow> = [
     </NDrawer>
 
     <NModal
+      v-model:show="membersOpen"
+      preset="card"
+      class="members-modal"
+      :title="`成员管理 — ${membersGroup?.prefix ?? ''}`"
+    >
+      <div style="display: flex; gap: 8px; margin-bottom: 12px">
+        <NInput v-model:value="newMemberName" placeholder="成员短名(如 gpt-4o,可含 /)" @keyup.enter="addMember" />
+        <NCheckbox v-model:checked="newMemberEnabled" style="align-self: center; white-space: nowrap">直接启用</NCheckbox>
+        <NButton type="primary" @click="addMember">添加</NButton>
+      </div>
+      <NDataTable
+        :columns="memberColumns"
+        :data="membersQuery.data.value ?? []"
+        :loading="membersQuery.isLoading.value"
+        size="small"
+        :max-height="360"
+      />
+    </NModal>
+
+    <NModal
+      v-model:show="discoverOpen"
+      preset="card"
+      class="discover-modal"
+      :title="`模型发现 — ${discoverGroup?.prefix ?? ''}`"
+    >
+      <p class="discover-hint">
+        从上游 /v1/models 拉取列表,按规则管道过滤改名。至少需要一条 only/exclude 规则。
+      </p>
+      <div v-for="(rule, i) in discoverRules" :key="i" class="rule-row">
+        <NSelect v-model:value="rule.op" :options="opOptions" style="width: 190px" />
+        <NInput
+          v-if="rule.op === 'only' || rule.op === 'exclude'"
+          v-model:value="rule.regex"
+          :placeholder="rulePlaceholder('regex', rule.op)"
+          class="mono"
+        />
+        <template v-else-if="rule.op === 'rename'">
+          <NInput v-model:value="rule.from" :placeholder="rulePlaceholder('from', rule.op)" class="mono" />
+          <NInput v-model:value="rule.to" :placeholder="rulePlaceholder('to', rule.op)" class="mono" />
+        </template>
+        <NInputNumber v-else v-model:value="rule.limit" :min="1" placeholder="上限" style="width: 140px" />
+        <NButton quaternary type="error" @click="discoverRules.splice(i, 1)">删</NButton>
+      </div>
+      <NButton size="small" style="margin-top: 8px" @click="discoverRules.push(emptyRule())">加一条规则</NButton>
+      <div style="margin-top: 12px">
+        <NCheckbox v-model:checked="discoverEnabled">导入后直接启用(默认停用,待人工确认)</NCheckbox>
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 8px">
+        <NButton :loading="discoverBusy" @click="discoverPreview = null; runDiscover(false)">预览</NButton>
+        <NButton type="primary" :loading="discoverBusy" @click="runDiscover(true)">导入</NButton>
+        <span v-if="discoverPreview !== null" class="discover-hint" style="align-self: center">
+          上游 {{ discoverFetched }} 个,匹配 {{ discoverPreview.length }} 个
+        </span>
+      </div>
+      <NDataTable
+        v-if="discoverPreview !== null"
+        :columns="discoverColumns"
+        :data="discoverPreview"
+        size="small"
+        :max-height="320"
+        style="margin-top: 12px"
+      />
+    </NModal>
+
+    <NModal
       v-model:show="chatOpen"
       preset="card"
-      :title="`对话测试 #${chatModelId}`"
+      :title="`对话测试 — ${chatGroupLabel}`"
       class="chat-modal"
     >
       <NInput v-model:value="chatMessage" type="text" placeholder="测试消息" @keyup.enter="runChatTest" />
@@ -280,20 +521,51 @@ const columns: DataTableColumns<ModelRow> = [
       :show="deleting !== null"
       preset="dialog"
       type="warning"
-      title="删除模型行"
-      :content="`确认删除 ${deleting?.name ?? ''} ?删除后需重新创建。`"
+      title="删除模型组"
+      :content="`确认删除组 ${deleting?.prefix ?? ''} ?组内成员一并删除。`"
       positive-text="删除"
       negative-text="取消"
       @positive-click="confirmDelete"
       @negative-click="deleting = null"
       @update:show="(v: boolean) => { if (!v) deleting = null }"
     />
+
+    <NModal
+      :show="deletingMember !== null"
+      preset="dialog"
+      type="warning"
+      title="删除成员"
+      :content="`确认删除成员 ${deletingMember?.name ?? ''} ?`"
+      positive-text="删除"
+      negative-text="取消"
+      @positive-click="confirmDeleteMember"
+      @negative-click="deletingMember = null"
+      @update:show="(v: boolean) => { if (!v) deletingMember = null }"
+    />
   </div>
 </template>
 
 <style scoped>
-.chat-modal {
+.chat-modal,
+.members-modal {
   width: min(680px, 92vw);
+}
+
+.discover-modal {
+  width: min(760px, 94vw);
+}
+
+.discover-hint {
+  color: var(--n-text-color-disabled, rgba(128, 128, 128, 0.8));
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.rule-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
 .chat-result {

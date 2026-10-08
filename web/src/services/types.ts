@@ -25,12 +25,40 @@ export type MetricsSeriesRow = {
   by_package: Record<string, UpstreamCounters> | null
 }
 
-export type ModelRow = {
+export type ModelGroup = {
   id: number
-  name: string
+  prefix: string
   plugin: string
   params: Record<string, unknown>
   enabled: boolean
+}
+
+export type GroupMember = {
+  id: number
+  group_id: number
+  name: string
+  enabled: boolean
+}
+
+export type DiscoveryRule = {
+  op: 'only' | 'exclude' | 'rename' | 'limit'
+  regex?: string
+  from?: string
+  to?: string
+  limit?: number
+}
+
+export type DiscoveryHit = {
+  upstream_name: string
+  member_name: string
+  action: 'create' | 'skip_exists'
+  poll_groups: number
+}
+
+export type DiscoveryResult = {
+  fetched_total: number
+  models: DiscoveryHit[]
+  applied?: { created: number; skipped: number }
 }
 
 export type TestResult = {

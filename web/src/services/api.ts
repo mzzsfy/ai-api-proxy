@@ -1,6 +1,9 @@
 import { get, post, postRaw, put, del } from './http'
 import type {
   ChatTestResult,
+  DiscoveryResult,
+  DiscoveryRule,
+  GroupMember,
   HistoryEntry,
   HistoryPage,
   InspectSummary,
@@ -9,7 +12,7 @@ import type {
   KeysView,
   MetricsLive,
   MetricsSeriesRow,
-  ModelRow,
+  ModelGroup,
   PackageInfo,
   PackageSettings,
   TaskResultRow,
@@ -22,15 +25,23 @@ export const packageExportUrl = (name: string) => `/admin/api/packages/${encodeU
 export const packageTemplateUrl = '/packages/template'
 
 export const api = {
-  models: {
-    list: () => get<ModelRow[]>('/models'),
-    create: (model: Omit<ModelRow, 'id'> & { id?: number }) =>
-      post<{ ok: true; id: number }>('/models', model),
-    update: (id: number, model: ModelRow) => put<{ ok: true; id: number }>(`/models/${id}`, model),
-    remove: (id: number) => del(`/models/${id}`),
-    test: (id: number) => post<TestResult>(`/models/${id}/test`),
+  groups: {
+    list: () => get<ModelGroup[]>('/groups'),
+    create: (group: Omit<ModelGroup, 'id'>) => post<{ ok: true; id: number }>('/groups', group),
+    update: (id: number, group: Omit<ModelGroup, 'id'> & { id: number }) =>
+      put<{ ok: true; id: number }>(`/groups/${id}`, group),
+    remove: (id: number) => del(`/groups/${id}`),
+    test: (id: number) => post<TestResult>(`/groups/${id}/test`),
     chatTest: (id: number, message: string) =>
-      post<ChatTestResult>(`/models/${id}/chat-test`, { message }),
+      post<ChatTestResult>(`/groups/${id}/chat-test`, { message }),
+    members: (id: number) => get<GroupMember[]>(`/groups/${id}/members`),
+    createMember: (groupId: number, member: { name: string; enabled: boolean }) =>
+      post<{ ok: true; id: number }>(`/groups/${groupId}/members`, member),
+    updateMember: (id: number, member: { group_id: number; name: string; enabled: boolean }) =>
+      put<{ ok: true; id: number }>(`/members/${id}`, member),
+    removeMember: (id: number) => del(`/members/${id}`),
+    discover: (id: number, rules: DiscoveryRule[], enabled: boolean, apply: boolean) =>
+      post<DiscoveryResult>(`/groups/${id}/discover`, { rules, enabled, apply }),
   },
 
   packages: {
