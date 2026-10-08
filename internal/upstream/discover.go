@@ -32,7 +32,7 @@ type DiscoveryHit struct {
 	UpstreamName string `json:"upstream_name"` // 上游返回的模型名
 	MemberName   string `json:"member_name"`   // 规则管道后的成员名
 	Action       string `json:"action"`        // create|skip_exists
-	PollGroups   int    `json:"poll_groups"`   // 同短名启用组数(create 时 >0 即落库后参与轮询)
+	PollGroups   int    `json:"poll_groups"`   // 同短名启用组数(含本组;>1 即落库后参与轮询)
 }
 
 // DiscoveryApplied 落库计数(Apply=true 时返回)
@@ -43,8 +43,8 @@ type DiscoveryApplied struct {
 
 // DiscoveryResult 发现结果
 type DiscoveryResult struct {
-	FetchedTotal int             `json:"fetched_total"` // 上游返回模型总数(过滤前)
-	Models       []DiscoveryHit  `json:"models"`
+	FetchedTotal int               `json:"fetched_total"` // 上游返回模型总数(过滤前)
+	Models       []DiscoveryHit    `json:"models"`
 	Applied      *DiscoveryApplied `json:"applied,omitempty"`
 }
 
@@ -218,7 +218,10 @@ func fetchUpstreamModels(ctx context.Context, hc *http.Client, style, baseURL st
 		auth(req.Header)
 	}
 	if style == "anthropic" {
-		req.Header.Set("x-api-key", req.Header.Get("Authorization"))
+		// anthropic 用裸 key(x-api-key),剥离 Bearer 前缀;无键不发空头
+		if auth := req.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			req.Header.Set("x-api-key", strings.TrimPrefix(auth, "Bearer "))
+		}
 		req.Header.Del("Authorization")
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}

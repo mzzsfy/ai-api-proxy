@@ -32,9 +32,9 @@ const (
 
 // 部件路径约定(manifest 不写 entry:约定即路径)
 const (
-	ProtocolEntry      = "protocol.js"             // protocol 单例部件固定路径
-	FilterEntryPrefix  = "filters/"                // filter 部件 = filters/<name>.js
-	HooksTaskEntryFmt  = "tasks/%s.js"             // hooks 任务缺省 = tasks/<name>.js
+	ProtocolEntry     = "protocol.js" // protocol 单例部件固定路径
+	FilterEntryPrefix = "filters/"    // filter 部件 = filters/<name>.js
+	HooksTaskEntryFmt = "tasks/%s.js" // hooks 任务缺省 = tasks/<name>.js
 )
 
 // ProtocolEntryFor 部件入口路径的唯一定义点(manifest 不承载 entry)
@@ -85,11 +85,11 @@ type Manifest struct {
 	ManifestVersion int               `json:"manifestVersion"`
 	Name            string            `json:"name"`
 	Version         string            `json:"version"`
-	Title           string            `json:"title,omitempty"`           // 显示名(缺省回退 name;纯展示)
-	Description     string            `json:"description,omitempty"`     // 一句话描述(纯展示)
-	Author          string            `json:"author,omitempty"`          // 纯展示
-	Homepage        string            `json:"homepage,omitempty"`        // 纯展示
-	License         string            `json:"license,omitempty"`         // 纯展示
+	Title           string            `json:"title,omitempty"`       // 显示名(缺省回退 name;纯展示)
+	Description     string            `json:"description,omitempty"` // 一句话描述(纯展示)
+	Author          string            `json:"author,omitempty"`      // 纯展示
+	Homepage        string            `json:"homepage,omitempty"`    // 纯展示
+	License         string            `json:"license,omitempty"`     // 纯展示
 	Compat          map[string]string `json:"compat,omitempty"`
 	Parts           struct {
 		Protocol  *ProtocolPart  `json:"protocol,omitempty"`
@@ -153,7 +153,7 @@ func (p *Package) Validate() error {
 	if proto != nil {
 		if proto.Protocol != string(ProtocolOpenAICompletions) && proto.Protocol != string(ProtocolAnthropicMessages) {
 			return fmt.Errorf("protocol: unknown protocol %q (want %s | %s)",
-			proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
+				proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
 		}
 		if _, ok := p.Files[ProtocolEntry]; !ok {
 			return fmt.Errorf("protocol: %s missing in package", ProtocolEntry)

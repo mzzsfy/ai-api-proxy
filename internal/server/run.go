@@ -221,10 +221,10 @@ func Build(cfg *Config) (*App, error) {
 		Executor: &pipeline.Executor{
 			Transports: trMgr.Get,
 		},
-		Registry: reg,
-		Metrics:  recorder,
-		History:  hist,
-		Keys:     pkgs.Keys(),
+		Registry:      reg,
+		Metrics:       recorder,
+		History:       hist,
+		Keys:          pkgs.Keys(),
 		ModelsListing: cfg.ModelsListing,
 	}
 	// 管理服务
@@ -234,14 +234,15 @@ func Build(cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("admin: %w", err)
 	}
 	if randomPass != "" {
-		// 无配置口令:打印一次,重启重新生成		log.Printf("generated admin password (print once): %s", randomPass)
+		// 无配置口令:打印一次,重启重新生成
+		log.Printf("generated admin password (print once): %s", randomPass)
 	}
 	adminDeps := &admin.Deps{
-		Packages:    pkgs,
-		Upstream:    reg,
-		Metrics:     recorder,
-		History:     hist,
-		HTTPClient:  &http.Client{},
+		Packages:   pkgs,
+		Upstream:   reg,
+		Metrics:    recorder,
+		History:    hist,
+		HTTPClient: &http.Client{},
 		KeysFunc: func(pkg string) map[string]any {
 			// 键行(不 dump prev,详情端点取)+ 轮询指针位(按 List 序,指向下次请求将选的行;空池 0)
 			keys := pkgs.Keys().List(pkg)
@@ -440,7 +441,6 @@ func groupTestTarget(reg *upstream.Registry, id int64) (*upstream.Group, string,
 	return nil, "", fmt.Errorf("group %d has no enabled member", id)
 }
 
-
 // 请求历史保留清理:执行间隔与单次超时
 const (
 	historyCleanupInterval = time.Hour
@@ -557,7 +557,6 @@ func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, sc
 		return err
 	}
 }
-
 
 // Run 启动 HTTP 服务,阻塞至退出信号;优雅排空(30s 上限);PackDir 非空时只打包
 func Run(cfg *Config) error {
@@ -798,4 +797,3 @@ func persistSnapshot(app *App, now time.Time) {
 		log.Printf("snapshot persist: %v", err)
 	}
 }
-

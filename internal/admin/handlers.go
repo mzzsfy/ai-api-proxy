@@ -25,8 +25,8 @@ type Deps struct {
 	Packages *plugin.Registry
 	Upstream *upstream.Registry
 	Metrics  *metrics.Recorder
-	History  *history.Store                                          // 请求历史(nil = 未装配,对应路由 501)
-	TestFunc func(modelID int64) (latencyMS int64, errMsg string)    // 连通性测试(走完整管道)
+	History  *history.Store                                       // 请求历史(nil = 未装配,对应路由 501)
+	TestFunc func(modelID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
 	// ChatTestFunc 对话测试(走完整管道,非流式;行名即模型名;返回延迟/状态码/响应体/错误说明)
 	ChatTestFunc func(ctx context.Context, modelID int64, message string) (latencyMS int64, status int, body []byte, errMsg string)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
@@ -913,7 +913,7 @@ func (d *Deps) saveGroupByID(w http.ResponseWriter, r *http.Request) {
 
 func (d *Deps) saveGroupImpl(w http.ResponseWriter, r *http.Request, id int64) {
 	g := &upstream.Group{ID: id}
-	if err := json.NewDecoder(r.Body).Decode(g); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(g); err != nil {
 		httpError(w, http.StatusBadRequest, "bad json")
 		return
 	}
@@ -1000,7 +1000,11 @@ func (d *Deps) saveMemberByID(w http.ResponseWriter, r *http.Request) {
 	}
 	// (group,name) 是存储唯一键:by-id 保存拒绝改键,仅 enabled 可变
 	if err := d.Upstream.SaveMember(r.Context(), &upstream.Member{ID: id, GroupID: m.GroupID, Name: m.Name, Enabled: m.Enabled}); err != nil {
-		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), "not found") {
+			httpError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "immutable") {
 			httpError(w, http.StatusBadRequest, err.Error())
 			return
 		}

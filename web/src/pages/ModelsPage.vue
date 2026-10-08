@@ -192,6 +192,8 @@ function openMembers(row: ModelGroup) {
   newMemberName.value = ''
   newMemberEnabled.value = false
   membersOpen.value = true
+  // 重开同组也强制拉最新(组成员可能经 discover apply 等其他路径变更)
+  void membersQuery.refetch()
 }
 
 async function addMember() {
@@ -209,13 +211,18 @@ async function addMember() {
   }
 }
 
+const memberBusy = ref(false)
+
 async function toggleMember(member: GroupMember) {
-  if (!membersGroup.value) return
+  if (!membersGroup.value || memberBusy.value) return
+  memberBusy.value = true
   try {
     await api.groups.updateMember(member.id, { group_id: member.group_id, name: member.name, enabled: !member.enabled })
     await membersQuery.refetch()
   } catch (err) {
     message.error(err instanceof Error ? err.message : '更新失败')
+  } finally {
+    memberBusy.value = false
   }
 }
 
@@ -353,8 +360,8 @@ const discoverColumns: DataTableColumns<DiscoveryHit> = [
           { size: 'small', type: row.action === 'create' ? 'success' : 'default' },
           { default: () => (row.action === 'create' ? '新建' : '已存在跳过') },
         ),
-        row.action === 'create' && row.poll_groups > 0
-          ? h('span', { style: 'margin-left:6px;color:var(--n-warning-color, #f0a020)' }, `轮询×${row.poll_groups + 1}`)
+        row.action === 'create' && row.poll_groups > 1
+          ? h('span', { style: 'margin-left:6px;color:var(--n-warning-color, #f0a020)' }, `轮询×${row.poll_groups}`)
           : null,
       ]),
   },

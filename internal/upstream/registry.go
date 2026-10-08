@@ -285,6 +285,10 @@ func (r *Registry) SaveGroup(ctx context.Context, g *Group) error {
 		res := r.db.QueryRowContext(ctx, `INSERT INTO model_groups(prefix, base_package, params_json, enabled)
 			VALUES(?,?,?,?) RETURNING id`, g.Prefix, g.Plugin, string(paramsRaw), g.Enabled)
 		if err := res.Scan(&g.ID); err != nil {
+			// 并发下同前缀落库:检查-写入窗口的兜底,归一为友好冲突错误(admin 映射 409)
+			if uerr := normalizeUniqueErr(err, fmt.Sprintf("prefix %q already used by group", g.Prefix)); uerr != err {
+				return uerr
+			}
 			return fmt.Errorf("persist group: %w", err)
 		}
 	} else {
@@ -342,6 +346,10 @@ func (r *Registry) SaveMember(ctx context.Context, m *Member) error {
 		res := r.db.QueryRowContext(ctx, `INSERT INTO model_members(group_id, name, enabled) VALUES(?,?,?) RETURNING id`,
 			m.GroupID, m.Name, m.Enabled)
 		if err := res.Scan(&m.ID); err != nil {
+			// 并发下同 (group,name) 落库兜底,归一为友好冲突错误(admin 409 / discover skip 依赖此文案)
+			if uerr := normalizeUniqueErr(err, fmt.Sprintf("member %q already exists in group %d", m.Name, m.GroupID)); uerr != err {
+				return uerr
+			}
 			return fmt.Errorf("persist member: %w", err)
 		}
 	} else {
@@ -356,19 +364,32 @@ func (r *Registry) SaveMember(ctx context.Context, m *Member) error {
 	return nil
 }
 
-// DeleteGroup 删除组(DB 组行与成员级联;成功后内存+部件缓存级联)
+// DeleteGroup 删除组(事务内先删成员再删组;内存索引、部件缓存与轮询计数级联清理)
 func (r *Registry) DeleteGroup(ctx context.Context, id int64) error {
 	r.mu.RLock()
 	_, ok := r.byGroup[id]
+	memberNames := make([]string, 0, len(r.memberOrder[id]))
+	for _, mid := range r.memberOrder[id] {
+		memberNames = append(memberNames, r.byMember[mid].Name)
+	}
 	r.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("group %d not found", id)
 	}
-	if _, err := r.db.ExecContext(ctx, `DELETE FROM model_members WHERE group_id=?`, id); err != nil {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete group: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_members WHERE group_id=?`, id); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("delete group members: %w", err)
 	}
-	if _, err := r.db.ExecContext(ctx, `DELETE FROM model_groups WHERE id=?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_groups WHERE id=?`, id); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("delete group: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete group: %w", err)
 	}
 	r.mu.Lock()
 	delete(r.byGroup, id)
@@ -383,7 +404,37 @@ func (r *Registry) DeleteGroup(ctx context.Context, id int64) error {
 	if old != nil {
 		go old.evict()
 	}
+	// 轮询计数器:该短名已无任何组命中时清理,防无限增长
+	for _, name := range memberNames {
+		r.cleanupRound(name)
+	}
 	return nil
+}
+
+// cleanupRound 短名已无任何组命中时移除轮询计数器
+func (r *Registry) cleanupRound(name string) {
+	if r.pollNameCount(name) > 0 {
+		return
+	}
+	r.mu.Lock()
+	delete(r.rrRound, name)
+	r.mu.Unlock()
+}
+
+// pollNameCount 与 PollGroupCount 同口径,但不区分启用态(清理判定用)
+func (r *Registry) pollNameCount(name string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, ids := range r.memberOrder {
+		for _, mid := range ids {
+			if r.byMember[mid].Name == name {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // DeleteMember 删除成员
@@ -407,7 +458,16 @@ func (r *Registry) DeleteMember(ctx context.Context, id int64) error {
 		}
 	}
 	r.mu.Unlock()
+	r.cleanupRound(m.Name)
 	return nil
+}
+
+// normalizeUniqueErr SQLite UNIQUE 冲突 → 友好冲突错误(并发检查-写入窗口兜底;非冲突原样返回)
+func normalizeUniqueErr(err error, friendly string) error {
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return fmt.Errorf("%s", friendly)
+	}
+	return err
 }
 
 // GetGroup 取组(深拷贝)

@@ -45,8 +45,8 @@ type Config struct {
 	// HistoryRetentionDays 请求历史保留天数(独立库 history.db);<0 永久保留,0 视为未配置取默认
 	HistoryRetentionDays int `yaml:"history_retention_days"`
 	// ModelsListing /v1/models 列表模式:full(全路径,默认)|short(短名,歧义名轮询)|both(全路径∪短名)
-	ModelsListing   string         `yaml:"models_listing"`
-	Transports      []TransportCfg `yaml:"transports"`
+	ModelsListing string         `yaml:"models_listing"`
+	Transports    []TransportCfg `yaml:"transports"`
 }
 
 // defaultHistoryRetentionDays 未配置时的请求历史保留天数
