@@ -124,10 +124,12 @@ func newGeminiFixture(t *testing.T, apiKey, model string, egress geminiEgress) *
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("gemini", plugin.PutInput{Config: cfg}); err != nil {
 		t.Fatalf("put gemini params: %v", err)
 	}
-	if err := f.app.Registry.Save(t.Context(), &upstream.Model{
-		Name: model, Plugin: "gemini", Enabled: true,
-	}); err != nil {
-		t.Fatalf("save gemini row: %v", err)
+	g := &upstream.Group{Prefix: "gemini", Plugin: "gemini", Enabled: true}
+	if err := f.app.Registry.SaveGroup(t.Context(), g); err != nil {
+		t.Fatalf("save gemini group: %v", err)
+	}
+	if err := f.app.Registry.SaveMember(t.Context(), &upstream.Member{GroupID: g.ID, Name: model, Enabled: true}); err != nil {
+		t.Fatalf("save gemini member: %v", err)
 	}
 	return f
 }
@@ -268,15 +270,15 @@ func TestRealGemini_AdminTestEndpoint(t *testing.T) {
 	key, model := geminiTestEnv(t)
 	f := newGeminiFixture(t, key, model, geminiEgressFromEnv(t))
 	var id int64
-	for _, u := range f.app.Registry.List() {
-		if u.Name == model {
-			id = u.ID
+	for _, g := range f.app.Registry.ListGroups() {
+		if g.Prefix == "gemini" {
+			id = g.ID
 		}
 	}
 	if id == 0 {
-		t.Fatal("model row not found")
+		t.Fatal("gemini group not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/test", id), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		geminiTransient(t, http.StatusTooManyRequests, body)
 		geminiTransient(t, http.StatusServiceUnavailable, body)

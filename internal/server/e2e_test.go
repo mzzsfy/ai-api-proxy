@@ -43,9 +43,11 @@ func buildTestApp(t *testing.T, upstreamCT, upstreamBody string) (*App, *httptes
 		plugin.PutInput{Config: map[string]any{"base_url": upSrv.URL}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "gpt-e2e", Enabled: true, Plugin: "openai-compatible",
-	}); err != nil {
+	g := &upstream.Group{Prefix: "e2e", Plugin: "openai-compatible", Enabled: true}
+	if err := app.Registry.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: "gpt-e2e", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	return app, upSrv, &hits
@@ -125,7 +127,7 @@ func TestE2E_HealthzAndAdminAuth(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("healthz: %d", resp.StatusCode)
 	}
-	resp2, err := http.Get(srv.URL + "/admin/api/models")
+	resp2, err := http.Get(srv.URL + "/admin/api/groups")
 	if err != nil {
 		t.Fatal(err)
 	}

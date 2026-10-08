@@ -225,6 +225,7 @@ func Build(cfg *Config) (*App, error) {
 		Metrics:  recorder,
 		History:  hist,
 		Keys:     pkgs.Keys(),
+		ModelsListing: cfg.ModelsListing,
 	}
 	// 管理服务
 	adminSvc, randomPass, err := admin.New(cfg.AdminUser, cfg.AdminPassBcrypt)
@@ -271,22 +272,23 @@ func Build(cfg *Config) (*App, error) {
 	// 包骨架模板(静态无敏感信息,免会话;GUI "新建包"下载入口)
 	mux.HandleFunc("GET /packages/template", adminDeps.PackageTemplate)
 	// 连通性测试:最小请求走完整管道(经 executor,指标照常计数;上游挂起不阻塞管理面——上限对齐传输探测)
+	// 组级测试:取组内首个启用成员为测试模型名;无启用成员即失败
 	adminDeps.TestFunc = func(id int64) (int64, string) {
-		u, err := reg.Get(id)
+		grp, memberName, err := groupTestTarget(reg, id)
 		if err != nil {
 			return 0, err.Error()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), transportProbeTimeout)
 		defer cancel()
-		return gw.TestUpstream(ctx, u)
+		return gw.TestUpstream(ctx, grp, memberName)
 	}
-	// 对话测试:行名即模型名,走完整管道(非流式;模型行+包双维度计数)
+	// 对话测试:成员名即模型名,走完整管道(非流式;成员+包双维度计数)
 	adminDeps.ChatTestFunc = func(ctx context.Context, id int64, message string) (int64, int, []byte, string) {
-		u, err := reg.Get(id)
+		grp, memberName, err := groupTestTarget(reg, id)
 		if err != nil {
 			return 0, 0, nil, err.Error()
 		}
-		return gw.ChatTest(ctx, u, message)
+		return gw.ChatTest(ctx, grp, memberName, message)
 	}
 	// 监控时序:metrics_minutely 最近 n 分钟(老到新)
 	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {
@@ -423,6 +425,21 @@ var (
 	transportProbeURL     = "https://www.gstatic.com/generate_204"
 	transportProbeTimeout = 10 * time.Second
 )
+
+// groupTestTarget 组级测试目标:组 + 组内首个启用成员名(无启用成员即不可测)
+func groupTestTarget(reg *upstream.Registry, id int64) (*upstream.Group, string, error) {
+	grp, err := reg.GetGroup(id)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, m := range reg.ListMembers(id) {
+		if m.Enabled {
+			return grp, m.Name, nil
+		}
+	}
+	return nil, "", fmt.Errorf("group %d has no enabled member", id)
+}
+
 
 // 请求历史保留清理:执行间隔与单次超时
 const (
@@ -605,8 +622,8 @@ func Run(cfg *Config) error {
 			}
 		}
 	}()
-	log.Printf("ai-api-proxy listening on %s | packages: %d | upstreams: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
-		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.List()))
+	log.Printf("ai-api-proxy listening on %s | packages: %d | groups: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
+		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.ListGroups()))
 	select {
 	case <-sigCh:
 	case err = <-errCh:

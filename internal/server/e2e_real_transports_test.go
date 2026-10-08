@@ -73,10 +73,12 @@ func newRealTransportFixture(t *testing.T, apiKey, model, transportType, proxyUR
 		"base_url": opencodeTestBaseURL(), "transport": "real-" + transportType}}); err != nil {
 		t.Fatalf("put opencode params: %v", err)
 	}
-	if err := app.Registry.Save(ctx, &upstream.Model{
-		Name: model, Plugin: "opencode", Enabled: true,
-	}); err != nil {
-		t.Fatalf("save model row: %v", err)
+	g := &upstream.Group{Prefix: "opencode", Plugin: "opencode", Enabled: true}
+	if err := app.Registry.SaveGroup(ctx, g); err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	if err := app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: model, Enabled: true}); err != nil {
+		t.Fatalf("save member: %v", err)
 	}
 	// 独立网关(不经 fourGroups 的 mock 上游/代理)
 	gw := httptest.NewServer(app.Mux)

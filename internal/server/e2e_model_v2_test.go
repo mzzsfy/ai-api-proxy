@@ -137,12 +137,20 @@ func (e *v2Env) postMessage(t *testing.T, model string) (int, string) {
 	}, `{"model":"`+model+`","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 }
 
-// saveRow 建行(测试断言失败即 Fatal)
+// saveRow 建组+成员(前缀=成员短名;组 params 覆盖差异槽)
 func (e *v2Env) saveRow(t *testing.T, name string, params map[string]any) {
 	t.Helper()
-	if err := e.f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: name, Plugin: "anthropic-compatible", Enabled: true, Params: params,
-	}); err != nil {
+	e.saveGroup(t, name, name, params)
+}
+
+// saveGroup 建指定前缀的组 + 指定短名成员(全路径路由场景用)
+func (e *v2Env) saveGroup(t *testing.T, prefix, member string, params map[string]any) {
+	t.Helper()
+	g := &upstream.Group{Prefix: prefix, Plugin: "anthropic-compatible", Enabled: true, Params: params}
+	if err := e.f.app.Registry.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: member, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -194,8 +202,8 @@ func TestV2_ModelParamOverridesPackage(t *testing.T) {
 func TestV2_UnknownParamRejectedOnSave(t *testing.T) {
 	// Given 包仅声明 api_version/mode/base_url/transport When 建行参数含 foo Then 拒绝并注明槽名
 	e := newV2Env(t)
-	err := e.f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "drift", Plugin: "anthropic-compatible", Enabled: true,
+	err := e.f.app.Registry.SaveGroup(context.Background(), &upstream.Group{
+		Prefix: "drift", Plugin: "anthropic-compatible", Enabled: true,
 		Params: map[string]any{"foo": "bar"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "foo") {
@@ -217,8 +225,8 @@ func TestV2_UnknownParamStrippedOnRequest(t *testing.T) {
 func TestV2_ApiKeyNotModelParam(t *testing.T) {
 	// When 建行参数含 api_key Then 拒绝(不在声明槽内;密钥属包级 keys)
 	e := newV2Env(t)
-	err := e.f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "keyrow", Plugin: "anthropic-compatible", Enabled: true,
+	err := e.f.app.Registry.SaveGroup(context.Background(), &upstream.Group{
+		Prefix: "keyrow", Plugin: "anthropic-compatible", Enabled: true,
 		Params: map[string]any{"api_key": "K2"},
 	})
 	if err == nil {
@@ -302,12 +310,15 @@ func TestV2_SameNameAcrossProtocols(t *testing.T) {
 		"base_url": e.upSrv.URL}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "auto", Plugin: "openai-compatible", Enabled: true}); err != nil {
+	og := &upstream.Group{Prefix: "oc", Plugin: "openai-compatible", Enabled: true}
+	if err := e.f.app.Registry.SaveGroup(context.Background(), og); err != nil {
 		t.Fatal(err)
 	}
-	e.saveRow(t, "auto", nil) // anthropic 侧行
-	code, _ := e.postMessage(t, "auto")
+	if err := e.f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: og.ID, Name: "auto", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.saveGroup(t, "ac", "auto", nil) // anthropic 侧组
+	code, _ := e.postMessage(t, "ac/auto")
 	if code != http.StatusOK {
 		t.Fatalf("anthropic entry: %d", code)
 	}
@@ -316,7 +327,7 @@ func TestV2_SameNameAcrossProtocols(t *testing.T) {
 		t.Fatalf("anthropic route: %s %v", path, head)
 	}
 	req, _ := http.NewRequest(http.MethodPost, e.f.gateway.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`))
+		strings.NewReader(`{"model":"oc/auto","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer sk-test")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -332,12 +343,15 @@ func TestV2_SameNameAcrossProtocols(t *testing.T) {
 	}
 }
 
-// 场景:disabled 行参与分类(非 NoModel)
+// 场景:disabled 成员参与分类(非 NoModel)
 func TestV2_DisabledRowClassifiesAsCapability(t *testing.T) {
-	// Given 唯一行 disabled When 请求 Then 400 capability mismatch 且文案注明 disabled(非 404)
+	// Given 唯一成员 disabled(组启用) When 请求 Then 400 capability mismatch 且文案注明 disabled(非 404)
 	e := newV2Env(t)
-	if err := e.f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "paused", Plugin: "anthropic-compatible", Enabled: false}); err != nil {
+	g := &upstream.Group{Prefix: "paused", Plugin: "anthropic-compatible", Enabled: true}
+	if err := e.f.app.Registry.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: "paused", Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
 	code, body := e.postMessage(t, "paused")

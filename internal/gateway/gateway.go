@@ -42,6 +42,7 @@ func (e Entry) Inspect(body []byte) (model string, stream bool, feats []convert.
 }
 
 // Gateway HTTP 入口
+// Gateway 服务入口聚合
 type Gateway struct {
 	OpenAI    Entry
 	Anthropic Entry
@@ -52,6 +53,8 @@ type Gateway struct {
 	History *history.Store
 	// Keys 键池(请求级 round-robin 选键;nil = 不注入键)
 	Keys *plugin.KeysStore
+	// ModelsListing /v1/models 列表模式(full|short|both;空 = full)
+	ModelsListing string
 }
 
 // pickKey 请求级选键(round-robin;空池/未装配 = nil,ctx.key = undefined)
@@ -93,10 +96,10 @@ func chatBody(declared, model, message string) ([]byte, error) {
 	})
 }
 
-// recordUpstream 模型行与主包双维度计数(failed 口径:执行错误或上游状态 >=400)
-func (g *Gateway) recordUpstream(m *upstream.Model, failed bool) {
-	g.Metrics.IncUpstream(m.Name, failed)
-	g.Metrics.IncPackage(m.Plugin, failed)
+// recordUpstream 成员与主包双维度计数(failed 口径:执行错误或上游状态 >=400)
+func (g *Gateway) recordUpstream(c *upstream.Candidate, failed bool) {
+	g.Metrics.IncUpstream(c.Member.Name, failed)
+	g.Metrics.IncPackage(c.Group.Plugin, failed)
 }
 
 // ChatCompletions POST /v1/chat/completions(openai 入口)
@@ -161,30 +164,30 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 		}
 		return
 	}
-	u := candidates[0].Model
-	rowName = u.Name
-	resolved, release, err := g.Registry.Resolve(u)
+	cand := candidates[0]
+	rowName = cand.FullName()
+	resolved, release, err := g.Registry.Resolve(cand.Group)
 	if err != nil {
-		log.Printf("resolve %s: %v", u.Name, err)
+		log.Printf("resolve %s: %v", cand.FullName(), err)
 		status = http.StatusBadGateway
-		detail += " row=" + u.Name
+		detail += " row=" + cand.FullName()
 		// 配置类失败(required 槽缺失)注明槽名,便于管理员定位;其余细节只进日志
 		writeError(w, entry, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
-	detail += " row=" + u.Name + " plugins=" + pluginPath(resolved)
+	detail += " row=" + cand.FullName() + " plugins=" + pluginPath(resolved)
 	// 快速路径:openai 入口 ∧ 内置协议 ∧ filter 链空(直发直传,不经 JS 编解码)
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
-		g.fastPath(w, r, u, resolved, body, model, entryStream, &rowName)
+		g.fastPath(w, r, &cand, resolved, body, model, entryStream, &rowName)
 		return
 	}
-	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: u.Name},
+	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: cand.Member.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
-	pctx.Key = g.pickKey(u.Plugin)
+	pctx.Key = g.pickKey(cand.Group.Plugin)
 	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
-		g.recordUpstream(u, true)
+		g.recordUpstream(&cand, true)
 		if r.Context().Err() != nil {
 			return // 客户端断开:Cancelled 不计 errors
 		}
@@ -195,13 +198,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	}
 	if resp.Status >= 400 {
 		// 终局错误(mapError 已在 executor 应用;未实现则原样透传)
-		g.recordUpstream(u, true)
+		g.recordUpstream(&cand, true)
 		g.Metrics.IncError()
 		status = resp.Status
 		writeRaw(w, resp.Status, resp.Body)
 		return
 	}
-	g.recordUpstream(u, false)
+	g.recordUpstream(&cand, false)
 	detail += fmt.Sprintf(" stream=%t", resp.Stream)
 	if resp.Stream {
 		g.writeStream(w, entry, resp)
@@ -333,21 +336,21 @@ func (g *Gateway) writeRunError(w http.ResponseWriter, entry Entry, pctx *pipeli
 	writeError(w, entry, http.StatusBadGateway, err.Error())
 }
 
-// TestUpstream 管理连通性测试:行名即模型名发最小请求走完整管道(非流式;诊断请求不计 metrics)
+// TestUpstream 管理连通性测试:成员名即模型名发最小请求走完整管道(非流式;诊断请求不计 metrics)
 // 返回延迟毫秒与错误说明;上游错误状态视为测试失败但计入延迟
-func (g *Gateway) TestUpstream(ctx context.Context, m *upstream.Model) (int64, string) {
-	resolved, release, err := g.Registry.Resolve(m)
+func (g *Gateway) TestUpstream(ctx context.Context, grp *upstream.Group, memberName string) (int64, string) {
+	resolved, release, err := g.Registry.Resolve(grp)
 	if err != nil {
 		return 0, "resolve: " + err.Error()
 	}
 	defer release()
-	raw, err := testBody(g.Registry.DeclaredProtocol(m), m.Name)
+	raw, err := testBody(g.Registry.DeclaredProtocol(grp), memberName)
 	if err != nil {
 		return 0, "marshal test body: " + err.Error()
 	}
-	pctx := pipeline.NewContext("admin-test-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
-		pipeline.Vars{Model: m.Name, EntryStream: false})
-	pctx.Key = g.pickKey(m.Plugin)
+	pctx := pipeline.NewContext("admin-test-"+memberName, pipeline.UpstreamInfo{Name: memberName},
+		pipeline.Vars{Model: memberName, EntryStream: false})
+	pctx.Key = g.pickKey(grp.Plugin)
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -369,27 +372,28 @@ func (g *Gateway) TestUpstream(ctx context.Context, m *upstream.Model) (int64, s
 // 响应失败 = 执行错误或 resp.Status >= 300(对齐 TestUpstream 测试判定);
 // metrics failed = 执行错误或 resp.Status >= 400(与 serve 常规流量同口径,3xx 不计错误)。
 // 与 TestUpstream 的差异:本方法经 recordUpstream 计模型行+包维度(诊断即流量,如实呈现)
-func (g *Gateway) ChatTest(ctx context.Context, m *upstream.Model, message string) (int64, int, []byte, string) {
-	resolved, release, err := g.Registry.Resolve(m)
+func (g *Gateway) ChatTest(ctx context.Context, grp *upstream.Group, memberName, message string) (int64, int, []byte, string) {
+	resolved, release, err := g.Registry.Resolve(grp)
 	if err != nil {
 		return 0, 0, nil, "resolve: " + err.Error()
 	}
 	defer release()
-	raw, err := chatBody(g.Registry.DeclaredProtocol(m), m.Name, message)
+	raw, err := chatBody(g.Registry.DeclaredProtocol(grp), memberName, message)
 	if err != nil {
 		return 0, 0, nil, "marshal chat body: " + err.Error()
 	}
-	pctx := pipeline.NewContext("admin-chat-"+m.Name, pipeline.UpstreamInfo{Name: m.Name},
-		pipeline.Vars{Model: m.Name, EntryStream: false})
-	pctx.Key = g.pickKey(m.Plugin)
+	pctx := pipeline.NewContext("admin-chat-"+memberName, pipeline.UpstreamInfo{Name: memberName},
+		pipeline.Vars{Model: memberName, EntryStream: false})
+	pctx.Key = g.pickKey(grp.Plugin)
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
 	// metrics 口径:执行错误或上游状态 >=400 计错误
+	cand := upstream.Candidate{Group: grp, Member: &upstream.Member{GroupID: grp.ID, Name: memberName}}
 	if err != nil || resp.Status >= 400 {
-		g.recordUpstream(m, true)
+		g.recordUpstream(&cand, true)
 	} else {
-		g.recordUpstream(m, false)
+		g.recordUpstream(&cand, false)
 	}
 	if err != nil {
 		return latency, 0, nil, err.Error()
@@ -427,14 +431,14 @@ func writeRaw(w http.ResponseWriter, status int, body []byte) {
 
 // fastPath 直发直传:body 原样,内置协议组请求(config+key),不经 JS 编解码,不切换不刷新
 // rowName 回写实际服务行名(历史记录用)
-func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, m *upstream.Model, resolved pipeline.Resolved, body []byte, model string, entryStream bool, rowName *string) {
-	*rowName = m.Name
-	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: m.Name},
+func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, cand *upstream.Candidate, resolved pipeline.Resolved, body []byte, model string, entryStream bool, rowName *string) {
+	*rowName = cand.FullName()
+	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: cand.Member.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
-	pctx.Key = g.pickKey(m.Plugin)
+	pctx.Key = g.pickKey(cand.Group.Plugin)
 	req, err := resolved.Protocol.BuildRequest(pctx, body)
 	if err != nil {
-		g.recordUpstream(m, true)
+		g.recordUpstream(cand, true)
 		g.Metrics.IncError()
 		writeError(w, g.OpenAI, http.StatusBadGateway, err.Error())
 		return
@@ -445,14 +449,14 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, m *upstream.M
 	}
 	tr, ok := g.Executor.Transports(trName)
 	if !ok {
-		g.recordUpstream(m, true)
+		g.recordUpstream(cand, true)
 		g.Metrics.IncError()
 		writeError(w, g.OpenAI, http.StatusBadGateway, "transport missing")
 		return
 	}
 	tresp, err := tr.RoundTrip(r.Context(), req)
 	if err != nil {
-		g.recordUpstream(m, true)
+		g.recordUpstream(cand, true)
 		if r.Context().Err() == nil {
 			g.Metrics.IncError()
 			// 供给方无可用出口/节点并发上限(rep=1/2):503(临时性,调用方可换模型重试);其余上游不可达:502
@@ -466,10 +470,10 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, m *upstream.M
 		return // 客户端断开:Cancelled 不计 errors
 	}
 	if tresp.Status >= 400 {
-		g.recordUpstream(m, true)
+		g.recordUpstream(cand, true)
 		g.Metrics.IncError()
 	} else {
-		g.recordUpstream(m, false)
+		g.recordUpstream(cand, false)
 	}
 	if isEventStreamCT(tresp.Headers["Content-Type"]) {
 		g.passthroughStream(w, tresp)
@@ -561,20 +565,38 @@ func (g *Gateway) ModelByID(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"type": "not_found", "message": "model not found"}})
 }
 
-// availableModels 聚合启用模型行名去重(稳定序;协议非空时仅计声明该协议的行)
+// availableModels 按 listing 模式聚合启用成员(listing 见 Config.ModelsListing):
+// full=全路径(默认,确定性最强);short=短名(歧义名照列,轮询语义);both=全路径 ∪ 短名去重。
+// 协议非空时仅计声明该协议的组。稳定序:组 ID × 成员 ID,全路径先于短名。
 func (g *Gateway) availableModels(protocol string) []string {
+	listing := g.ModelsListing
+	if listing != "short" && listing != "both" {
+		listing = "full" // 空值与非法值兜底
+	}
+	wantFull := listing == "full" || listing == "both"
+	wantShort := listing == "short" || listing == "both"
 	seen := map[string]bool{}
 	var out []string
-	for _, m := range g.Registry.List() {
-		if !m.Enabled {
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, grp := range g.Registry.ListGroups() {
+		if !grp.Enabled || (protocol != "" && g.Registry.DeclaredProtocol(grp) != protocol) {
 			continue
 		}
-		if protocol != "" && g.Registry.DeclaredProtocol(m) != protocol {
-			continue
-		}
-		if !seen[m.Name] {
-			seen[m.Name] = true
-			out = append(out, m.Name)
+		for _, m := range g.Registry.ListMembers(grp.ID) {
+			if !m.Enabled {
+				continue
+			}
+			if wantFull {
+				add(grp.Prefix + "/" + m.Name)
+			}
+			if wantShort {
+				add(m.Name)
+			}
 		}
 	}
 	return out
@@ -614,23 +636,28 @@ func featsToStrings(feats []convert.Feature) []string {
 	return out
 }
 
-// slotSummary 声明该模型名的启用行所持协议槽(去重稳定序;诊断用)
+// slotSummary 声明该模型名(短名或全路径)的启用成员所持协议槽(去重稳定序;诊断用)
 func (g *Gateway) slotSummary(model string) string {
 	seen := map[string]bool{}
 	out := ""
-	for _, m := range g.Registry.List() {
-		if !m.Enabled || m.Name != model {
+	for _, grp := range g.Registry.ListGroups() {
+		if !grp.Enabled {
 			continue
 		}
-		slot := m.Name + "@" + m.Plugin + "(" + g.Registry.DeclaredProtocol(m) + ")"
-		if seen[slot] {
-			continue
+		for _, m := range g.Registry.ListMembers(grp.ID) {
+			if !m.Enabled || (m.Name != model && grp.Prefix+"/"+m.Name != model) {
+				continue
+			}
+			slot := m.Name + "@" + grp.Prefix + "(" + g.Registry.DeclaredProtocol(grp) + ")"
+			if seen[slot] {
+				continue
+			}
+			seen[slot] = true
+			if out != "" {
+				out += ","
+			}
+			out += slot
 		}
-		seen[slot] = true
-		if out != "" {
-			out += ","
-		}
-		out += slot
 	}
 	if out == "" {
 		return "none"

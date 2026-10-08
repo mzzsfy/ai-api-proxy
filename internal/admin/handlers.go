@@ -94,13 +94,17 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/tasks/{task}/run", d.runPackageTask)
 	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
-	mux.HandleFunc("GET /admin/api/models", d.listUpstreams)
-	mux.HandleFunc("POST /admin/api/models", d.saveUpstream)
-	mux.HandleFunc("GET /admin/api/models/{id}", d.getUpstream)
-	mux.HandleFunc("PUT /admin/api/models/{id}", d.saveUpstreamByID)
-	mux.HandleFunc("DELETE /admin/api/models/{id}", d.deleteUpstream)
-	mux.HandleFunc("POST /admin/api/models/{id}/test", d.testUpstream)
-	mux.HandleFunc("POST /admin/api/models/{id}/chat-test", d.chatTestUpstream)
+	mux.HandleFunc("GET /admin/api/groups", d.listGroups)
+	mux.HandleFunc("POST /admin/api/groups", d.saveGroup)
+	mux.HandleFunc("GET /admin/api/groups/{id}", d.getGroup)
+	mux.HandleFunc("PUT /admin/api/groups/{id}", d.saveGroupByID)
+	mux.HandleFunc("DELETE /admin/api/groups/{id}", d.deleteGroup)
+	mux.HandleFunc("POST /admin/api/groups/{id}/test", d.testGroup)
+	mux.HandleFunc("POST /admin/api/groups/{id}/chat-test", d.chatTestGroup)
+	mux.HandleFunc("GET /admin/api/groups/{id}/members", d.listMembers)
+	mux.HandleFunc("POST /admin/api/groups/{id}/members", d.saveMember)
+	mux.HandleFunc("PUT /admin/api/members/{id}", d.saveMemberByID)
+	mux.HandleFunc("DELETE /admin/api/members/{id}", d.deleteMember)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/history", d.listHistory)
@@ -338,17 +342,23 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// deletePackage 卸载包(被模型行引用拒绝;内置包拒绝)
-func (d *Deps) deletePackage(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+// groupRefs 包被哪些组引用(前缀列表;删除/禁用包前的冲突检查用)
+func (d *Deps) groupRefs(name string) []string {
 	var refs []string
-	for _, u := range d.Upstream.List() {
-		if u.Plugin == name {
-			refs = append(refs, u.Name)
+	for _, g := range d.Upstream.ListGroups() {
+		if g.Plugin == name {
+			refs = append(refs, g.Prefix)
 		}
 	}
+	return refs
+}
+
+// deletePackage 卸载包(被模型组引用拒绝;内置包拒绝)
+func (d *Deps) deletePackage(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	refs := d.groupRefs(name)
 	if len(refs) > 0 {
-		httpError(w, http.StatusConflict, "包被以下模型行引用: "+strings.Join(refs, ","))
+		httpError(w, http.StatusConflict, "包被以下模型组引用: "+strings.Join(refs, ","))
 		return
 	}
 	if err := d.Packages.Delete(r.Context(), name); err != nil {
@@ -636,14 +646,9 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.Enabled {
 		// 被引用禁用 = 拒绝并提示引用列表(运行期兜底:Pick 报 package disabled)
-		var refs []string
-		for _, u := range d.Upstream.List() {
-			if u.Plugin == name {
-				refs = append(refs, u.Name)
-			}
-		}
+		refs := d.groupRefs(name)
 		if len(refs) > 0 {
-			httpError(w, http.StatusConflict, "包被以下模型行引用: "+strings.Join(refs, ","))
+			httpError(w, http.StatusConflict, "包被以下模型组引用: "+strings.Join(refs, ","))
 			return
 		}
 	}
@@ -871,77 +876,151 @@ func (d *Deps) runPackageTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "results": results})
 }
 
-func (d *Deps) listUpstreams(w http.ResponseWriter, r *http.Request) {
-	// 模型行列表(v2:无 secrets 概念;行 params 与包 keys 分层)
-	writeJSON(w, d.Upstream.List())
+func (d *Deps) listGroups(w http.ResponseWriter, r *http.Request) {
+	// 组列表(v3:组=上游连接,成员另查)
+	writeJSON(w, d.Upstream.ListGroups())
 }
 
-func (d *Deps) getUpstream(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) getGroup(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	u, err := d.Upstream.Get(id)
+	g, err := d.Upstream.GetGroup(id)
 	if err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, u)
+	writeJSON(w, g)
 }
 
-func (d *Deps) saveUpstream(w http.ResponseWriter, r *http.Request) {
-	d.saveUpstreamImpl(w, r, 0)
+func (d *Deps) saveGroup(w http.ResponseWriter, r *http.Request) {
+	d.saveGroupImpl(w, r, 0)
 }
 
-func (d *Deps) saveUpstreamByID(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) saveGroupByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	d.saveUpstreamImpl(w, r, id)
+	d.saveGroupImpl(w, r, id)
 }
 
-func (d *Deps) saveUpstreamImpl(w http.ResponseWriter, r *http.Request, id int64) {
-	u := &upstream.Model{ID: id}
-	if err := json.NewDecoder(r.Body).Decode(u); err != nil {
+func (d *Deps) saveGroupImpl(w http.ResponseWriter, r *http.Request, id int64) {
+	g := &upstream.Group{ID: id}
+	if err := json.NewDecoder(r.Body).Decode(g); err != nil {
 		httpError(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	// (name, plugin) 是存储唯一键:改键 = 删除重建,by-id 保存拒绝改键(防路由键漂移)
+	// plugin 是组实例化根基:by-id 保存拒绝改(防连接漂移)
 	if id != 0 {
-		old, err := d.Upstream.Get(id)
+		old, err := d.Upstream.GetGroup(id)
 		if err != nil {
 			httpError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		if old.Name != u.Name || old.Plugin != u.Plugin {
-			httpError(w, http.StatusBadRequest, "name/plugin 不可修改:删除后重建")
+		if old.Plugin != g.Plugin {
+			httpError(w, http.StatusBadRequest, "plugin 不可修改:删除后重建")
 			return
 		}
 	}
-	if err := d.Upstream.Save(r.Context(), u); err != nil {
+	if err := d.Upstream.SaveGroup(r.Context(), g); err != nil {
+		// 前缀唯一键冲突 → 409;其余保存期校验失败 → 400
+		if strings.Contains(err.Error(), "already used by group") {
+			httpError(w, http.StatusConflict, err.Error())
+			return
+		}
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "id": u.ID})
+	writeJSON(w, map[string]any{"ok": true, "id": g.ID})
 }
 
-func (d *Deps) deleteUpstream(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	if err := d.Upstream.Delete(r.Context(), id); err != nil {
+	if err := d.Upstream.DeleteGroup(r.Context(), id); err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (d *Deps) testUpstream(w http.ResponseWriter, r *http.Request) {
+// listMembers 组内成员列表
+func (d *Deps) listMembers(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	writeJSON(w, d.Upstream.ListMembers(id))
+}
+
+func (d *Deps) saveMember(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	m := &upstream.Member{GroupID: id}
+	if err := json.NewDecoder(r.Body).Decode(m); err != nil {
+		httpError(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	m.ID = 0 // 成员只能建在路径指定组内,body 的 group_id 不可信
+	if err := d.Upstream.SaveMember(r.Context(), m); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			httpError(w, http.StatusConflict, err.Error())
+			return
+		}
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "id": m.ID})
+}
+
+func (d *Deps) saveMemberByID(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	m := &upstream.Member{}
+	if err := json.NewDecoder(r.Body).Decode(m); err != nil {
+		httpError(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	// (group,name) 是存储唯一键:by-id 保存拒绝改键,仅 enabled 可变
+	if err := d.Upstream.SaveMember(r.Context(), &upstream.Member{ID: id, GroupID: m.GroupID, Name: m.Name, Enabled: m.Enabled}); err != nil {
+		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "not found") {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "id": id})
+}
+
+func (d *Deps) deleteMember(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := d.Upstream.DeleteMember(r.Context(), id); err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (d *Deps) testGroup(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "bad id")
@@ -959,8 +1038,8 @@ func (d *Deps) testUpstream(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// chatTestUpstream 对话测试:行名即模型名,消息缺省 "ping";错误路径 501 未装配/404 id 不存在/400 参数
-func (d *Deps) chatTestUpstream(w http.ResponseWriter, r *http.Request) {
+// chatTestGroup 对话测试:成员名即模型名,消息缺省 "ping";错误路径 501 未装配/404 id 不存在/400 参数
+func (d *Deps) chatTestGroup(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "bad id")

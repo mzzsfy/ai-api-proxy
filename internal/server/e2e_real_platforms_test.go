@@ -93,10 +93,12 @@ func newPlatformFixture(t *testing.T, name, baseUrl, model string) *fourGroupsFi
 		"base_url": baseUrl}}); err != nil {
 		t.Fatalf("put opencode params: %v", err)
 	}
-	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: model, Plugin: "opencode", Enabled: true,
-	}); err != nil {
-		t.Fatalf("save model row: %v", err)
+	g := &upstream.Group{Prefix: "opencode", Plugin: "opencode", Enabled: true}
+	if err := f.app.Registry.SaveGroup(context.Background(), g); err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	if err := f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: model, Enabled: true}); err != nil {
+		t.Fatalf("save member: %v", err)
 	}
 	return f
 }

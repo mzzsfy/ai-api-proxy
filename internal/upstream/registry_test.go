@@ -41,14 +41,17 @@ func buildZip(t *testing.T, manifest string, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// v2Ddl 模型行表(测试库;与 004 迁移后形态一致)
-func v2Ddl() []string {
+// v3Ddl 模型组双表(测试库;与 004 迁移后形态一致)
+func v3Ddl() []string {
 	return []string{
 		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
 			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
-		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, base_package TEXT NOT NULL,
-			params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (name, base_package))`,
+		`CREATE TABLE model_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE,
+			base_package TEXT NOT NULL, params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+		`CREATE TABLE model_members (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL REFERENCES model_groups(id) ON DELETE CASCADE,
+			name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (group_id, name))`,
 		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
 		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', prev_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`,
@@ -63,7 +66,7 @@ func testEnv(t *testing.T) (*plugin.Registry, *Registry) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, ddl := range v2Ddl() {
+	for _, ddl := range v3Ddl() {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +82,6 @@ func installBuiltinLikePkg(t *testing.T, pkgs *plugin.Registry, name string) {
 }
 
 // installBuiltinLikePkgForm 按给定 form/features 装包(形态把关用例;form 即实现——导出哪个 map 钩子就支持哪形态)
-// v2:参数槽 base_url 由 protocol.js settings 片段声明;密钥=包级 keys
 func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, features string) {
 	t.Helper()
 	var impl string
@@ -108,87 +110,219 @@ func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, 
 	}
 }
 
-func mustSave(t *testing.T, reg *Registry, m *Model) {
+// mustGroup 建组(前缀默认=包名)
+func mustGroup(t *testing.T, reg *Registry, prefix, pluginName string, params map[string]any) *Group {
 	t.Helper()
-	if err := reg.Save(context.Background(), m); err != nil {
+	g := &Group{Prefix: prefix, Plugin: pluginName, Enabled: true, Params: params}
+	if err := reg.SaveGroup(context.Background(), g); err != nil {
 		t.Fatal(err)
 	}
+	return g
 }
 
-func TestValidate_NameAndPluginRequired(t *testing.T) {
-	// Given 空 name / 空 plugin When Save Then 拒存
+// mustMember 建成员
+func mustMember(t *testing.T, reg *Registry, groupID int64, name string, enabled bool) *Member {
+	t.Helper()
+	m := &Member{GroupID: groupID, Name: name, Enabled: enabled}
+	if err := reg.SaveMember(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestValidateGroup_PrefixAndPluginRequired(t *testing.T) {
+	// Given 空 prefix / 空 plugin / 前缀含斜杠 When SaveGroup Then 拒存
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	if err := reg.Save(context.Background(), &Model{Plugin: "demo", Enabled: true}); err == nil {
-		t.Fatal("empty name accepted")
+	if err := reg.SaveGroup(context.Background(), &Group{Plugin: "demo", Enabled: true}); err == nil {
+		t.Fatal("empty prefix accepted")
 	}
-	if err := reg.Save(context.Background(), &Model{Name: "m", Enabled: true}); err == nil {
+	if err := reg.SaveGroup(context.Background(), &Group{Prefix: "a/b", Plugin: "demo", Enabled: true}); err == nil {
+		t.Fatal("prefix with slash accepted")
+	}
+	if err := reg.SaveGroup(context.Background(), &Group{Prefix: "d", Enabled: true}); err == nil {
 		t.Fatal("empty plugin accepted")
 	}
 }
 
-func TestValidate_UnknownParamRejected(t *testing.T) {
-	// Given params 含未声明键 When Save(保存期 strict)Then 拒存并注明键名
+func TestValidateGroup_UnknownParamRejected(t *testing.T) {
+	// Given params 含未声明键 When SaveGroup(保存期 strict)Then 拒存并注明键名
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	err := reg.Save(context.Background(), &Model{Name: "m", Plugin: "demo", Enabled: true,
+	err := reg.SaveGroup(context.Background(), &Group{Prefix: "d", Plugin: "demo", Enabled: true,
 		Params: map[string]any{"ghost": 1}})
 	if err == nil || !strings.Contains(err.Error(), "ghost") {
 		t.Fatalf("unknown param must be rejected: %v", err)
 	}
 }
 
-func TestValidate_BaseWithoutProtocol(t *testing.T) {
-	// Given 插件仅 filters 包(无 protocol 部件)When Save Then 拒建
+func TestValidateGroup_PrefixConflict(t *testing.T) {
+	// Given 前缀已被他组占用 When SaveGroup(插入)Then 拒绝;不同前缀同包允许并存
 	pkgs, reg := testEnv(t)
-	manifest := `{"manifestVersion":1,"name":"onlyf","version":"1","parts":{"filters":[{"name":"f"}]}}`
-	src := `module.exports = { mapRequest: function (ctx, p) { return p; } };`
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{"filters/f.js": src})); err != nil {
-		t.Fatal(err)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	mustGroup(t, reg, "demo", "demo", nil)
+	err := reg.SaveGroup(context.Background(), &Group{Prefix: "demo", Plugin: "demo", Enabled: true})
+	if err == nil || !strings.Contains(err.Error(), "already used by group") {
+		t.Fatalf("prefix conflict must be rejected: %v", err)
 	}
-	err := reg.Save(context.Background(), &Model{Name: "u2", Plugin: "onlyf", Enabled: true})
-	if err == nil || !contains(err.Error(), "protocol") {
-		t.Fatalf("plugin protocol validation: %v", err)
+	mustGroup(t, reg, "demo2", "demo", map[string]any{"base_url": "https://x"})
+}
+
+func TestValidateMember_GroupMissingAndNameConflict(t *testing.T) {
+	// Given 组不存在 / 组内同名成员已存在 When SaveMember Then 拒绝
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	if err := reg.SaveMember(context.Background(), &Member{GroupID: 999, Name: "m", Enabled: true}); err == nil {
+		t.Fatal("member without group accepted")
+	}
+	g := mustGroup(t, reg, "demo", "demo", nil)
+	mustMember(t, reg, g.ID, "m", true)
+	err := reg.SaveMember(context.Background(), &Member{GroupID: g.ID, Name: "m", Enabled: true})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate member must be rejected: %v", err)
 	}
 }
 
-func TestPick_ThreeWayClassification(t *testing.T) {
-	// Given 一行声明模型 m When Pick Then 无模型→NoModel;能力不符→Capability;命中→候选
+func TestPick_FullPathExact_R1(t *testing.T) {
+	// R1 全路径精确:prefix/member 命中该组成员
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true})
-	_, pe, _ := reg.Pick("nope", nil, "openai-completions", false)
-	if pe != PickNoModel {
-		t.Fatalf("want NoModel, got %v", pe)
-	}
-	_, pe, _ = reg.Pick("m", []Feature{"vision"}, "openai-completions", false)
-	if pe != PickCapability {
-		t.Fatalf("want Capability, got %v", pe)
-	}
-	cands, _, err := reg.Pick("m", []Feature{"tools"}, "openai-completions", false)
+	g := mustGroup(t, reg, "opencode", "demo", nil)
+	mustMember(t, reg, g.ID, "gpt-4o", true)
+	cands, _, err := reg.Pick("opencode/gpt-4o", nil, "openai-completions", false)
 	if err != nil || len(cands) != 1 {
 		t.Fatalf("hit: %v %d", err, len(cands))
 	}
+	if cands[0].Group.Prefix != "opencode" || cands[0].Member.Name != "gpt-4o" {
+		t.Fatalf("candidate: %+v", cands[0])
+	}
 }
 
-func TestPick_ProtocolMismatchIsCapability(t *testing.T) {
-	// Given 行仅声明 openai-completions When anthropic 入口 Pick Then PickCapability
+func TestPick_ShortNameUnique_R2(t *testing.T) {
+	// R2 短名唯一:仅一组有该成员 → 直达
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true})
-	_, pe, _ := reg.Pick("m", nil, "anthropic-messages", false)
+	g := mustGroup(t, reg, "opencode", "demo", nil)
+	mustMember(t, reg, g.ID, "gpt-4o", true)
+	cands, _, err := reg.Pick("gpt-4o", nil, "openai-completions", false)
+	if err != nil || len(cands) != 1 || cands[0].Group.Prefix != "opencode" {
+		t.Fatalf("hit: %v %+v", err, cands)
+	}
+}
+
+func TestPick_ShortNamePollsAcrossGroups_R3(t *testing.T) {
+	// R3 短名歧义 → 组间轮询:连续命中在两组间交替
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	installBuiltinLikePkg(t, pkgs, "demo2")
+	ga := mustGroup(t, reg, "a", "demo", nil)
+	gb := mustGroup(t, reg, "b", "demo2", nil)
+	mustMember(t, reg, ga.ID, "m", true)
+	mustMember(t, reg, gb.ID, "m", true)
+	seen := map[string]int{}
+	for i := 0; i < 4; i++ {
+		cands, _, err := reg.Pick("m", nil, "openai-completions", false)
+		if err != nil || len(cands) != 1 {
+			t.Fatalf("pick %d: %v %+v", i, err, cands)
+		}
+		seen[cands[0].Group.Prefix]++
+	}
+	if seen["a"] != 2 || seen["b"] != 2 {
+		t.Fatalf("round robin must alternate: %v", seen)
+	}
+}
+
+func TestPick_LongestPrefixWins_R4(t *testing.T) {
+	// R4 最长前缀:组 "or" 与 "openrouter" 并存,openrouter/m 落 openrouter 组
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	installBuiltinLikePkg(t, pkgs, "demo2")
+	gor := mustGroup(t, reg, "or", "demo", nil)
+	gfull := mustGroup(t, reg, "openrouter", "demo2", nil)
+	mustMember(t, reg, gor.ID, "m", true)
+	mustMember(t, reg, gfull.ID, "m", true)
+	cands, _, err := reg.Pick("openrouter/m", nil, "openai-completions", false)
+	if err != nil || len(cands) != 1 || cands[0].Group.Prefix != "openrouter" {
+		t.Fatalf("longest prefix: %v %+v", err, cands)
+	}
+}
+
+func TestPick_MemberNameWithSlash_R5(t *testing.T) {
+	// R5 成员名含斜杠:opencode/openai/gpt-4o → 组 opencode 成员 openai/gpt-4o(禁止按 / 切分)
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	g := mustGroup(t, reg, "opencode", "demo", nil)
+	mustMember(t, reg, g.ID, "openai/gpt-4o", true)
+	cands, _, err := reg.Pick("opencode/openai/gpt-4o", nil, "openai-completions", false)
+	if err != nil || len(cands) != 1 || cands[0].Member.Name != "openai/gpt-4o" {
+		t.Fatalf("slashed member: %v %+v", err, cands)
+	}
+}
+
+func TestPick_ZeroHitIsNoModel_R6(t *testing.T) {
+	// R6 零命中 → NoModel;全路径点名不存在的成员同样 NoModel
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	g := mustGroup(t, reg, "opencode", "demo", nil)
+	mustMember(t, reg, g.ID, "m", true)
+	if pe, _ := func() (PickError, error) { _, pe, err := reg.Pick("nope", nil, "openai-completions", false); return pe, err }(); pe != PickNoModel {
+		t.Fatalf("unknown short: %v", pe)
+	}
+	if _, pe, _ := reg.Pick("opencode/ghost", nil, "openai-completions", false); pe != PickNoModel {
+		t.Fatalf("unknown member under prefix: %v", pe)
+	}
+}
+
+func TestPick_DisabledFiltered_R7(t *testing.T) {
+	// R7 禁用组/成员不参与解析;唯一声明被禁 → Capability 注明 disabled
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	gd := mustGroup(t, reg, "d", "demo", nil)
+	mustMember(t, reg, gd.ID, "m", true)
+	// 组禁用 → 短名零命中
+	if err := reg.SaveGroup(context.Background(), &Group{ID: gd.ID, Prefix: "d", Plugin: "demo", Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, pe, _ := reg.Pick("d/m", nil, "openai-completions", false); pe != PickNoModel {
+		t.Fatalf("disabled group must be invisible: %v", pe)
+	}
+	if _, pe, _ := reg.Pick("m", nil, "openai-completions", false); pe != PickNoModel {
+		t.Fatalf("disabled group member must be invisible: %v", pe)
+	}
+	// 重新启用组后:成员禁用(组启用)→ 声明存在但不可服务 → Capability
+	if err := reg.SaveGroup(context.Background(), &Group{ID: gd.ID, Prefix: "d", Plugin: "demo", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SaveMember(context.Background(), &Member{ID: mustMember(t, reg, gd.ID, "m2", true).ID, GroupID: gd.ID, Name: "m2", Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, pe, err := reg.Pick("d/m2", nil, "openai-completions", false); pe != PickCapability {
+		t.Fatalf("disabled member must classify Capability, got %v (%v)", pe, err)
+	}
+}
+
+func TestPick_CapabilityReasonsCarryGroupTag(t *testing.T) {
+	// Given 候选协议不符 When Pick Then 错误文案含 member@prefix 定位
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	g := mustGroup(t, reg, "oc", "demo", nil)
+	mustMember(t, reg, g.ID, "m", true)
+	_, pe, err := reg.Pick("m", nil, "anthropic-messages", false)
 	if pe != PickCapability {
 		t.Fatalf("want Capability, got %v", pe)
+	}
+	if !strings.Contains(err.Error(), "m@oc declares openai-completions") {
+		t.Fatalf("tagged reason missing: %v", err)
 	}
 }
 
 func TestPick_FormMismatchIsCapability(t *testing.T) {
-	// Given 行声明不含 streaming When stream=true Pick Then PickCapability
+	// Given 组实现不含 streaming When stream=true Pick Then PickCapability;非流式命中
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkgForm(t, pkgs, "demo", `["non_streaming"]`, `["tools"]`)
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true})
-	_, pe, _ := reg.Pick("m", nil, "openai-completions", true)
-	if pe != PickCapability {
+	g := mustGroup(t, reg, "d", "demo", nil)
+	mustMember(t, reg, g.ID, "m", true)
+	if _, pe, _ := reg.Pick("m", nil, "openai-completions", true); pe != PickCapability {
 		t.Fatalf("want Capability, got %v", pe)
 	}
 	if _, _, err := reg.Pick("m", nil, "openai-completions", false); err != nil {
@@ -196,95 +330,8 @@ func TestPick_FormMismatchIsCapability(t *testing.T) {
 	}
 }
 
-func TestPick_DisabledRowParticipatesInClassification(t *testing.T) {
-	// Given 唯一行 disabled When Pick Then 非 NoModel(404 不与真实声明矛盾),归 Capability 并注明 disabled
-	pkgs, reg := testEnv(t)
-	installBuiltinLikePkg(t, pkgs, "demo")
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: false})
-	_, pe, err := reg.Pick("m", nil, "openai-completions", false)
-	if pe != PickCapability {
-		t.Fatalf("disabled row must classify as Capability, got %v (%v)", pe, err)
-	}
-	if !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("reason must note disabled: %v", err)
-	}
-}
-
-func TestPick_SameNameAcrossProtocols(t *testing.T) {
-	// Given 同名绑定 openai 与 anthropic 两个插件 When 各入口 Pick Then 各自命中(v2 复合唯一核心场景)
-	pkgs, reg := testEnv(t)
-	installBuiltinLikePkg(t, pkgs, "oa")
-	anthManifest := `{"manifestVersion":1,"name":"an","version":"1","parts":{
-		"protocol":{"protocol":"anthropic-messages","features":["tools"]}}}`
-	anthSrc := `module.exports = function (config) {
-		return { buildRequest: function (ctx, entry) {
-			return { url: config.base_url + "/v1/messages", method: "POST", headers: {}, body: entry, stream: false };
-		}, mapResponse: function (ctx, b) { return b; } };
-	};
-	module.exports.settings = { base_url: setting.string({required: true}) };`
-	if err := pkgs.Install(context.Background(), buildZip(t, anthManifest, map[string]string{plugin.ProtocolEntry: anthSrc})); err != nil {
-		t.Fatal(err)
-	}
-	mustSave(t, reg, &Model{Name: "auto", Plugin: "oa", Enabled: true})
-	mustSave(t, reg, &Model{Name: "auto", Plugin: "an", Enabled: true})
-	cands, _, err := reg.Pick("auto", nil, "openai-completions", false)
-	if err != nil || len(cands) != 1 || cands[0].Model.Plugin != "oa" {
-		t.Fatalf("openai entry: %v %+v", err, cands)
-	}
-	cands, _, err = reg.Pick("auto", nil, "anthropic-messages", false)
-	if err != nil || len(cands) != 1 || cands[0].Model.Plugin != "an" {
-		t.Fatalf("anthropic entry: %v %+v", err, cands)
-	}
-}
-
-func TestPick_SameNameSamePluginDuplicateRejected(t *testing.T) {
-	// Given 同 (name, plugin) 重复行 When Save Then 唯一键冲突拒绝
-	pkgs, reg := testEnv(t)
-	installBuiltinLikePkg(t, pkgs, "demo")
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true})
-	if err := reg.Save(context.Background(), &Model{Name: "m", Plugin: "demo", Enabled: true}); err != nil {
-		t.Fatalf("upsert same key must be allowed (update): %v", err)
-	}
-	if len(reg.List()) != 1 {
-		t.Fatalf("upsert must not duplicate: %d", len(reg.List()))
-	}
-}
-
-func TestPick_CapabilityErrorCarriesReasons(t *testing.T) {
-	// Given 多行声明同一模型但各缺一样(槽/形态/feature)When Pick Then 错误文案逐行给出可自救原因
-	pkgs, reg := testEnv(t)
-	installBuiltinLikePkgForm(t, pkgs, "oa", `["streaming","non_streaming"]`, `["tools"]`)
-	installBuiltinLikePkgForm(t, pkgs, "ns", `["non_streaming"]`, `["tools"]`)
-	installBuiltinLikePkgForm(t, pkgs, "nv", `["streaming","non_streaming"]`, `["tools","vision"]`)
-	for _, name := range []string{"oa", "ns", "nv"} {
-		mustSave(t, reg, &Model{Name: "m", Plugin: name, Enabled: true})
-	}
-	// anthropic 入口:oa/ns 槽不符;nv 缺 streaming 形态下再缺 vision 无意义,单维断言
-	_, pe, err := reg.Pick("m", nil, "anthropic-messages", false)
-	if pe != PickCapability {
-		t.Fatalf("want Capability, got %v", pe)
-	}
-	if !strings.Contains(err.Error(), "m@oa declares openai-completions") {
-		t.Fatalf("slot reason missing: %v", err)
-	}
-	// openai 入口 stream + vision + thinking:ns 缺 streaming,nv 缺 thinking
-	_, pe, err = reg.Pick("m", []Feature{"vision", "thinking"}, "openai-completions", true)
-	if pe != PickCapability {
-		t.Fatalf("want Capability, got %v", pe)
-	}
-	if !strings.Contains(err.Error(), "m@ns implements non_streaming only") {
-		t.Fatalf("form reason missing: %v", err)
-	}
-	if !strings.Contains(err.Error(), "m@nv lacks thinking") {
-		t.Fatalf("feature reason missing: %v", err)
-	}
-	if !strings.Contains(err.Error(), "m@oa lacks vision, thinking") {
-		t.Fatalf("multi-feature reason missing: %v", err)
-	}
-}
-
 func TestResolve_FilterOrderAndConfig(t *testing.T) {
-	// Given 包含一 filter When Resolve Then filter 链就绪且协议闭包取包参数+包密钥
+	// Given 组含一 filter When Resolve Then filter 链就绪且协议闭包取组参数+包密钥
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "base")
 	fManifest := `{"manifestVersion":1,"name":"onlyf","version":"1","parts":{"filters":[{"name":"f1"}]}}`
@@ -306,10 +353,8 @@ func TestResolve_FilterOrderAndConfig(t *testing.T) {
 		plugin.ProtocolEntry: psrc, "filters/f1.js": fsrc})); err != nil {
 		t.Fatal(err)
 	}
-	mustSave(t, reg, &Model{Name: "m", Plugin: "base", Enabled: true,
-		Params: map[string]any{"base_url": "https://d"}})
-	m, _ := reg.Get(1)
-	res, release, err := reg.Resolve(m)
+	g := mustGroup(t, reg, "base", "base", map[string]any{"base_url": "https://d"})
+	res, release, err := reg.Resolve(g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,8 +374,8 @@ func TestResolve_FilterOrderAndConfig(t *testing.T) {
 	}
 }
 
-func TestSettings_InvalidateModelCaches(t *testing.T) {
-	// Given 行已实例化(闭包持有插件参数)When 改包参数并 EvictPackageSettings Then 新实例读到新值
+func TestSettings_InvalidateGroupCaches(t *testing.T) {
+	// Given 组已实例化(闭包持有插件参数)When 改包参数并 EvictPackageSettings Then 新实例读到新值
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
 	if _, err := pkgs.Keys().Set("demo", "api_key", map[string]any{"api_key": "sk-t"}); err != nil {
@@ -339,9 +384,8 @@ func TestSettings_InvalidateModelCaches(t *testing.T) {
 	if _, err := pkgs.Settings().Put("demo", plugin.PutInput{Config: map[string]any{"base_url": "https://old"}}); err != nil {
 		t.Fatal(err)
 	}
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true})
-	m, _ := reg.Get(1)
-	res, release, err := reg.Resolve(m)
+	g := mustGroup(t, reg, "demo", "demo", nil)
+	res, release, err := reg.Resolve(g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +402,7 @@ func TestSettings_InvalidateModelCaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg.EvictPackageSettings("demo")
-	res2, release2, err := reg.Resolve(m)
+	res2, release2, err := reg.Resolve(g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,98 +417,66 @@ func TestSettings_InvalidateModelCaches(t *testing.T) {
 }
 
 func TestSave_PersistAndReload(t *testing.T) {
-	// Given 保存行 When 同一 DB 重建 Registry 并 LoadFromDB Then 行恢复(params/enabled 一致)
+	// Given 保存组+成员 When 同一 DB 重建 Registry 并 LoadFromDB Then 组与成员恢复(params/enabled 一致)
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	mustSave(t, reg, &Model{Name: "m", Plugin: "demo", Enabled: true, Params: map[string]any{"base_url": "https://x"}})
+	mustGroup(t, reg, "demo", "demo", map[string]any{"base_url": "https://x"})
+	g2 := mustGroup(t, reg, "demo2", "demo", nil)
+	mustMember(t, reg, g2.ID, "m", true)
 	// 同库重建:plugin registry 复用(包声明仍在),upstream registry 全新实例走启动恢复链路
 	reg2 := NewRegistry(reg.db, pkgs)
 	if err := reg2.LoadFromDB(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	got, err := reg2.Get(1)
+	got, err := reg2.GetGroup(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "m" || got.Plugin != "demo" || !got.Enabled || got.Params["base_url"] != "https://x" {
-		t.Fatalf("roundtrip: %+v", got)
+	if got.Prefix != "demo" || got.Plugin != "demo" || !got.Enabled || got.Params["base_url"] != "https://x" {
+		t.Fatalf("group roundtrip: %+v", got)
+	}
+	mems := reg2.ListMembers(g2.ID)
+	if len(mems) != 1 || mems[0].Name != "m" || !mems[0].Enabled {
+		t.Fatalf("member roundtrip: %+v", mems)
 	}
 }
 
-func contains(s, sub string) bool { return strings.Contains(s, sub) }
-
-func TestMigrateV1_SecretsFromKv(t *testing.T) {
-	// Given v1 遗表(内嵌 secrets 为 null,凭据在 kv upstream:<名>)When 迁移 Then 密钥并入包级 keys 且 v1 表/kv 清理
+func TestDeleteGroup_CascadesMembers(t *testing.T) {
+	// Given 组含成员 When DeleteGroup Then 组与成员同灭
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	v1 := []string{
-		`CREATE TABLE upstreams_v1 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, base_package TEXT NOT NULL,
-			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
-			params_json TEXT NOT NULL DEFAULT '{}', filters_enabled_json TEXT NOT NULL DEFAULT '{}', strategy_json TEXT NOT NULL DEFAULT '{}',
-			enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT)`,
-		`INSERT INTO upstreams_v1 (name, base_package, models_json, targets_json) VALUES ('inst', 'demo',
-			'["m1"]', '[{"name":"t1","base_url":"https://old","secrets":null,"enabled":true}]')`,
-		`INSERT INTO kv (ns, key, value) VALUES ('upstream:inst', 'secrets:inst', '{"api_key":"sk-v1"}')`,
-	}
-	for _, stmt := range v1 {
-		if _, err := reg.db.Exec(stmt); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := reg.migrateV1(context.Background()); err != nil {
+	g := mustGroup(t, reg, "demo", "demo", nil)
+	m := mustMember(t, reg, g.ID, "m", true)
+	if err := reg.DeleteGroup(context.Background(), g.ID); err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	if err := reg.db.QueryRow(`SELECT COUNT(*) FROM upstreams WHERE name='m1' AND base_package='demo'`).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("model row migrated: n=%d err=%v", n, err)
+	if _, err := reg.GetGroup(g.ID); err == nil {
+		t.Fatal("group survived")
 	}
-	val, ok := pkgs.Keys().Get("demo", "api_key")
-	if !ok || val.Data != "sk-v1" {
-		t.Fatalf("package key from v1 kv: %+v %v", val, ok)
+	if _, err := reg.GetMember(m.ID); err == nil {
+		t.Fatal("member survived group delete")
 	}
-	if err := reg.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='upstreams_v1'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("v1 table dropped: %d", n)
-	}
-	if err := reg.db.QueryRow(`SELECT COUNT(*) FROM kv WHERE ns LIKE 'upstream:%'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("v1 kv cleaned: %d", n)
+	if reg.PollGroupCount("m") != 0 {
+		t.Fatal("poll index not cleaned")
 	}
 }
 
-func TestMigrateV1_TasksOverridePreserved(t *testing.T) {
-	// Given v1 库已有包级 tasks 覆盖(hooks 时代遗留)When 迁移写包参数 Then tasks 覆盖不被 Put 全量覆盖清掉
+func TestPollGroupCount(t *testing.T) {
+	// Given 短名存在于两组(一组禁用)When PollGroupCount Then 只计启用组
 	pkgs, reg := testEnv(t)
 	installBuiltinLikePkg(t, pkgs, "demo")
-	if _, err := pkgs.Settings().Put("demo", plugin.PutInput{
-		Tasks: map[string]map[string]any{"refresh": {"cron": "0 */6 * * *"}},
-	}); err != nil {
+	installBuiltinLikePkg(t, pkgs, "demo2")
+	ga := mustGroup(t, reg, "a", "demo", nil)
+	gb := mustGroup(t, reg, "b", "demo2", nil)
+	mustMember(t, reg, ga.ID, "m", true)
+	mustMember(t, reg, gb.ID, "m", true)
+	if n := reg.PollGroupCount("m"); n != 2 {
+		t.Fatalf("poll count: %d", n)
+	}
+	if err := reg.SaveGroup(context.Background(), &Group{ID: gb.ID, Prefix: "b", Plugin: "demo2", Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
-	stmts := []string{
-		`CREATE TABLE upstreams_v1 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, base_package TEXT NOT NULL,
-			extras_json TEXT NOT NULL DEFAULT '[]', models_json TEXT NOT NULL DEFAULT '[]', targets_json TEXT NOT NULL DEFAULT '[]',
-			params_json TEXT NOT NULL DEFAULT '{}', filters_enabled_json TEXT NOT NULL DEFAULT '{}', strategy_json TEXT NOT NULL DEFAULT '{}',
-			enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT)`,
-		`INSERT INTO upstreams_v1 (name, base_package, models_json, targets_json, params_json) VALUES ('i1', 'demo',
-			'["m1"]', '[]', '{"base_url":"https://keep"}')`,
-	}
-	for _, stmt := range stmts {
-		if _, err := reg.db.Exec(stmt); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := reg.migrateV1(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	view := pkgs.Settings().View("demo")
-	if cfg, _ := view.Overrides["config"].(map[string]any); cfg["base_url"] != "https://keep" {
-		t.Fatalf("config migrated: %v", view.Overrides)
-	}
-	tasks, ok := view.Overrides["tasks"].(map[string]any)
-	if !ok {
-		t.Fatalf("tasks override lost: %v", view.Overrides)
-	}
-	doc, _ := tasks["refresh"].(map[string]any)
-	if doc == nil || doc["cron"] != "0 */6 * * *" {
-		t.Fatalf("tasks content: %v", tasks)
+	if n := reg.PollGroupCount("m"); n != 1 {
+		t.Fatalf("poll count after disable: %d", n)
 	}
 }

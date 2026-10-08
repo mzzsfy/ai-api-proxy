@@ -140,11 +140,13 @@ func newIPPFixture(t *testing.T, tr TransportCfg) *ippFixture {
 		plugin.PutInput{Config: map[string]any{"base_url": up.URL}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.Registry.Save(ctx, &upstream.Model{
-		Name: "m-ipp", Plugin: "openai-compatible", Enabled: true,
-		Params: map[string]any{"transport": tr.Name},
-	}); err != nil {
-		t.Fatalf("save model row: %v", err)
+	g := &upstream.Group{Prefix: "ipp", Plugin: "openai-compatible", Enabled: true,
+		Params: map[string]any{"transport": tr.Name}}
+	if err := app.Registry.SaveGroup(ctx, g); err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	if err := app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: "m-ipp", Enabled: true}); err != nil {
+		t.Fatalf("save member: %v", err)
 	}
 	gw := httptest.NewServer(app.Mux)
 	t.Cleanup(gw.Close)

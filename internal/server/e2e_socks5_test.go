@@ -177,9 +177,11 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 		"base_url": upSrv.URL, "protocol": "openai-completions", "transport": "sx"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.Registry.Save(ctx, &upstream.Model{
-		Name: "m-socks5", Plugin: "js-openai", Enabled: true,
-	}); err != nil {
+	g := &upstream.Group{Prefix: "socks", Plugin: "js-openai", Enabled: true}
+	if err := app.Registry.SaveGroup(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: "m-socks5", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	gateway := httptest.NewServer(app.Mux)

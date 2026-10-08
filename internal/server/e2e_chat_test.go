@@ -11,15 +11,15 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
-// chatTestUp 查模型行 id
-func chatTestUp(t *testing.T, f *fourGroupsFixture, name string) int64 {
+// chatTestGroup 查组 id(前缀=夹具内唯一短名)
+func chatTestGroup(t *testing.T, f *fourGroupsFixture, name string) int64 {
 	t.Helper()
-	for _, u := range f.app.Registry.List() {
-		if u.Name == name {
-			return u.ID
+	for _, g := range f.app.Registry.ListGroups() {
+		if g.Prefix == name {
+			return g.ID
 		}
 	}
-	t.Fatalf("model row %s not found", name)
+	t.Fatalf("group %s not found", name)
 	return 0
 }
 
@@ -37,12 +37,14 @@ func liveOnce(t *testing.T, f *fourGroupsFixture) map[string]any {
 	return live
 }
 
-// saveRow 测试内快速建行(v2:行名即模型名,连接差异走行 params 覆盖)
+// saveRow 测试内快速建组+成员(前缀=成员名;组 params 覆盖连接差异槽)
 func saveRow(t *testing.T, f *fourGroupsFixture, name, pkg string, params map[string]any) {
 	t.Helper()
-	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: name, Plugin: pkg, Enabled: true, Params: params,
-	}); err != nil {
+	g := &upstream.Group{Prefix: name, Plugin: pkg, Enabled: true, Params: params}
+	if err := f.app.Registry.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: name, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -50,8 +52,8 @@ func saveRow(t *testing.T, f *fourGroupsFixture, name, pkg string, params map[st
 func TestChatTest_Success(t *testing.T) {
 	// Given 可用模型行 When POST chat-test(消息) Then 200 ok:true 返回 latency/status/body 且 模型行/包双维度计数+1
 	f := newFourGroups(t)
-	id := chatTestUp(t, f, "m-direct")
-	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+	id := chatTestGroup(t, f, "m-direct")
+	code, body := f.adminPost(t, "/admin/api/groups/"+strconv.FormatInt(id, 10)+"/chat-test",
 		`{"message":"你好"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
@@ -88,8 +90,8 @@ func TestChatTest_UpstreamErrorCounts(t *testing.T) {
 	t.Cleanup(srv.Close)
 	// 行 params 覆盖包参数 base_url(v2 覆盖层级:模型 > 插件)
 	saveRow(t, f, "m-e500", "js-openai", map[string]any{"base_url": srv.URL})
-	id := chatTestUp(t, f, "m-e500")
-	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+	id := chatTestGroup(t, f, "m-e500")
+	code, body := f.adminPost(t, "/admin/api/groups/"+strconv.FormatInt(id, 10)+"/chat-test",
 		`{"message":"ping"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
@@ -115,8 +117,8 @@ func TestChatTest_Unreachable(t *testing.T) {
 	// Given 行 params 指向不可达地址 When chat-test Then 200 ok:false 且 by_package errors +1
 	f := newFourGroups(t)
 	saveRow(t, f, "m-dead", "js-openai", map[string]any{"base_url": "http://127.0.0.1:1"})
-	id := chatTestUp(t, f, "m-dead")
-	code, body := f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test",
+	id := chatTestGroup(t, f, "m-dead")
+	code, body := f.adminPost(t, "/admin/api/groups/"+strconv.FormatInt(id, 10)+"/chat-test",
 		`{"message":"ping"}`)
 	if code != http.StatusOK {
 		t.Fatalf("chat-test: %d %s", code, body)
@@ -133,12 +135,12 @@ func TestChatTest_Unreachable(t *testing.T) {
 func TestChatTest_NotFoundAndValidation(t *testing.T) {
 	// Given 不存在的行 id When chat-test Then 404(行名即模型名,请求体仅消息)
 	f := newFourGroups(t)
-	code, _ := f.adminPost(t, "/admin/api/models/99999/chat-test", `{"message":"hi"}`)
+	code, _ := f.adminPost(t, "/admin/api/groups/99999/chat-test", `{"message":"hi"}`)
 	if code != http.StatusNotFound {
 		t.Fatalf("not found: %d", code)
 	}
-	id := chatTestUp(t, f, "m-direct")
-	code, _ = f.adminPost(t, "/admin/api/models/"+strconv.FormatInt(id, 10)+"/chat-test", `{}`)
+	id := chatTestGroup(t, f, "m-direct")
+	code, _ = f.adminPost(t, "/admin/api/groups/"+strconv.FormatInt(id, 10)+"/chat-test", `{}`)
 	if code != http.StatusOK {
 		t.Fatalf("default message ping: %d", code)
 	}

@@ -96,10 +96,12 @@ func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 		"base_url": "https://openrouter.ai/api"}}); err != nil {
 		t.Fatalf("put opencode params: %v", err)
 	}
-	if err := f.app.Registry.Save(ctx, &upstream.Model{
-		Name: model, Plugin: "opencode", Enabled: true,
-	}); err != nil {
-		t.Fatalf("save opencode row: %v", err)
+	g := &upstream.Group{Prefix: "opencode", Plugin: "opencode", Enabled: true}
+	if err := f.app.Registry.SaveGroup(ctx, g); err != nil {
+		t.Fatalf("save opencode group: %v", err)
+	}
+	if err := f.app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: model, Enabled: true}); err != nil {
+		t.Fatalf("save opencode member: %v", err)
 	}
 	return f
 }
@@ -186,15 +188,15 @@ func TestRealOpencode_AdminTestEndpoint(t *testing.T) {
 	key, model := opencodeTestEnv(t)
 	f := newOpencodeFixture(t, key, model)
 	var id int64
-	for _, u := range f.app.Registry.List() {
-		if u.Name == model {
-			id = u.ID
+	for _, g := range f.app.Registry.ListGroups() {
+		if g.Prefix == "opencode" {
+			id = g.ID
 		}
 	}
 	if id == 0 {
-		t.Fatal("model row not found")
+		t.Fatal("opencode group not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/test", id), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("admin test: %d %s", status, body)
 	}
@@ -234,29 +236,25 @@ func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 		"base_url": "https://openrouter.ai/api"}}); err != nil {
 		t.Fatal(err)
 	}
+	// 组一次性建好,成员逐 key 命名(组内短名唯一)
+	g := &upstream.Group{Prefix: "opencode", Plugin: "opencode", Enabled: true}
+	if err := f.app.Registry.SaveGroup(ctx, g); err != nil {
+		t.Fatal(err)
+	}
 	for i, key := range strings.Split(pool, ",") {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		name := fmt.Sprintf("probe-%s", model)
-		if err := f.app.Registry.Save(ctx, &upstream.Model{
-			Name: name, Plugin: "opencode", Enabled: true,
-		}); err != nil {
+		name := fmt.Sprintf("probe-%d-%s", i, model)
+		if err := f.app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: name, Enabled: true}); err != nil {
 			t.Fatal(err)
 		}
-		// 逐 key 换包密钥后测(v2 密钥在包级,改名行会撞唯一键)
 		if _, err := f.app.AdminDeps.Packages.Keys().Set("opencode", "api_key", map[string]any{"api_key": key}); err != nil {
 			t.Fatal(err)
 		}
-		var id int64
-		for _, x := range f.app.Registry.List() {
-			if x.Name == name {
-				id = x.ID
-			}
-		}
 		start := time.Now()
-		status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", id), "")
+		status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/test", g.ID), "")
 		latency := time.Since(start).Milliseconds()
 		t.Logf("key[%d] => http %d body %s (%dms)", i, status, body, latency)
 	}

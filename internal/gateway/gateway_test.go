@@ -35,14 +35,17 @@ type fixture struct {
 	seenCount   int
 }
 
-// v2Ddl 新模型行表(测试库)
+// v2Ddl 组化双表(与 004 迁移后形态一致)
 func v2Ddl() []string {
 	return []string{
 		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
 			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
-		`CREATE TABLE upstreams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, base_package TEXT NOT NULL,
+		`CREATE TABLE model_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
 			params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (name, base_package))`,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+		`CREATE TABLE model_members (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL REFERENCES model_groups(id) ON DELETE CASCADE,
+			name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (group_id, name))`,
 		`CREATE TABLE kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (ns, key))`,
 		`CREATE TABLE package_keys (name TEXT PRIMARY KEY, data_json TEXT NOT NULL DEFAULT '{}', prev_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`,
@@ -96,8 +99,11 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		t.Fatal(err)
 	}
 	reg := upstream.NewRegistry(db, pkgs)
-	u := &upstream.Model{Name: "test-model", Enabled: true, Plugin: "openai-compatible"}
-	if err := reg.Save(context.Background(), u); err != nil {
+	g := &upstream.Group{Prefix: "gw", Plugin: "openai-compatible", Enabled: true}
+	if err := reg.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: "test-model", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	trMgr, err := transport.NewManager(nil)
@@ -196,8 +202,11 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 		t.Fatal(err)
 	}
 	reg := upstream.NewRegistry(db, pkgs)
-	u := &upstream.Model{Name: "test-model", Enabled: true, Plugin: "js-proto"}
-	if err := reg.Save(context.Background(), u); err != nil {
+	g := &upstream.Group{Prefix: "js", Plugin: "js-proto", Enabled: true}
+	if err := reg.SaveGroup(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: "test-model", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	f.reg = reg
@@ -307,10 +316,10 @@ func TestMessages_CapabilityMismatch400(t *testing.T) {
 		t.Fatalf("anthropic error shape: %s", w.Body.String())
 	}
 	// 逐行原因(槽不符)+ 模型声明方汇总,用户可据此换入口或换插件
-	if !strings.Contains(w.Body.String(), "test-model@openai-compatible declares openai-completions") {
+	if !strings.Contains(w.Body.String(), "test-model@gw declares openai-completions") {
 		t.Fatalf("reason missing: %s", w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "declared by test-model@openai-compatible(openai-completions)") {
+	if !strings.Contains(w.Body.String(), "declared by test-model@gw(openai-completions)") {
 		t.Fatalf("slot summary missing: %s", w.Body.String())
 	}
 }
@@ -375,12 +384,54 @@ func TestModels_Aggregation(t *testing.T) {
 	data := m["data"].([]any)
 	found := false
 	for _, d := range data {
-		if d.(map[string]any)["id"] == "test-model" {
+		if d.(map[string]any)["id"] == "gw/test-model" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("models: %v", m)
+	}
+}
+
+func TestModels_ListingModes(t *testing.T) {
+	// L1-L3:listing full=仅全路径;short=仅短名;both=全路径∪短名
+	f := newFixture(t, 200, "application/json", `{}`)
+	cases := map[string][]string{
+		"full":  {"gw/test-model"},
+		"short": {"test-model"},
+		"both":  {"gw/test-model", "test-model"},
+	}
+	for listing, want := range cases {
+		f.g.ModelsListing = listing
+		w := httptest.NewRecorder()
+		f.g.Models(w, httptest.NewRequest("GET", "/v1/models", nil))
+		var m map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &m)
+		var got []string
+		for _, d := range m["data"].([]any) {
+			got = append(got, d.(map[string]any)["id"].(string))
+		}
+		if len(got) != len(want) {
+			t.Fatalf("listing %s: got %v want %v", listing, got, want)
+		}
+		for _, id := range want {
+			found := false
+			for _, gv := range got {
+				if gv == id {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("listing %s: missing %s in %v", listing, id, got)
+			}
+		}
+	}
+	// 非法值兜底 = full
+	f.g.ModelsListing = "bogus"
+	w := httptest.NewRecorder()
+	f.g.Models(w, httptest.NewRequest("GET", "/v1/models", nil))
+	if !strings.Contains(w.Body.String(), "gw/test-model") || strings.Contains(w.Body.String(), `"test-model"`) {
+		t.Fatalf("bogus listing must fall back to full: %s", w.Body.String())
 	}
 }
 
@@ -424,7 +475,7 @@ func TestHistory_RecordsFastPath(t *testing.T) {
 	if e.Method != "POST" || e.Path != "/v1/chat/completions" || e.Model != "test-model" {
 		t.Fatalf("basic fields: %+v", e)
 	}
-	if e.Upstream != "test-model" || e.Target != "-" {
+	if e.Upstream != "gw/test-model" || e.Target != "-" {
 		t.Fatalf("routing fields: %+v", e)
 	}
 	if e.Status != 200 || e.DurationMS < 0 || e.Stream {
@@ -494,7 +545,7 @@ func TestHistory_RecordsPipelinePath(t *testing.T) {
 	f.g.ChatCompletions(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"test-model","messages":[]}`)))
 	e := lastHistory(t, h)
-	if e.Status != 200 || e.Upstream != "test-model" || e.Target != "-" {
+	if e.Status != 200 || e.Upstream != "js/test-model" || e.Target != "-" {
 		t.Fatalf("pipeline record: %+v", e)
 	}
 }

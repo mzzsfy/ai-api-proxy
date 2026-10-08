@@ -43,8 +43,10 @@ type Config struct {
 	// PackDir 打包输出目录(非空则打包两级目录内的包到该目录后退出;唯一 .aap 产出路径)
 	PackDir string `yaml:"pack_dir"`
 	// HistoryRetentionDays 请求历史保留天数(独立库 history.db);<0 永久保留,0 视为未配置取默认
-	HistoryRetentionDays int            `yaml:"history_retention_days"`
-	Transports           []TransportCfg `yaml:"transports"`
+	HistoryRetentionDays int `yaml:"history_retention_days"`
+	// ModelsListing /v1/models 列表模式:full(全路径,默认)|short(短名,歧义名轮询)|both(全路径∪短名)
+	ModelsListing   string         `yaml:"models_listing"`
+	Transports      []TransportCfg `yaml:"transports"`
 }
 
 // defaultHistoryRetentionDays 未配置时的请求历史保留天数
@@ -124,6 +126,9 @@ func applyEnv(cfg *Config) {
 			cfg.HistoryRetentionDays = n
 		}
 	}
+	if v := os.Getenv("API_PROXY_MODELS_LISTING"); v != "" {
+		cfg.ModelsListing = v
+	}
 }
 
 func applyDefaults(cfg *Config) {
@@ -148,6 +153,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.HistoryRetentionDays == 0 {
 		cfg.HistoryRetentionDays = defaultHistoryRetentionDays
 	}
+	if cfg.ModelsListing == "" {
+		cfg.ModelsListing = "full"
+	}
 }
 
 // EnsureDirs 建齐数据/插件/打包目录
@@ -170,6 +178,11 @@ func (c *Config) Validate() error {
 	}
 	if len(c.APIKeys) == 0 {
 		return fmt.Errorf("api_keys is empty: refuse to start")
+	}
+	switch c.ModelsListing {
+	case "", "full", "short", "both": // 空 = 未配置(Load 会取默认 full;直接构造 Config 的调用方合法)
+	default:
+		return fmt.Errorf("models_listing must be full|short|both, got %q", c.ModelsListing)
 	}
 	for i, t := range c.Transports {
 		if t.Name == "" {

@@ -60,45 +60,41 @@ func TestGUI_PartCodeEditRemoved(t *testing.T) {
 }
 
 func TestGUI_ModelTestEndpoint(t *testing.T) {
-	// Given 已装配模型行 When POST /models/{id}/test Then ok=true 且延迟>0;坏行 ok=false 带原因
+	// Given 已装配模型组 When POST /groups/{id}/test Then ok=true 且延迟>0;坏组 ok=false 带原因
 	f := newFourGroups(t)
-	// ① 好行:直连组(m-direct 的行 id 查列表)
-	rows := f.app.Registry.List()
+	// ① 好组:直连组(m-direct 的组 id 查列表)
+	groups := f.app.Registry.ListGroups()
 	var goodID int64
-	for _, u := range rows {
-		if u.Name == "m-direct" {
-			goodID = u.ID
+	for _, g := range groups {
+		if g.Prefix == "m-direct" {
+			goodID = g.ID
 		}
 	}
 	if goodID == 0 {
-		t.Fatal("good model row not found")
+		t.Fatal("good model group not found")
 	}
-	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", goodID), "")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/test", goodID), "")
 	if status != http.StatusOK || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("test good: %d %s", status, body)
 	}
 	if !strings.Contains(body, `"latency_ms":`) {
 		t.Fatalf("latency missing: %s", body)
 	}
-	// ② 坏行:params 覆盖 base_url 指向不可达端口(v2 覆盖层级:模型 > 插件)
-	if err := f.app.Registry.Save(context.Background(), &upstream.Model{
-		Name: "m-dead", Plugin: "js-openai", Enabled: true,
-		Params: map[string]any{"base_url": "http://127.0.0.1:1"},
-	}); err != nil {
+	// ② 坏组:组 params 覆盖 base_url 指向不可达端口(覆盖层级:组 > 插件)
+	g := &upstream.Group{Prefix: "m-dead", Plugin: "js-openai", Enabled: true,
+		Params: map[string]any{"base_url": "http://127.0.0.1:1"}}
+	if err := f.app.Registry.SaveGroup(context.Background(), g); err != nil {
 		t.Fatal(err)
 	}
-	var badID int64
-	for _, u := range f.app.Registry.List() {
-		if u.Name == "m-dead" {
-			badID = u.ID
-		}
+	if err := f.app.Registry.SaveMember(context.Background(), &upstream.Member{GroupID: g.ID, Name: "m-dead", Enabled: true}); err != nil {
+		t.Fatal(err)
 	}
-	status, body = f.adminPost(t, fmt.Sprintf("/admin/api/models/%d/test", badID), "")
+	status, body = f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/test", g.ID), "")
 	if status != http.StatusOK {
 		t.Fatalf("test bad status: %d %s", status, body)
 	}
 	if !strings.Contains(body, `"ok":false`) {
-		t.Fatalf("bad model row must report failure: %s", body)
+		t.Fatalf("bad model group must report failure: %s", body)
 	}
 }
 

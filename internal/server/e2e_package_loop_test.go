@@ -177,11 +177,13 @@ func TestPackageLoop_TemplateInstallExportReimport(t *testing.T) {
 		t.Fatalf("revision after import-url: %d", f.app.AdminDeps.Packages.Revision("my-package"))
 	}
 
-	// ⑦ 模板包 filter 为透传形态;v2 行单包绑定 → 直连 js-openai 行真实 E2E 连通
-	if err := f.app.Registry.Save(ctx, &upstream.Model{
-		Name: "m-loop", Plugin: "js-openai", Enabled: true,
-	}); err != nil {
-		t.Fatalf("save loop model row: %v", err)
+	// ⑦ 模板包 filter 为透传形态;组单包绑定 → 直连 js-openai 组真实 E2E 连通
+	gLoop := &upstream.Group{Prefix: "loop", Plugin: "js-openai", Enabled: true}
+	if err := f.app.Registry.SaveGroup(ctx, gLoop); err != nil {
+		t.Fatalf("save loop group: %v", err)
+	}
+	if err := f.app.Registry.SaveMember(ctx, &upstream.Member{GroupID: gLoop.ID, Name: "m-loop", Enabled: true}); err != nil {
+		t.Fatalf("save loop member: %v", err)
 	}
 	payload := `{"model":"m-loop","messages":[{"role":"user","content":"hello"}],"stream":false}`
 	code, respBody := f.post(t, "/v1/chat/completions", map[string]string{
@@ -244,7 +246,7 @@ func TestPackageDelete_ReferencedRejected(t *testing.T) {
 	f := newFourGroups(t)
 	// ① 被 g1 引用的 js-openai:卸载 → 409 引用列表
 	code, body := f.adminMethod(t, http.MethodDelete, "/admin/api/packages/js-openai", "")
-	if code != http.StatusConflict || !strings.Contains(body, "模型行引用") {
+	if code != http.StatusConflict || !strings.Contains(body, "模型组引用") {
 		t.Fatalf("delete referenced: %d %s", code, body)
 	}
 	// ② 无引用包:卸载 → 200;再卸载 → 404

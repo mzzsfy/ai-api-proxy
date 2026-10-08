@@ -211,13 +211,27 @@ transports:
 		}
 	}
 	mkRow := func(name, pkg string, params map[string]any) {
-		b, err := json.Marshal(map[string]any{"name": name, "plugin": pkg, "enabled": true, "params": params})
+		b, err := json.Marshal(map[string]any{"prefix": name, "plugin": pkg, "enabled": true, "params": params})
 		if err != nil {
 			t.Fatal(err)
 		}
-		st, bd := postAdmin(t, client, base, "/admin/api/models", "application/json", b)
+		st, bd := postAdmin(t, client, base, "/admin/api/groups", "application/json", b)
 		if st != http.StatusOK {
-			t.Fatalf("save %s %d: %s", name, st, bd)
+			t.Fatalf("save group %s %d: %s", name, st, bd)
+		}
+		var created struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(bd), &created); err != nil || created.ID == 0 {
+			t.Fatalf("group body %s: %v", bd, err)
+		}
+		mb, err := json.Marshal(map[string]any{"name": name, "enabled": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, bd = postAdmin(t, client, base, fmt.Sprintf("/admin/api/groups/%d/members", created.ID), "application/json", mb)
+		if st != http.StatusOK {
+			t.Fatalf("save member %s %d: %s", name, st, bd)
 		}
 	}
 	mkRow("m-direct", "js-openai", nil)

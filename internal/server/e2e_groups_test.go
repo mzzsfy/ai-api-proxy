@@ -316,11 +316,14 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 			t.Fatal(err)
 		}
 	}
-	// mkRow 建模型行:行名即模型名;transport/rewrite 目标模型以行 params 覆盖
+	// mkRow 建组+成员:成员短名即模型名;transport/rewrite 目标模型以组 params 覆盖
 	mkRow := func(name, pkg string, params map[string]any) {
-		m := &upstream.Model{Name: name, Plugin: pkg, Enabled: true, Params: params}
-		if err := app.Registry.Save(ctx, m); err != nil {
-			t.Fatalf("save %s: %v", name, err)
+		g := &upstream.Group{Prefix: name, Plugin: pkg, Enabled: true, Params: params}
+		if err := app.Registry.SaveGroup(ctx, g); err != nil {
+			t.Fatalf("save group %s: %v", name, err)
+		}
+		if err := app.Registry.SaveMember(ctx, &upstream.Member{GroupID: g.ID, Name: name, Enabled: true}); err != nil {
+			t.Fatalf("save member %s: %v", name, err)
 		}
 	}
 	mkRow("m-direct", "js-openai", nil)
