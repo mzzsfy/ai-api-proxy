@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -427,10 +428,14 @@ var (
 	transportProbeTimeout = 10 * time.Second
 )
 
-// groupTestTarget 组级测试目标:组 + 组内首个启用成员名(无启用成员即不可测)
+// groupTestTarget 组级测试目标:组 + 组内首个启用成员名(无启用成员即不可测)。
+// 组不存在时错误信息固定以 "group not found" 开头——admin chat-test 404 分类依赖该约定(错误串跨 Deps 边界,无法 errors.Is)
 func groupTestTarget(reg *upstream.Registry, id int64) (*upstream.Group, string, error) {
 	grp, err := reg.GetGroup(id)
 	if err != nil {
+		if errors.Is(err, upstream.ErrNotFound) {
+			return nil, "", fmt.Errorf("group not found: %v", err)
+		}
 		return nil, "", err
 	}
 	for _, m := range reg.ListMembers(id) {

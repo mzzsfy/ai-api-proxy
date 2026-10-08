@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -270,7 +271,7 @@ func (r *Registry) SaveGroup(ctx context.Context, g *Group) error {
 	if g.ID > 0 {
 		if cur, ok := r.byGroup[g.ID]; !ok {
 			r.mu.RUnlock()
-			return fmt.Errorf("group %d not found", g.ID)
+			return fmt.Errorf("%w: group %d not found", ErrNotFound, g.ID)
 		} else if cur.Plugin != g.Plugin {
 			r.mu.RUnlock()
 			return fmt.Errorf("plugin is immutable on group")
@@ -278,7 +279,7 @@ func (r *Registry) SaveGroup(ctx context.Context, g *Group) error {
 	}
 	r.mu.RUnlock()
 	if dup != nil {
-		return fmt.Errorf("prefix %q already used by group %d", g.Prefix, dup.ID)
+		return fmt.Errorf("%w: prefix %q already used by group %d", ErrConflict, g.Prefix, dup.ID)
 	}
 	paramsRaw, _ := json.Marshal(g.Params)
 	if g.ID == 0 {
@@ -316,7 +317,7 @@ func (r *Registry) ValidateMember(m *Member) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if _, ok := r.byGroup[m.GroupID]; !ok {
-		return fmt.Errorf("group %d not found", m.GroupID)
+		return fmt.Errorf("%w: group %d not found", ErrNotFound, m.GroupID)
 	}
 	return nil
 }
@@ -331,12 +332,12 @@ func (r *Registry) SaveMember(ctx context.Context, m *Member) error {
 		for _, other := range r.byMember {
 			if other.GroupID == m.GroupID && other.Name == m.Name {
 				r.mu.RUnlock()
-				return fmt.Errorf("member %q already exists in group %d", m.Name, m.GroupID)
+				return fmt.Errorf("%w: member %q already exists in group %d", ErrConflict, m.Name, m.GroupID)
 			}
 		}
 	} else if cur, ok := r.byMember[m.ID]; !ok {
 		r.mu.RUnlock()
-		return fmt.Errorf("member %d not found", m.ID)
+		return fmt.Errorf("%w: member %d not found", ErrNotFound, m.ID)
 	} else if cur.GroupID != m.GroupID || cur.Name != m.Name {
 		r.mu.RUnlock()
 		return fmt.Errorf("group/name are immutable on member")
@@ -374,7 +375,7 @@ func (r *Registry) DeleteGroup(ctx context.Context, id int64) error {
 	}
 	r.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("group %d not found", id)
+		return fmt.Errorf("%w: group %d not found", ErrNotFound, id)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -443,7 +444,7 @@ func (r *Registry) DeleteMember(ctx context.Context, id int64) error {
 	m, ok := r.byMember[id]
 	r.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("member %d not found", id)
+		return fmt.Errorf("%w: member %d not found", ErrNotFound, id)
 	}
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM model_members WHERE id=?`, id); err != nil {
 		return fmt.Errorf("delete member: %w", err)
@@ -462,10 +463,18 @@ func (r *Registry) DeleteMember(ctx context.Context, id int64) error {
 	return nil
 }
 
-// normalizeUniqueErr SQLite UNIQUE 冲突 → 友好冲突错误(并发检查-写入窗口兜底;非冲突原样返回)
+// 哨兵错误:调用方(admin 路由层)用 errors.Is 分类 HTTP 状态码,禁止按错误文案字符串匹配
+var (
+	// ErrNotFound 目标不存在(→ 404)
+	ErrNotFound = errors.New("not found")
+	// ErrConflict 唯一键冲突(→ 409)
+	ErrConflict = errors.New("conflict")
+)
+
+// normalizeUniqueErr SQLite UNIQUE 冲突 → ErrConflict 包装(并发检查-写入窗口兜底;非冲突原样返回)
 func normalizeUniqueErr(err error, friendly string) error {
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
-		return fmt.Errorf("%s", friendly)
+		return fmt.Errorf("%w: %s", ErrConflict, friendly)
 	}
 	return err
 }
@@ -476,7 +485,7 @@ func (r *Registry) GetGroup(id int64) (*Group, error) {
 	defer r.mu.RUnlock()
 	g, ok := r.byGroup[id]
 	if !ok {
-		return nil, fmt.Errorf("group %d not found", id)
+		return nil, fmt.Errorf("%w: group %d not found", ErrNotFound, id)
 	}
 	return copyGroup(g), nil
 }

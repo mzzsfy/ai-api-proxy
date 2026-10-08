@@ -476,7 +476,12 @@ const columns: DataTableColumns<ModelGroup> = [
         从上游 /v1/models 拉取列表,按规则管道过滤改名。至少需要一条 only/exclude 规则。
       </p>
       <div v-for="(rule, i) in discoverRules" :key="i" class="rule-row">
-        <NSelect v-model:value="rule.op" :options="opOptions" style="width: 190px" />
+        <NSelect
+          v-model:value="rule.op"
+          :options="opOptions"
+          style="width: 190px"
+          @update:value="(v: string) => { if (v === 'limit' && rule.limit === null) rule.limit = 50 }"
+        />
         <NInput
           v-if="rule.op === 'only' || rule.op === 'exclude'"
           v-model:value="rule.regex"

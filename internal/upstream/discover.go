@@ -4,12 +4,16 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 )
+
+// ErrUpstream 上游不可达或状态异常(→ 502;区别于 400 规则/参数问题)
+var ErrUpstream = errors.New("upstream error")
 
 // DiscoveryRule 规则管道单步(顺序执行;op 语义见 DiscoveryRequest)
 type DiscoveryRule struct {
@@ -89,7 +93,7 @@ func (r *Registry) Discover(ctx context.Context, groupID int64, req DiscoveryReq
 	}
 	names, err := fetchUpstreamModels(ctx, hc, decl.ProtocolStyle, rawBase, r.discoveryAuth(g.Plugin))
 	if err != nil {
-		return nil, fmt.Errorf("fetch models: %w", err)
+		return nil, fmt.Errorf("%w: fetch models: %v", ErrUpstream, err)
 	}
 	hits, err := r.applyRules(g, names, req.Rules)
 	if err != nil {
@@ -108,7 +112,7 @@ func (r *Registry) Discover(ctx context.Context, groupID int64, req DiscoveryReq
 		m := &Member{GroupID: g.ID, Name: hits[i].MemberName, Enabled: req.Enabled}
 		if err := r.SaveMember(ctx, m); err != nil {
 			// 并发下同名成员已建:记为跳过,不中断整批
-			if strings.Contains(err.Error(), "already exists") {
+			if errors.Is(err, ErrConflict) {
 				hits[i].Action = "skip_exists"
 				applied.Skipped++
 				continue
@@ -235,7 +239,7 @@ func fetchUpstreamModels(ctx context.Context, hc *http.Client, style, baseURL st
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("upstream status %d: %s", resp.StatusCode, truncateErrBody(body))
+		return nil, fmt.Errorf("%w: upstream status %d: %s", ErrUpstream, resp.StatusCode, truncateErrBody(body))
 	}
 	var doc struct {
 		Data []struct {

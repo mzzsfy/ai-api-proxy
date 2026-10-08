@@ -265,7 +265,10 @@ func TestPick_ZeroHitIsNoModel_R6(t *testing.T) {
 	installBuiltinLikePkg(t, pkgs, "demo")
 	g := mustGroup(t, reg, "opencode", "demo", nil)
 	mustMember(t, reg, g.ID, "m", true)
-	if pe, _ := func() (PickError, error) { _, pe, err := reg.Pick("nope", nil, "openai-completions", false); return pe, err }(); pe != PickNoModel {
+	if pe, _ := func() (PickError, error) {
+		_, pe, err := reg.Pick("nope", nil, "openai-completions", false)
+		return pe, err
+	}(); pe != PickNoModel {
 		t.Fatalf("unknown short: %v", pe)
 	}
 	if _, pe, _ := reg.Pick("opencode/ghost", nil, "openai-completions", false); pe != PickNoModel {

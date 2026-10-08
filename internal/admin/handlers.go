@@ -930,8 +930,8 @@ func (d *Deps) saveGroupImpl(w http.ResponseWriter, r *http.Request, id int64) {
 		}
 	}
 	if err := d.Upstream.SaveGroup(r.Context(), g); err != nil {
-		// 前缀唯一键冲突 → 409;其余保存期校验失败 → 400
-		if strings.Contains(err.Error(), "already used by group") {
+		// 前缀唯一键冲突(含并发落库兜底)→ 409;其余保存期校验失败 → 400
+		if errors.Is(err, upstream.ErrConflict) {
 			httpError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -977,7 +977,7 @@ func (d *Deps) saveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	m.ID = 0 // 成员只能建在路径指定组内,body 的 group_id 不可信
 	if err := d.Upstream.SaveMember(r.Context(), m); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+		if errors.Is(err, upstream.ErrConflict) {
 			httpError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -1000,7 +1000,7 @@ func (d *Deps) saveMemberByID(w http.ResponseWriter, r *http.Request) {
 	}
 	// (group,name) 是存储唯一键:by-id 保存拒绝改键,仅 enabled 可变
 	if err := d.Upstream.SaveMember(r.Context(), &upstream.Member{ID: id, GroupID: m.GroupID, Name: m.Name, Enabled: m.Enabled}); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, upstream.ErrNotFound) {
 			httpError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -1051,12 +1051,12 @@ func (d *Deps) discoverGroup(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := d.Upstream.Discover(ctx, id, req, d.HTTPClient)
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "fetch models") || strings.Contains(msg, "upstream status") {
-			httpError(w, http.StatusBadGateway, msg)
+		// 上游不可达/状态异常 → 502;规则或参数问题 → 400
+		if errors.Is(err, upstream.ErrUpstream) {
+			httpError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		httpError(w, http.StatusBadRequest, msg)
+		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, res)
@@ -1102,8 +1102,8 @@ func (d *Deps) chatTestGroup(w http.ResponseWriter, r *http.Request) {
 		req.Message = "ping"
 	}
 	latency, status, body, errMsg := d.ChatTestFunc(r.Context(), id, req.Message)
-	// 装配层 reg.Get 失败即 id 不存在 → 404(与其余模型路由的 404 语义一致)
-	if strings.Contains(errMsg, "not found") {
+	// 装配层约定:错误信息以 "group not found" 开头即 id 不存在 → 404;管道错误文案不受影响
+	if strings.HasPrefix(errMsg, "group not found") {
 		httpError(w, http.StatusNotFound, errMsg)
 		return
 	}

@@ -46,7 +46,7 @@ func sprintf(s, v string) string {
 // initAndTaskFiles onLoad 与任务的新布局文件集
 func initAndTaskFiles(onLoadJS, taskJS string) map[string]string {
 	return map[string]string{
-		"init.js":       onLoadJS,
+		"init.js":         onLoadJS,
 		"tasks/signIn.js": taskJS,
 	}
 }

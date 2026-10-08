@@ -100,7 +100,6 @@ func wireKeyHooks(app *App) {
 		return rt.CallKeyRead(key)
 	}
 
-
 	// KeyFormFunc 表单声明
 	app.AdminDeps.KeyFormFunc = func(pkg string) (any, error) {
 		rt, err := loadKeys(pkg)
