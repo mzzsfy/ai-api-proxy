@@ -8,23 +8,27 @@ import {
   type GlobalThemeOverrides,
 } from 'naive-ui'
 
-type ThemeMode = 'light' | 'dark'
+type ThemePreference = 'light' | 'dark' | 'system'
 const themeKey = 'aap-theme'
-const stored = localStorage.getItem(themeKey) as ThemeMode | null
-const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-const theme = ref<ThemeMode>(stored ?? (prefersDark ? 'dark' : 'light'))
+
+const stored = localStorage.getItem(themeKey) as ThemePreference | null
+const preference = ref<ThemePreference>(stored ?? 'system')
+
+const systemDark = ref(window.matchMedia('(prefers-color-scheme: dark)').matches)
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+  systemDark.value = e.matches
+})
+
+const theme = computed(() =>
+  preference.value === 'system' ? (systemDark.value ? 'dark' : 'light') : preference.value,
+)
 
 watchEffect(() => {
-  localStorage.setItem(themeKey, theme.value)
+  localStorage.setItem(themeKey, preference.value)
   document.documentElement.dataset.theme = theme.value
 })
 
-provide('theme', {
-  mode: theme,
-  toggle: () => {
-    theme.value = theme.value === 'dark' ? 'light' : 'dark'
-  },
-})
+provide('theme', { preference, theme })
 
 const overrides = computed<GlobalThemeOverrides>(() => ({
   common: {

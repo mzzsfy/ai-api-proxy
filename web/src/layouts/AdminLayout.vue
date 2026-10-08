@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, ref, type Component, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDrawer, NDrawerContent, NIcon, NLayout, NLayoutContent, NLayoutHeader, NLayoutSider, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NDrawer, NDrawerContent, NIcon, NLayout, NLayoutContent, NLayoutHeader, NLayoutSider, useMessage } from 'naive-ui'
 import {
   AnalyticsOutline,
   CubeOutline,
@@ -11,7 +11,6 @@ import {
   MenuOutline,
   MoonOutline,
   PulseOutline,
-  SettingsOutline,
   SunnyOutline,
 } from '@vicons/ionicons5'
 import { useAuth } from '@/stores/auth'
@@ -21,12 +20,21 @@ type NavItem = { to: { name: string; params?: Record<string, string> }; label: s
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const { principal, logout } = useAuth()
+const { logout } = useAuth()
 const mobileMenuOpen = ref(false)
 
-const themeCtx = inject<{ mode: Ref<'light' | 'dark'>; toggle: () => void }>('theme')!
-const themeMode = themeCtx.mode
-const toggleTheme = themeCtx.toggle
+type ThemePreference = 'light' | 'dark' | 'system'
+const themeCtx = inject<{ preference: Ref<ThemePreference>; theme: Ref<'light' | 'dark'> }>('theme')!
+
+const themeOptions = [
+  { label: '亮色', key: 'light' },
+  { label: '暗色', key: 'dark' },
+  { label: '跟随系统', key: 'system' },
+]
+
+function onThemeSelect(key: string) {
+  themeCtx.preference.value = key as ThemePreference
+}
 
 const navItems: NavItem[] = [
   { to: { name: 'monitor' }, label: '监控', icon: PulseOutline },
@@ -77,12 +85,6 @@ function closeMobileMenu() {
           <span>{{ item.label }}</span>
         </RouterLink>
       </nav>
-      <div class="sidebar-footer">
-        <button class="theme-toggle" :aria-label="themeMode === 'dark' ? '切换亮色' : '切换暗色'" @click="toggleTheme()">
-          <NIcon :component="themeMode === 'dark' ? SunnyOutline : MoonOutline" :size="17" />
-          <span>{{ themeMode === 'dark' ? '亮色模式' : '暗色模式' }}</span>
-        </button>
-      </div>
     </NLayoutSider>
 
     <NLayout>
@@ -94,10 +96,13 @@ function closeMobileMenu() {
           <h1>{{ pageTitle }}</h1>
         </div>
         <div class="topbar-actions">
-          <div class="user-chip">
-            <span class="user-avatar">{{ (principal?.user ?? 'A').slice(0, 1).toUpperCase() }}</span>
-            <span>{{ principal?.user ?? 'admin' }}</span>
-          </div>
+          <NDropdown :options="themeOptions" trigger="click" @select="onThemeSelect">
+            <NButton quaternary circle :aria-label="`主题: ${themeOptions.find((o) => o.key === themeCtx.preference.value)?.label ?? ''}`">
+              <template #icon>
+                <NIcon :component="themeCtx.theme.value === 'dark' ? MoonOutline : SunnyOutline" />
+              </template>
+            </NButton>
+          </NDropdown>
           <NButton quaternary circle aria-label="退出登录" @click="signOut">
             <template #icon><NIcon :component="LogOutOutline" /></template>
           </NButton>
@@ -194,33 +199,6 @@ function closeMobileMenu() {
   font-weight: 550;
 }
 
-.sidebar-footer {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  padding: 12px;
-  border-top: 1px solid rgba(128, 128, 128, 0.2);
-}
-
-.theme-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.theme-toggle:hover {
-  background: rgba(128, 128, 128, 0.14);
-}
-
 .topbar {
   display: flex;
   align-items: center;
@@ -245,26 +223,6 @@ function closeMobileMenu() {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.user-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  opacity: 0.85;
-}
-
-.user-avatar {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: rgba(99, 102, 241, 0.22);
-  color: var(--brand-hover);
-  font-size: 12px;
-  font-weight: 650;
 }
 
 .content-wrap {
