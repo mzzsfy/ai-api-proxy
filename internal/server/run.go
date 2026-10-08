@@ -234,14 +234,14 @@ func Build(cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("admin: %w", err)
 	}
 	if randomPass != "" {
-		// 无配置口令:打印一次,重启重新生成
-		log.Printf("generated admin password (print once): %s", randomPass)
+		// 无配置口令:打印一次,重启重新生成		log.Printf("generated admin password (print once): %s", randomPass)
 	}
 	adminDeps := &admin.Deps{
-		Packages: pkgs,
-		Upstream: reg,
-		Metrics:  recorder,
-		History:  hist,
+		Packages:    pkgs,
+		Upstream:    reg,
+		Metrics:     recorder,
+		History:     hist,
+		HTTPClient:  &http.Client{},
 		KeysFunc: func(pkg string) map[string]any {
 			// 键行(不 dump prev,详情端点取)+ 轮询指针位(按 List 序,指向下次请求将选的行;空池 0)
 			keys := pkgs.Keys().List(pkg)
@@ -682,7 +682,8 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 		return nil
 	}
 	manifest := `{"manifestVersion":1,"name":"` + builtin.Name + `","version":"` + builtinVersion + `","parts":{
-		"protocol":{"protocol":"` + builtin.DeclaredProtocol + `","features":["tools","vision"]}}}`
+		"protocol":{"protocol":"` + builtin.DeclaredProtocol + `","features":["tools","vision"]},
+		"discovery":{"baseUrlSlot":"base_url","protocolStyle":"openai"}}}`
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	mf, err := zw.Create("manifest.json")

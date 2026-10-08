@@ -9,6 +9,10 @@
     "protocol": {
       "protocol": "anthropic-messages",
       "features": ["tools", "vision"]
+    },
+    "discovery": {
+      "baseUrlSlot": "base_url",
+      "protocolStyle": "anthropic"
     }
   }
 }

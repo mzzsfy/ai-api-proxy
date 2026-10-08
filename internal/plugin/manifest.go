@@ -74,6 +74,12 @@ type HooksPart struct {
 	Tasks []HooksTask `json:"tasks,omitempty"`
 }
 
+// DiscoveryPart 模型自动发现声明(管理面拉上游 /v1/models 落成员;未声明 = 该包不支持发现)
+type DiscoveryPart struct {
+	BaseURLSlot   string `json:"baseUrlSlot"`   // 连接地址所在声明槽(取组合并参数)
+	ProtocolStyle string `json:"protocolStyle"` // openai|anthropic(鉴权头与请求形态)
+}
+
 // Manifest 包元数据与模板载体
 type Manifest struct {
 	ManifestVersion int               `json:"manifestVersion"`
@@ -86,9 +92,10 @@ type Manifest struct {
 	License         string            `json:"license,omitempty"`         // 纯展示
 	Compat          map[string]string `json:"compat,omitempty"`
 	Parts           struct {
-		Protocol *ProtocolPart `json:"protocol,omitempty"`
-		Filters  []FilterPart  `json:"filters,omitempty"`
-		Hooks    *HooksPart    `json:"hooks,omitempty"`
+		Protocol  *ProtocolPart  `json:"protocol,omitempty"`
+		Filters   []FilterPart   `json:"filters,omitempty"`
+		Hooks     *HooksPart     `json:"hooks,omitempty"`
+		Discovery *DiscoveryPart `json:"discovery,omitempty"`
 	} `json:"parts"`
 	UpstreamTemplate json.RawMessage            `json:"upstreamTemplate,omitempty"`
 	Extra            map[string]json.RawMessage `json:"-"`
@@ -146,7 +153,7 @@ func (p *Package) Validate() error {
 	if proto != nil {
 		if proto.Protocol != string(ProtocolOpenAICompletions) && proto.Protocol != string(ProtocolAnthropicMessages) {
 			return fmt.Errorf("protocol: unknown protocol %q (want %s | %s)",
-				proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
+			proto.Protocol, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
 		}
 		if _, ok := p.Files[ProtocolEntry]; !ok {
 			return fmt.Errorf("protocol: %s missing in package", ProtocolEntry)
@@ -165,6 +172,15 @@ func (p *Package) Validate() error {
 		entry := ProtocolEntryFor("filter", fp.Name)
 		if _, ok := p.Files[entry]; !ok {
 			return fmt.Errorf("filter %s: %s missing in package", fp.Name, entry)
+		}
+	}
+	// discovery 声明绑定:槽名必填 + 形态合法
+	if d := m.Parts.Discovery; d != nil {
+		if d.BaseURLSlot == "" {
+			return fmt.Errorf("discovery: baseUrlSlot required")
+		}
+		if d.ProtocolStyle != "openai" && d.ProtocolStyle != "anthropic" {
+			return fmt.Errorf("discovery: protocolStyle must be openai|anthropic, got %q", d.ProtocolStyle)
 		}
 	}
 	// hooks 声明绑定:任务文件存在 + task 名唯一 + 调度形态合法(cron 或 next 二选一)

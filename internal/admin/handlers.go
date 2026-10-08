@@ -47,6 +47,8 @@ type Deps struct {
 	KeyWriteFunc func(pkg, key string, value any, baseUpdatedAt int64) (updated int64, transformed bool, err error)
 	// KeyReadFunc 键详情解释(keyRead;仅 GET detail 触发)
 	KeyReadFunc func(pkg, key string) (any, error)
+	// HTTPClient 模型发现用出站客户端(nil = discover 路由 501)
+	HTTPClient *http.Client
 	// KeyFormFunc 添加表单声明
 	KeyFormFunc func(pkg string) (any, error)
 	// KeyActionFunc 表单按钮回调(可出站)
@@ -105,6 +107,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/groups/{id}/members", d.saveMember)
 	mux.HandleFunc("PUT /admin/api/members/{id}", d.saveMemberByID)
 	mux.HandleFunc("DELETE /admin/api/members/{id}", d.deleteMember)
+	mux.HandleFunc("POST /admin/api/groups/{id}/discover", d.discoverGroup)
 	mux.HandleFunc("GET /admin/api/metrics/live", d.metricsLive)
 	mux.HandleFunc("GET /admin/api/metrics/series", d.metricsSeries)
 	mux.HandleFunc("GET /admin/api/history", d.listHistory)
@@ -1018,6 +1021,41 @@ func (d *Deps) deleteMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// discoverTimeout 单次发现外呼上限(上游 /v1/models 是轻查询,30s 足够)
+const discoverTimeout = 30 * time.Second
+
+// discoverGroup 模型自动发现:预览(dry-run)或落成员(apply=true)
+// 错误路径:501 未装配客户端 / 400 规则与参数问题 / 502 上游不可达或状态异常
+func (d *Deps) discoverGroup(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if d.HTTPClient == nil {
+		httpError(w, http.StatusNotImplemented, "discover not configured")
+		return
+	}
+	var req upstream.DiscoveryRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), discoverTimeout)
+	defer cancel()
+	res, err := d.Upstream.Discover(ctx, id, req, d.HTTPClient)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "fetch models") || strings.Contains(msg, "upstream status") {
+			httpError(w, http.StatusBadGateway, msg)
+			return
+		}
+		httpError(w, http.StatusBadRequest, msg)
+		return
+	}
+	writeJSON(w, res)
 }
 
 func (d *Deps) testGroup(w http.ResponseWriter, r *http.Request) {
