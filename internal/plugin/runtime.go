@@ -160,6 +160,10 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		b, _ := json.Marshal(v.Export())
 		return maskSecrets(deps, string(b))
 	})
+	// json:原始 JSON 文档句柄(字面量读写,不经 JS Number,未触碰文本保真)
+	_ = util.Set("json", func(raw string) (*goja.Object, error) {
+		return newJsonDoc(vm, raw)
+	})
 	// key:当前键 data 唯一出口(无参;多余参数被忽略 = 不支持按名取;无键 = undefined)
 	_ = util.Set("key", func(args ...goja.Value) any {
 		if deps.Key == nil || deps.Key.Data == nil {

@@ -112,6 +112,29 @@ export interface Util {
    * 成功 true;非法 scope/非 aap 传输/节点失败抛错
    */
   evict(transport: string, scope: "lease" | "egress", value: string): boolean;
+  /**
+   * 原始 JSON 文档句柄:读字面量、定位编辑,不经 JS Number/stringify,未触碰文本逐字节保留
+   * 非法 JSON 抛错。路径为 gjson 点路径;数组索引;`-1` 读最后元素,`set` 路径尾 `.-1` 为追加;键含 `.` 不支持
+   */
+  json(raw: string): JsonDoc;
+}
+
+export interface JsonDocOp {
+  /** set:替换(尾 `.-1` 追加)| remove:删除(缺失跳过)| setIfAbsent:存在跳过 */
+  op: "set" | "remove" | "setIfAbsent";
+  path: string;
+  /** JSON 字面量字符串(仅 set/setIfAbsent;数字必须以字面量传入保精度) */
+  value?: string;
+}
+
+export interface JsonDoc {
+  /** 定位读取,返回字面量文本(对象/数组为子树原文;缺失 undefined) */
+  get(path: string): string | undefined;
+  has(path: string): boolean;
+  /** 顺序执行编辑;回执 "<op> <path>" 列表。指令中途失败时已执行指令生效,异常抛出 */
+  ops(list: JsonDocOp[]): { applied: string[]; skipped: string[] };
+  /** 终检合法后产出请求体与全量回执 */
+  finalize(): { body: string; applied: string[]; skipped: string[] };
 }
 
 export interface Log {
