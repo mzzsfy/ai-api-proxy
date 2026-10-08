@@ -298,7 +298,8 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 // newAdminDeps 管理面依赖(hooks 测试面)
 func newAdminDeps(pkgs *plugin.Registry) *admin.Deps {
 	return &admin.Deps{
-		Packages: pkgs,
+		Packages:   pkgs,
+		HTTPClient: &http.Client{},
 		KeysFunc: func(pkg string) map[string]any {
 			keys := pkgs.Keys().List(pkg)
 			out := make([]map[string]any, 0, len(keys))

@@ -89,6 +89,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/keys/{key}", d.putPackageKey)
 	mux.HandleFunc("GET /admin/api/packages/{name}/ui/{path...}", d.packageUI)
+	mux.HandleFunc("POST /admin/api/packages/{name}/ui/proxy", d.packageUIProxy)
 	mux.HandleFunc("DELETE /admin/api/packages/{name}/keys/{key}", d.deletePackageKey)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys/{key}/detail", d.packageKeyDetail)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
@@ -706,6 +707,62 @@ func (d *Deps) packageUI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// packageUIProxy 插件页面出站转发(会话已鉴权;仅 http(s) GET/POST;响应体 ≤1MB;30s 超时)
+func (d *Deps) packageUIProxy(w http.ResponseWriter, r *http.Request) {
+	if d.HTTPClient == nil {
+		httpError(w, http.StatusNotImplemented, "proxy unavailable")
+		return
+	}
+	if _, err := d.Packages.GetPackage(r.PathValue("name")); err != nil {
+		httpError(w, http.StatusNotFound, "package not found")
+		return
+	}
+	var req struct {
+		URL     string            `json:"url"`
+		Method  string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+		Body    string            `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	u, err := neturl.Parse(req.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		httpError(w, http.StatusBadRequest, "invalid url")
+		return
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodPost {
+		httpError(w, http.StatusBadRequest, "method must be GET or POST")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	hr, err := http.NewRequestWithContext(ctx, req.Method, req.URL, strings.NewReader(req.Body))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	for k, v := range req.Headers {
+		hr.Header.Set(k, v)
+	}
+	if hr.Header.Get("Content-Type") == "" && req.Body != "" {
+		hr.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := d.HTTPClient.Do(hr)
+	if err != nil {
+		writeJSON(w, map[string]any{"status": 0, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	writeJSON(w, map[string]any{
+		"status":      resp.StatusCode,
+		"contentType": resp.Header.Get("Content-Type"),
+		"body":        string(body),
+	})
+}
+
 // maskMarker 密钥掩码占位(UI 展示用;PUT 时合并回旧值;仅字符串叶子,数值/布尔形态不掩码)
 const maskMarker = "***"
 
@@ -734,30 +791,62 @@ func maskData(v any) any {
 	}
 }
 
-// mergeMasked 掩码合并:new 中 maskMarker 叶子还原为 old 对应值(须在 keyWrite 钩子前执行)
-func mergeMasked(old, new any) any {
+// mergeMasked 掩码合并:new 中 maskMarker 叶子还原为 old 对应值(须在 keyWrite 钩子前执行);*** 无旧值时报错
+func mergeMasked(old, new any) (any, error) {
 	if s, ok := new.(string); ok && s == maskMarker {
-		return old
+		if old == nil {
+			return nil, fmt.Errorf("masked value without prior key")
+		}
+		return old, nil
 	}
 	om, ok1 := old.(map[string]any)
 	nm, ok2 := new.(map[string]any)
 	if ok1 && ok2 {
 		out := make(map[string]any, len(nm))
 		for k, val := range nm {
-			out[k] = mergeMasked(om[k], val)
+			mv, err := mergeMasked(om[k], val)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = mv
 		}
-		return out
+		return out, nil
 	}
 	os, ok1 := old.([]any)
 	ns, ok2 := new.([]any)
 	if ok1 && ok2 && len(os) == len(ns) {
 		out := make([]any, len(ns))
 		for i := range ns {
-			out[i] = mergeMasked(os[i], ns[i])
+			mv, err := mergeMasked(os[i], ns[i])
+			if err != nil {
+				return nil, err
+			}
+			out[i] = mv
 		}
-		return out
+		return out, nil
 	}
-	return new
+	return new, nil
+}
+
+// containsMasked 值树中是否含 *** 叶子(新键写入前的掩码守卫)
+func containsMasked(v any) bool {
+	switch tv := v.(type) {
+	case string:
+		return tv == maskMarker
+	case map[string]any:
+		for _, val := range tv {
+			if containsMasked(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range tv {
+			if containsMasked(val) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // packageKeys 包级 keys 视图(明文;masked=1 时字符串叶子掩码;响应并 hooks 能力标记)
@@ -817,10 +906,18 @@ func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
 		return
 	}
-	// 掩码回填:*** 叶子还原为旧值(在 keyWrite 归一化前;无旧键则原样走钩子)
+	// 掩码回填:*** 叶子还原为旧值(在 keyWrite 归一化前;无旧键时 *** 拒绝,掩码字面量永不入库)
 	if d.Packages != nil {
 		if e, ok := d.Packages.Keys().Get(pkg, key); ok {
-			req.Value = mergeMasked(e.Data, req.Value)
+			mv, err := mergeMasked(e.Data, req.Value)
+			if err != nil {
+				httpError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			req.Value = mv
+		} else if containsMasked(req.Value) {
+			httpError(w, http.StatusBadRequest, "masked value without prior key")
+			return
 		}
 	}
 	updated, transformed, err := d.KeyWriteFunc(pkg, key, req.Value, req.BaseUpdatedAt)

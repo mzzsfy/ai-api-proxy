@@ -107,3 +107,41 @@ func TestPluginUI_Flags(t *testing.T) {
 		t.Fatalf("hasPage true missing: %s", w2.Body.String())
 	}
 }
+
+// Given *** 无旧键 When PUT Then 400 掩码拒绝
+func TestPluginUI_MaskedWithoutPrior(t *testing.T) {
+	_, mux := pluginUIFixture(t, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/admin/api/packages/checkin/keys/newkey",
+		strings.NewReader(`{"value":{"token":"***"},"baseUpdatedAt":0}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("masked without prior: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Given 本地目标 When ui/proxy 转发 Then 回传状态与响应体;非法 method/URL 被拒
+func TestPluginUI_Proxy(t *testing.T) {
+	_, mux := pluginUIFixture(t, nil)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/api/packages/checkin/ui/proxy",
+		strings.NewReader(`{"url":"`+target.URL+`/api/x","method":"POST","body":"{}"}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":200`) || !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("proxy: %d %s", w.Code, w.Body.String())
+	}
+	for _, body := range []string{
+		`{"url":"` + target.URL + `","method":"DELETE"}`,
+		`{"url":"ftp://x/y","method":"GET"}`,
+	} {
+		w2 := httptest.NewRecorder()
+		mux.ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/admin/api/packages/checkin/ui/proxy", strings.NewReader(body)))
+		if w2.Code != http.StatusBadRequest {
+			t.Fatalf("reject %s: %d", body, w2.Code)
+		}
+	}
+}
