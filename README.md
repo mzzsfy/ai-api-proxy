@@ -58,7 +58,17 @@ go test -race ./...    # Go 全量
 go vet ./...
 ```
 
-目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/history/admin/adminweb/store/transport)、`sdk/`(镜像内插件 SDK 快照)。
+目录:`internal/`(server 装配根/gateway/convert/pipeline/plugin/upstream/builtin/metrics/history/admin/adminweb/store/transport)、`web/`(管理台前端源码)、`sdk/`(镜像内插件 SDK 快照)。
+
+### 管理台前端(web/)
+
+Vue3 + TypeScript + naive-ui + vite,构建产物输出 `internal/adminweb/dist` 由 `go:embed` 嵌入单二进制,`go build` 前需先构建前端:
+
+```bash
+cd web && bun install && bun run build   # 或 pnpm install && pnpm build
+```
+
+开发模式:`cd web && bun dev`(代理 `/admin/api` 到本地 18080),访问 `http://localhost:5173`。
 
 ## 部署
 

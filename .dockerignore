@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+data
+docs
+web/node_modules
+*.exe
+*.test
+config.yaml
+.env.*

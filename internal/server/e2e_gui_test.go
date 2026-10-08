@@ -14,7 +14,7 @@ import (
 // ─── P9:管理 GUI 冒烟(单文件内嵌页 + 部件 API 闭环) ───
 
 func TestGUI_AdminPageServed(t *testing.T) {
-	// Given 完整装配 When GET /admin Then 200 HTML(登录页公开可达)
+	// Given 完整装配 When GET /admin Then 200 HTML(Vue SPA 入口 + 相对资源引用)
 	f := newFourGroups(t)
 	resp, err := f.client.Get(f.gateway.URL + "/admin")
 	if err != nil {
@@ -33,65 +33,15 @@ func TestGUI_AdminPageServed(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(bodyBytes)
-	// 监控页指标标记元素(RPM 三项 + 错误率 + 并发 + 页签)
-	for _, mark := range []string{`id="rpm-now"`, `id="rpm-avg"`, `id="rpm-peak"`, `id="err-rate"`, `id="conc"`, `data-p="mon"`} {
+	for _, mark := range []string{`id="app"`, `<script type="module"`} {
 		if !strings.Contains(body, mark) {
 			t.Fatalf("admin page missing %s", mark)
 		}
 	}
-	// 导航四页与分组(模型管理/插件管理/插件配置/监控;旧"包/上游"命名移除)
-	for _, mark := range []string{`data-p="ups"`, `data-p="pkgs"`, `data-p="plugconf"`, `>模型管理<`, `>插件管理<`, `>插件配置<`} {
-		if !strings.Contains(body, mark) {
-			t.Fatalf("admin page missing nav mark %s", mark)
-		}
-	}
-	// S6 插件管理页纯化:配置/keys 弹层与内嵌编辑区移除(功能迁插件配置页)
-	for _, gone := range []string{`id="cfgbox"`, `id="keysbox"`} {
-		if strings.Contains(body, gone) {
-			t.Fatalf("admin page must not contain %s (插件管理页已纯化)", gone)
-		}
-	}
-	// S7 插件配置页三 tabs(配置/keys/任务) + 元信息条(仅上下文标识,无操作按钮)
-	for _, mark := range []string{`data-tab="config"`, `data-tab="keys"`, `data-tab="tasks"`, `id="plugcfg-meta"`} {
-		if !strings.Contains(body, mark) {
-			t.Fatalf("admin page missing plugconf mark %s", mark)
-		}
-	}
-	// S7 插件配置页纯化:包操作/代码/监控入口不得回流
-	for _, gone := range []string{`id="pd-toggle"`, `id="pd-del"`, `data-tab="code"`, `data-tab="mon"`,
-		`id="pane-code"`, `id="pane-mon"`, `id="pkg-chart"`} {
-		if strings.Contains(body, gone) {
-			t.Fatalf("admin page must not contain %s (插件配置页已纯化)", gone)
-		}
-	}
-	// S8 监控页增强:包维度表 + 双 sparkline;对话测试面板
-	for _, mark := range []string{`id="bypkg"`, `id="rpm-spark"`, `id="conc-spark"`, `id="chatpanel"`} {
-		if !strings.Contains(body, mark) {
-			t.Fatalf("admin page missing monitor mark %s", mark)
-		}
-	}
-	// 模型行批量输入:列表添加/删除,替代旧逗号单输入
-	for _, mark := range []string{`id="model-list"`, `id="model-add"`, `data-model-name data-i=`, `data-model-remove data-i=`} {
-		if !strings.Contains(body, mark) {
-			t.Fatalf("admin page missing model batch mark %s", mark)
-		}
-	}
-	// 双主题:浅色默认 token + 暗色覆盖组 + 切换按钮
-	for _, mark := range []string{`:root`, `html[data-theme="dark"]`, `id="themetoggle"`} {
-		if !strings.Contains(body, mark) {
-			t.Fatalf("admin page missing theme mark %s", mark)
-		}
-	}
-	// 零外部依赖守卫:内嵌页不得引用外链资源(架构约束:离线可用、无构建链)
+	// 内嵌页资源必须相对引用(离线可用)
 	for _, bad := range []string{"http://", "https://"} {
-		for _, line := range strings.Split(body, "\n") {
-			trim := strings.TrimSpace(line)
-			lower := strings.ToLower(trim)
-			if strings.Contains(lower, bad) &&
-				(strings.Contains(lower, "<script") || strings.Contains(lower, "<link") || strings.Contains(lower, "<img") ||
-					strings.Contains(lower, "<iframe") || strings.Contains(lower, "@import")) {
-				t.Fatalf("admin page references external resource: %s", trim)
-			}
+		if strings.Contains(body, bad) {
+			t.Fatalf("admin page references external resource: %s", bad)
 		}
 	}
 }

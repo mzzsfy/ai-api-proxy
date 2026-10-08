@@ -1,9 +1,17 @@
 # 构建阶段
+FROM oven/bun:1 AS web
+WORKDIR /web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY web/ ./
+RUN bun run build
+
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=web /internal/adminweb/dist ./internal/adminweb/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ai-api-proxy ./cmd/ai-api-proxy
 
 # 运行阶段:单目录挂载 /data(宿主 -v <dir>:/data)
