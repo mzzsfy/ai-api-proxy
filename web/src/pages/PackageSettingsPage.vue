@@ -224,6 +224,14 @@ function slotInputValue(slot: PackageSettings['config'][number]): string {
           <KeysPanel v-if="activeTab === 'keys'" :package-name="selected" />
         </NTabPane>
 
+        <NTabPane v-if="packageMeta?.hasPage" name="page" tab="插件页面">
+          <iframe
+            v-if="activeTab === 'page'"
+            :src="`/admin/api/packages/${encodeURIComponent(selected!)}/ui/index.html`"
+            class="plugin-frame"
+          ></iframe>
+        </NTabPane>
+
         <NTabPane name="tasks" tab="任务">
           <div v-for="task in draft.taskRows" :key="task.name" class="task-row">
             <div class="task-name">
@@ -324,5 +332,13 @@ function slotInputValue(slot: PackageSettings['config'][number]): string {
 .task-next {
   font-size: 12px;
   opacity: 0.6;
+}
+
+.plugin-frame {
+  width: 100%;
+  height: 72vh;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 4px;
+  background: #fff;
 }
 </style>

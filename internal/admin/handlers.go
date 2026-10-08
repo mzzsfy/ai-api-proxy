@@ -88,6 +88,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/enable", d.enablePackage)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/keys/{key}", d.putPackageKey)
+	mux.HandleFunc("GET /admin/api/packages/{name}/ui/{path...}", d.packageUI)
 	mux.HandleFunc("DELETE /admin/api/packages/{name}/keys/{key}", d.deletePackageKey)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys/{key}/detail", d.packageKeyDetail)
 	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
@@ -135,6 +136,7 @@ func (d *Deps) listPackages(w http.ResponseWriter, r *http.Request) {
 			"hasProtocol": p.HasProtocol(), "filters": filterNames,
 			"protocol":    protocolName(p),
 			"hasHooks":    p.Manifest.Parts.Hooks != nil,
+			"hasPage":     p.Files["ui/index.html"] != nil,
 			"enabled":     d.Packages.IsEnabled(n),
 			"title":       p.MetaTitle(),
 			"description": p.Manifest.Description,
@@ -663,7 +665,102 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// packageKeys 包级 keys 视图(明文;按包名隔离,属包私有数据;响应并 hooks 能力标记)
+// packageUI 包内 ui/ 页面资源(约定:ui/index.html 存在即有页面;仅 ui/ 前缀,禁路径穿越)
+func (d *Deps) packageUI(w http.ResponseWriter, r *http.Request) {
+	p, err := d.Packages.GetPackage(r.PathValue("name"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, "package not found")
+		return
+	}
+	rel := r.PathValue("path")
+	if strings.Contains(rel, "..") {
+		httpError(w, http.StatusBadRequest, "invalid ui path")
+		return
+	}
+	if rel == "" {
+		rel = "index.html"
+	}
+	data, ok := p.Files["ui/"+rel]
+	if !ok {
+		httpError(w, http.StatusNotFound, "ui file not found")
+		return
+	}
+	switch {
+	case strings.HasSuffix(rel, ".html"):
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case strings.HasSuffix(rel, ".js"):
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case strings.HasSuffix(rel, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case strings.HasSuffix(rel, ".json"):
+		w.Header().Set("Content-Type", "application/json")
+	case strings.HasSuffix(rel, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case strings.HasSuffix(rel, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	default:
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
+}
+
+// maskMarker 密钥掩码占位(UI 展示用;PUT 时合并回旧值;仅字符串叶子,数值/布尔形态不掩码)
+const maskMarker = "***"
+
+// maskData 递归掩码:字符串叶子置 maskMarker
+func maskData(v any) any {
+	switch tv := v.(type) {
+	case string:
+		if tv == "" {
+			return tv
+		}
+		return maskMarker
+	case map[string]any:
+		out := make(map[string]any, len(tv))
+		for k, val := range tv {
+			out[k] = maskData(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(tv))
+		for i, val := range tv {
+			out[i] = maskData(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// mergeMasked 掩码合并:new 中 maskMarker 叶子还原为 old 对应值(须在 keyWrite 钩子前执行)
+func mergeMasked(old, new any) any {
+	if s, ok := new.(string); ok && s == maskMarker {
+		return old
+	}
+	om, ok1 := old.(map[string]any)
+	nm, ok2 := new.(map[string]any)
+	if ok1 && ok2 {
+		out := make(map[string]any, len(nm))
+		for k, val := range nm {
+			out[k] = mergeMasked(om[k], val)
+		}
+		return out
+	}
+	os, ok1 := old.([]any)
+	ns, ok2 := new.([]any)
+	if ok1 && ok2 && len(os) == len(ns) {
+		out := make([]any, len(ns))
+		for i := range ns {
+			out[i] = mergeMasked(os[i], ns[i])
+		}
+		return out
+	}
+	return new
+}
+
+// packageKeys 包级 keys 视图(明文;masked=1 时字符串叶子掩码;响应并 hooks 能力标记)
 func (d *Deps) packageKeys(w http.ResponseWriter, r *http.Request) {
 	if d.KeysFunc == nil {
 		httpError(w, http.StatusNotImplemented, "keys unavailable")
@@ -671,6 +768,13 @@ func (d *Deps) packageKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	out := d.KeysFunc(name)
+	if r.URL.Query().Get("masked") == "1" {
+		if keys, ok := out["keys"].([]map[string]any); ok {
+			for _, row := range keys {
+				row["data"] = maskData(row["data"])
+			}
+		}
+	}
 	hooks := map[string]any{"keyWrite": false, "keyRead": false, "keyForm": false}
 	if d.KeyHooksFunc != nil {
 		write, read, form := d.KeyHooksFunc(name)
@@ -712,6 +816,12 @@ func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
 		return
+	}
+	// 掩码回填:*** 叶子还原为旧值(在 keyWrite 归一化前;无旧键则原样走钩子)
+	if d.Packages != nil {
+		if e, ok := d.Packages.Keys().Get(pkg, key); ok {
+			req.Value = mergeMasked(e.Data, req.Value)
+		}
 	}
 	updated, transformed, err := d.KeyWriteFunc(pkg, key, req.Value, req.BaseUpdatedAt)
 	if err != nil {

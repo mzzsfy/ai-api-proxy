@@ -80,6 +80,7 @@ export type PackageInfo = {
   filters: string[]
   protocol: string
   hasHooks: boolean
+  hasPage: boolean
   enabled: boolean
   title: string
   description: string
