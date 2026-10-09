@@ -13,13 +13,16 @@ require (
 )
 
 require (
+	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
+	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/tidwall/gjson v1.20.0 // indirect

@@ -290,6 +290,10 @@ export interface HandlerRequestInfo {
 export interface HandlerHttpRequest {
   url: string;
   method?: string;
+  /**
+   * 缺省注入浏览器头组(UA/Accept/Accept-Language/Accept-Encoding/Sec-Ch-Ua*,显式值优先);
+   * headers["X-Aap-Browser-Defaults"]="off" 关闭整组(纯 API 场景)
+   */
   headers?: Record<string, string>;
   body?: string;
   /** 命名传输实例(config.yaml transports);不存在抛错 */

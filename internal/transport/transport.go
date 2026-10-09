@@ -56,7 +56,7 @@ func NewManagerWithCfg(defs []TransportDef, stateRoot string) (*Manager, error) 
 	}
 	// direct 默认实例必然存在
 	if _, ok := m.instances[pipeline.TransportRef]; !ok {
-		m.instances[pipeline.TransportRef] = &httpTransport{name: pipeline.TransportRef, client: &http.Client{}}
+		m.instances[pipeline.TransportRef] = &httpTransport{name: pipeline.TransportRef, client: &http.Client{Transport: fingerprintHTTPTransport(plainDial)}}
 	}
 	return m, nil
 }
@@ -172,14 +172,14 @@ type TransportDef struct {
 func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, ipprovider.Provider, error) {
 	switch {
 	case d.URL == "direct":
-		return &httpTransport{name: d.Name, client: &http.Client{}}, nil, nil
+		return &httpTransport{name: d.Name, client: &http.Client{Transport: fingerprintHTTPTransport(plainDial)}}, nil, nil
 	case strings.HasPrefix(d.URL, "http://"), strings.HasPrefix(d.URL, "https://"):
 		u, err := url.Parse(d.URL)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse proxy url: %w", err)
 		}
 		client := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(u)},
+			Transport: &http.Transport{Proxy: http.ProxyURL(u), DialTLSContext: fingerprintDialer{inner: plainDial}.DialTLSContext},
 		}
 		return &httpTransport{name: d.Name, client: client}, nil, nil
 	case strings.HasPrefix(d.URL, "socks5://"):
@@ -201,7 +201,7 @@ func (m *Manager) build(d TransportDef, stateRoot string) (pipeline.Transport, i
 			return nil, nil, fmt.Errorf("socks5 dialer not context aware")
 		}
 		client := &http.Client{
-			Transport: &http.Transport{DialContext: cd.DialContext},
+			Transport: fingerprintHTTPTransport(cd.DialContext),
 		}
 		return &httpTransport{name: d.Name, client: client}, nil, nil
 	case strings.HasPrefix(d.URL, "aap://"):
@@ -260,6 +260,45 @@ func sessionKey(apiKey, model string) string {
 	return ipprovider.SessionKey(apiKey, model)
 }
 
+// 缺省浏览器头(显式传入不覆盖;爬虫 UA/头检查的单点对抗;固定版本串随主流版本手动跟进)
+const (
+	defaultUA         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	defaultAccept     = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+	defaultAccLang    = "en-US,en;q=0.9"
+	defaultAccEnc     = "gzip, deflate, br"
+	defaultAcceptFlag = "__aap_browser_defaults__"
+)
+
+// applyBrowserDefaults 显式头之外补齐浏览器缺省;插件传 "__aap_browser_defaults__": "off" 关闭整组
+func applyBrowserDefaults(headers map[string]string) {
+	if v, ok := headers["X-Aap-Browser-Defaults"]; ok && v == "off" {
+		return
+	}
+	for k, v := range map[string]string{
+		"User-Agent":         defaultUA,
+		"Accept":             defaultAccept,
+		"Accept-Language":    defaultAccLang,
+		"Accept-Encoding":    defaultAccEnc,
+		"Sec-Ch-Ua":          `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`,
+		"Sec-Ch-Ua-Mobile":   "?0",
+		"Sec-Ch-Ua-Platform": `"Windows"`,
+	} {
+		if _, ok := headers[k]; !ok {
+			headers[k] = v
+		}
+	}
+}
+
+// withBrowserDefaults 请求头合成(不修改调用方 map)
+func withBrowserDefaults(req pipeline.Request) map[string]string {
+	h := make(map[string]string, len(req.Headers)+8)
+	for k, v := range req.Headers {
+		h[k] = v
+	}
+	applyBrowserDefaults(h)
+	return h
+}
+
 // httpTransport 标准库实现变体
 type httpTransport struct {
 	name   string
@@ -278,7 +317,7 @@ func (t *httpTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pi
 	if err != nil {
 		return pipeline.TransportResponse{}, fmt.Errorf("build request: %w", err)
 	}
-	for k, v := range req.Headers {
+	for k, v := range withBrowserDefaults(req) {
 		hreq.Header.Set(k, v)
 	}
 	hresp, err := t.client.Do(hreq)
@@ -303,7 +342,7 @@ func (t *httpTransport) RoundTripRaw(ctx context.Context, req pipeline.Request) 
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	for k, v := range req.Headers {
+	for k, v := range withBrowserDefaults(req) {
 		hreq.Header.Set(k, v)
 	}
 	hresp, err := t.client.Do(hreq)
@@ -444,7 +483,7 @@ func (t *ipTransport) viaRaw(ctx context.Context, lease ipprovider.Lease, req pi
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err), true
 	}
-	for k, v := range req.Headers {
+	for k, v := range withBrowserDefaults(req) {
 		hreq.Header.Set(k, v)
 	}
 	// DisableKeepAlives:每请求新租约新连接,keep-alive 归池只会泄漏 fd/goroutine
