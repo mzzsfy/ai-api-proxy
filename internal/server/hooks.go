@@ -32,27 +32,9 @@ func (h *httpExecutor) Do(req plugin.HttpRequest) (*plugin.HttpResponse, error) 
 	if h.trMgr == nil {
 		return nil, fmt.Errorf("no outbound transport available")
 	}
-	var tr pipeline.Transport
-	var ok bool
-	if req.Transport != "" {
-		if tr, ok = h.trMgr.Get(req.Transport); !ok {
-			return nil, fmt.Errorf("transport %q not found", req.Transport)
-		}
-	} else {
-		tr, ok = h.trMgr.Get(hooksTransportName)
-		if !ok {
-			for _, name := range h.trMgr.Names() {
-				if _, isSupplier := h.trMgr.SupplierKind(name); isSupplier {
-					continue
-				}
-				if tr, ok = h.trMgr.Get(name); ok {
-					break
-				}
-			}
-		}
-	}
-	if !ok {
-		return nil, fmt.Errorf("no outbound transport available")
+	tr, err := resolveOutboundTransport(h.trMgr, req.Transport)
+	if err != nil {
+		return nil, err
 	}
 	tresp, err := tr.RoundTrip(ctx, preq)
 	if err != nil {
@@ -268,4 +250,27 @@ func (s *kvStorage) Set(key, value string) error {
 
 func (s *kvStorage) Delete(key string) {
 	_, _ = s.db.Exec(`DELETE FROM kv WHERE ns=? AND key=?`, s.ns, key)
+}
+
+// resolveOutboundTransport 出站传输解析:命名实例优先(不存在 = 报错);空 = direct → 任一非供给方回退
+func resolveOutboundTransport(trMgr *transport.Manager, name string) (pipeline.Transport, error) {
+	if name != "" {
+		tr, ok := trMgr.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("transport %q not found", name)
+		}
+		return tr, nil
+	}
+	if tr, ok := trMgr.Get(hooksTransportName); ok {
+		return tr, nil
+	}
+	for _, n := range trMgr.Names() {
+		if _, isSupplier := trMgr.SupplierKind(n); isSupplier {
+			continue
+		}
+		if tr, ok := trMgr.Get(n); ok {
+			return tr, nil
+		}
+	}
+	return nil, fmt.Errorf("no outbound transport available")
 }

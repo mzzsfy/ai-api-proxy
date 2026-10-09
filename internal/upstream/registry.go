@@ -226,8 +226,11 @@ func (r *Registry) ValidateGroup(g *Group) error {
 	if err != nil {
 		return fmt.Errorf("plugin package: %w", err)
 	}
-	if !pkg.HasProtocol() {
-		return fmt.Errorf("package %q has no protocol part", g.Plugin)
+	if pkg.HasProtocol() && pkg.HasHandler() {
+		return fmt.Errorf("package %q declares both protocol and handler parts", g.Plugin)
+	}
+	if !pkg.HasProtocol() && !pkg.HasHandler() {
+		return fmt.Errorf("package %q has no protocol or handler part", g.Plugin)
 	}
 	if _, err := r.resolveParams(g); err != nil {
 		return err
@@ -679,10 +682,20 @@ func (r *Registry) mismatchReason(c *Candidate, features []Feature, entry string
 		return tag + " package disabled", false
 	}
 	pkg, err := r.pkgs.GetPackage(pluginName)
-	if err != nil || pkg.Manifest.Parts.Protocol == nil {
+	if err != nil {
 		return tag + " package not loadable", false
 	}
+	// handler 包:声明 = 入口协议;形态两种均支持,能力由作者自保证(壳不声明 features)
+	if pkg.Manifest.Parts.Handler != "" {
+		if pkg.Manifest.Parts.Handler != entry {
+			return tag + " declares " + pkg.Manifest.Parts.Handler, false
+		}
+		return "", true
+	}
 	d := pkg.Manifest.Parts.Protocol
+	if d == nil {
+		return tag + " package not loadable", false
+	}
 	if d.Protocol != entry {
 		return tag + " declares " + d.Protocol, false
 	}
@@ -821,12 +834,17 @@ func (r *Registry) instantiateParts(g *Group) (*resolvedParts, error) {
 		filters = append(filters, f)
 	}
 	parts.Filters = filters
-	// Protocol:同名内置工厂优先(server 装配注册),否则编译主包 JS 部件
+	// Protocol:同名内置工厂优先(server 装配注册),handler 包 = 兼容壳(请求分流在 gateway),否则编译主包 JS 部件
+	if pkg.Manifest.Parts.Handler != "" {
+		parts.Declared = pkg.Manifest.Parts.Handler
+	}
 	if pkg.Manifest.Parts.Protocol != nil {
 		parts.Declared = pkg.Manifest.Parts.Protocol.Protocol
 	}
 	var proto pipeline.Protocol
-	if factory, ok := r.pkgs.BuiltinFactory(g.Plugin); ok {
+	if pkg.Manifest.Parts.Handler != "" {
+		proto = plugin.NewHandlerShell(pkg.Manifest.Parts.Handler)
+	} else if factory, ok := r.pkgs.BuiltinFactory(g.Plugin); ok {
 		proto, err = factory(plugin.BuiltinDeps{Config: cloneParams(merged), PackageKey: r.currentKeyData(g.Plugin)})
 		if err != nil {
 			return nil, err
@@ -958,4 +976,18 @@ func (s *dbStorage) Set(key, value string) error {
 
 func (s *dbStorage) Delete(key string) {
 	_, _ = s.db.Exec(`DELETE FROM kv WHERE ns=? AND key=?`, s.ns, key)
+}
+
+// HandlerPackage handler 包查询(分流判定;非 handler 包 = false)
+func (r *Registry) HandlerPackage(name string) (*plugin.Package, bool) {
+	pkg, err := r.pkgs.GetPackage(name)
+	if err != nil || !pkg.HasHandler() {
+		return nil, false
+	}
+	return pkg, true
+}
+
+// MergedParams 组参数合并结果(声明 ⊕ 插件参数 ⊕ 组覆盖;handler ctx.params 同源)
+func (r *Registry) MergedParams(g *Group) (map[string]any, error) {
+	return r.resolveParams(g)
 }

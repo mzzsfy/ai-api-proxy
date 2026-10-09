@@ -17,22 +17,17 @@ func loginID(nowMs int64) string {
 	return fmt.Sprintf("acct-%x-%d", nowMs, loginSeq.Add(1))
 }
 
-// credsFor per-pkg ③ 权威槽(懒建;桥与 handler 引擎共用同槽)
+// credsFor per-pkg ③ 权威槽(懒建;桥与 handler 引擎共用同实例)
 func (a *App) credsFor(pkg string) (*plugin.SlotStore, error) {
 	a.credsMu.Lock()
-	defer a.credsMu.Unlock()
-	if a.credsStores == nil {
-		a.credsStores = map[string]*plugin.SlotStore{}
+	if a.credsShared == nil {
+		a.credsShared = newHandlerShared(a.St)
 	}
-	if s, ok := a.credsStores[pkg]; ok {
-		return s, nil
-	}
+	a.credsMu.Unlock()
 	if _, err := a.AdminDeps.Packages.GetPackage(pkg); err != nil {
 		return nil, err
 	}
-	s := plugin.NewSlotStore(a.St.DB(), pkg)
-	a.credsStores[pkg] = s
-	return s, nil
+	return a.credsShared.storeFor(pkg), nil
 }
 
 // Login login/index.js → Keys.Set(GUI 登录路径唯一落库通道)

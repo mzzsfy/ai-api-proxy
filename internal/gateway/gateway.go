@@ -53,6 +53,8 @@ type Gateway struct {
 	History *history.Store
 	// Keys 键池(请求级 round-robin 选键;nil = 不注入键)
 	Keys *plugin.KeysStore
+	// Handlers handler 执行器注册表(nil = handler 包请求 501)
+	Handlers *plugin.HandlerEngines
 	// ModelsListing /v1/models 列表模式(full|short|both;空 = full)
 	ModelsListing string
 }
@@ -177,6 +179,12 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	}
 	defer release() // 响应完全写完后释放部件池持有(流式含排空)
 	detail += " row=" + cand.FullName() + " plugins=" + pluginPath(resolved)
+	// handler 包分流:不经 pipeline,直入 handler 执行器(历史仍由 defer 全路径记录;既有统计跳过)
+	if hp, ok := g.Registry.HandlerPackage(cand.Group.Plugin); ok {
+		rowName = cand.FullName()
+		g.serveHandler(w, r, entry, &cand, hp, body, model, entryStream)
+		return
+	}
 	// 快速路径:openai 入口 ∧ 内置协议 ∧ filter 链空(直发直传,不经 JS 编解码)
 	if !anthropicEntry && isBuiltin(resolved.Protocol) && len(resolved.Filters) == 0 {
 		g.fastPath(w, r, &cand, resolved, body, model, entryStream, &rowName)
@@ -344,6 +352,10 @@ func (g *Gateway) TestUpstream(ctx context.Context, grp *upstream.Group, memberN
 		return 0, "resolve: " + err.Error()
 	}
 	defer release()
+	if hp, ok := g.Registry.HandlerPackage(grp.Plugin); ok {
+		latency, _, _, errMsg := g.runViaHandler(ctx, grp, hp, memberName, "ping")
+		return latency, errMsg
+	}
 	raw, err := testBody(g.Registry.DeclaredProtocol(grp), memberName)
 	if err != nil {
 		return 0, "marshal test body: " + err.Error()
@@ -378,6 +390,9 @@ func (g *Gateway) ChatTest(ctx context.Context, grp *upstream.Group, memberName,
 		return 0, 0, nil, "resolve: " + err.Error()
 	}
 	defer release()
+	if hp, ok := g.Registry.HandlerPackage(grp.Plugin); ok {
+		return g.runViaHandler(ctx, grp, hp, memberName, message)
+	}
 	raw, err := chatBody(g.Registry.DeclaredProtocol(grp), memberName, message)
 	if err != nil {
 		return 0, 0, nil, "marshal chat body: " + err.Error()

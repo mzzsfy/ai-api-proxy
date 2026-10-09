@@ -45,7 +45,9 @@ type Config struct {
 	// HistoryRetentionDays 请求历史保留天数(独立库 history.db);<0 永久保留,0 视为未配置取默认
 	HistoryRetentionDays int `yaml:"history_retention_days"`
 	// ModelsListing /v1/models 列表模式:full(全路径,默认)|short(短名,歧义名轮询)|both(全路径∪短名)
-	ModelsListing string         `yaml:"models_listing"`
+	ModelsListing string `yaml:"models_listing"`
+	// HandlerVMMaxBorrow handler 池实例借用上限,超过即丢(yaml 绑定不走 applyEnv;≤0 = 缺省 100)
+	HandlerVMMaxBorrow int `yaml:"handler_vm_max_borrow"`
 	Transports    []TransportCfg `yaml:"transports"`
 }
 

@@ -141,8 +141,8 @@ type App struct {
 	Scheduler *scheduler.Scheduler
 	// pluginEvictGate 插件 evict 限流闸门(hooks 通道与 Registry 通道共用;Build 装配)
 	pluginEvictGate *evictGate
-	// credsStores per-pkg ③ 权威槽注册表(桥与 handler 引擎共用同槽)
-	credsStores map[string]*plugin.SlotStore
+	// credsShared per-pkg 槽资源(桥与 handler 引擎共用同实例;Build 装配,测试直构 App 懒建)
+	credsShared *handlerShared
 	credsMu     sync.Mutex
 }
 
@@ -205,6 +205,7 @@ func Build(cfg *Config) (*App, error) {
 	if histErr != nil {
 		log.Printf("history open: %v (recording disabled)", histErr)
 	}
+	shared := newHandlerShared(st)
 	reg := upstream.NewRegistry(st.DB(), pkgs)
 	if err := reg.LoadFromDB(ctx); err != nil {
 		_ = st.Close()
@@ -230,6 +231,18 @@ func Build(cfg *Config) (*App, error) {
 		Metrics:       recorder,
 		History:       hist,
 		Keys:          pkgs.Keys(),
+		Handlers: plugin.NewHandlerEngines(func(pkg *plugin.Package) plugin.HandlerDeps {
+			return plugin.HandlerDeps{
+				Package: pkg,
+				Store:   shared.storeFor(pkg.Manifest.Name),
+				Locks:   shared.locksFor(pkg.Manifest.Name),
+				Transport: func(name string) (pipeline.Transport, error) {
+					return resolveOutboundTransport(trMgr, name)
+				},
+				Log:       func(level, msg string) { log.Printf("[handler %s] %s %s", pkg.Manifest.Name, level, msg) },
+				MaxBorrow: cfg.HandlerVMMaxBorrow,
+			}
+		}),
 		ModelsListing: cfg.ModelsListing,
 	}
 	// 管理服务
@@ -364,7 +377,7 @@ func Build(cfg *Config) (*App, error) {
 	}
 	adminDeps.RunTaskFunc = app.RunTaskOnce
 	adminDeps.Creds = app
-	app.credsStores = map[string]*plugin.SlotStore{}
+	app.credsShared = shared
 	return app, nil
 }
 
