@@ -291,8 +291,9 @@ export interface HandlerHttpRequest {
   url: string;
   method?: string;
   /**
-   * 缺省注入浏览器头组(UA/Accept/Accept-Language/Accept-Encoding/Sec-Ch-Ua*,显式值优先);
-   * headers["X-Aap-Browser-Defaults"]="off" 关闭整组(纯 API 场景)
+   * 缺省注入浏览器头组(Accept/Accept-Language/Accept-Encoding/Sec-Ch-Ua*,显式值优先);
+   * User-Agent 必选:显式 UA 优先,否则恒注入缺省浏览器 UA(off 不豁免);
+   * headers["X-Aap-Browser-Defaults"]="off" 仅关闭其余浏览器头组(纯 API 场景)
    */
   headers?: Record<string, string>;
   body?: string;

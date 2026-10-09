@@ -28,8 +28,11 @@ func TestBrowserDefaults_补齐与显式优先(t *testing.T) {
 		t.Fatalf("defaults missing: %+v", h)
 	}
 	off := withBrowserDefaults(newReq(map[string]string{"X-Aap-Browser-Defaults": "off"}))
-	if _, ok := off["User-Agent"]; ok {
-		t.Fatal("off must skip all defaults")
+	if _, ok := off["Accept"]; ok {
+		t.Fatal("off must skip browser header group")
+	}
+	if off["User-Agent"] != defaultUA {
+		t.Fatalf("UA mandatory: %q", off["User-Agent"])
 	}
 }
 

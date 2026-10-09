@@ -269,8 +269,12 @@ const (
 	defaultAcceptFlag = "__aap_browser_defaults__"
 )
 
-// applyBrowserDefaults 显式头之外补齐浏览器缺省;插件传 "__aap_browser_defaults__": "off" 关闭整组
+// applyBrowserDefaults 显式头之外补齐浏览器缺省;插件传 "__aap_browser_defaults__": "off" 关闭浏览器头组
+// UA 例外:必选,任何路径缺省注入(空 UA 是最显著爬虫特征;显式 UA 覆盖缺省,off 不豁免)
 func applyBrowserDefaults(headers map[string]string) {
+	if _, ok := headers["User-Agent"]; !ok {
+		headers["User-Agent"] = defaultUA
+	}
 	if v, ok := headers["X-Aap-Browser-Defaults"]; ok && v == "off" {
 		return
 	}
