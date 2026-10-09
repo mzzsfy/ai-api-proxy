@@ -198,6 +198,27 @@ func TestSync_UnchangedSkipClearsLastError(t *testing.T) {
 	}
 }
 
+func TestSync_UnchangedSkipReinstallsAfterManualUninstall(t *testing.T) {
+	// Given 已同步且包被手动卸载 When 上游无新提交再次同步 Then 重新导入包
+	gitAvailable(t)
+	e, st, reg, _ := newEngine(t)
+	repo := seedRepo(t, "demo", "plugins/demo")
+	id := createSub(t, st, "repo-a", repo, "plugins/demo")
+	ctx := context.Background()
+	if err := e.Sync(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Delete(ctx, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Sync(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.GetPackage("demo"); err != nil {
+		t.Fatalf("package must be reinstalled on no-op sync after manual uninstall: %v", err)
+	}
+}
+
 func TestSync_UpstreamUpdate(t *testing.T) {
 	// Given 已同步 When 上游新提交 Then 包升级且 commit 前移
 	gitAvailable(t)
@@ -385,6 +406,9 @@ func TestCheckPublicURL(t *testing.T) {
 	}
 	if err := CheckPublicURL("https://192.168.1.1/repo"); err == nil {
 		t.Fatal("private must be rejected")
+	}
+	if err := CheckPublicURL("https://u:pat@8.8.8.8/repo"); err == nil {
+		t.Fatal("embedded credentials must be rejected")
 	}
 	if err := CheckPublicURL("https://8.8.8.8/repo"); err != nil {
 		t.Fatalf("public IP must pass: %v", err)

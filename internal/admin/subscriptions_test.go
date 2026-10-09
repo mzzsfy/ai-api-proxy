@@ -160,6 +160,7 @@ func TestSubscriptions_CreateValidates(t *testing.T) {
 		{"no name", `{"name":"","repo_url":"https://x.example.com/r"}`},
 		{"no url", `{"name":"a","repo_url":""}`},
 		{"path traversal", `{"name":"a","repo_url":"https://x.example.com/r","path":"../up"}`},
+		{"path backslash", `{"name":"a","repo_url":"https://x.example.com/r","path":"..\\up"}`},
 		{"duplicate name", `{"name":"a","repo_url":"https://x.example.com/r"}`},
 	}
 	// 第 4 例需要先建一个 a

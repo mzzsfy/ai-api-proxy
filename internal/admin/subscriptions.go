@@ -29,14 +29,7 @@ func subscriptionView(sub *store.Subscription, packageCount int) map[string]any 
 
 // sourcePackageCount 订阅来源下已装包数
 func (d *Deps) sourcePackageCount(subName string) int {
-	source := subscribe.SourceOf(subName)
-	n := 0
-	for _, name := range d.Packages.ListPackages() {
-		if src, ok := d.Packages.PackageSource(name); ok && src == source {
-			n++
-		}
-	}
-	return n
+	return subscribe.SourceCount(d.Packages, subscribe.SourceOf(subName))
 }
 
 // listSubscriptions 订阅列表

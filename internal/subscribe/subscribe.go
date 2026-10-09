@@ -61,7 +61,11 @@ func (e *Engine) Sync(ctx context.Context, id int64) error {
 	err = e.sync(ctx, sub)
 	if err != nil {
 		msg := maskToken(err.Error(), sub.Token)
-		_ = e.Store.UpdateSubscriptionError(ctx, id, msg)
+		// 独立 ctx:失败可能由请求 ctx 取消引起,错误态写入不能随之取消
+		wctx, cancel := context.WithTimeout(context.Background(), writeErrorTimeout)
+		defer cancel()
+		_ = e.Store.UpdateSubscriptionError(wctx, id, msg)
+		// 脱敏后重构造错误返回(原链可能含 token,不能 %w 透传)
 		return fmt.Errorf("%s", msg)
 	}
 	return nil
@@ -81,7 +85,7 @@ func (e *Engine) sync(ctx context.Context, sub *store.Subscription) error {
 	if err != nil {
 		return err
 	}
-	branch, commit, err := e.prepare(workdir, sub)
+	branch, commit, err := e.prepare(ctx, workdir, sub)
 	if err != nil {
 		return err
 	}
@@ -89,8 +93,8 @@ func (e *Engine) sync(ctx context.Context, sub *store.Subscription) error {
 	if _, err := os.Stat(filepath.Join(pkgDir, "manifest.json")); err != nil {
 		return fmt.Errorf("manifest missing at %s", sub.Path)
 	}
-	if commit == sub.LastSyncedCommit {
-		// 无变化跳过导入,但成功语义仍要落地(清历史 last_error / 刷新时间)
+	// 上游无变化且本订阅来源下仍有包:跳过导入(成功语义落地);包被手动卸载则重新导入
+	if commit == sub.LastSyncedCommit && e.sourceCount(SourceOf(sub.Name)) > 0 {
 		return e.Store.UpdateSubscriptionSync(ctx, sub.ID, branch, commit)
 	}
 	data, err := plugin.PackDir(pkgDir)
@@ -110,7 +114,7 @@ func (e *Engine) sync(ctx context.Context, sub *store.Subscription) error {
 }
 
 // prepare 工作区就绪:首克隆(记录默认分支)或 fetch+reset 到记录分支;返回分支与远端头 commit
-func (e *Engine) prepare(workdir string, sub *store.Subscription) (branch, commit string, err error) {
+func (e *Engine) prepare(ctx context.Context, workdir string, sub *store.Subscription) (branch, commit string, err error) {
 	_, statErr := os.Stat(workdir)
 	// branch 未知但目录残留:状态不可信,整体重克隆
 	if statErr == nil && sub.Branch == "" {
@@ -120,35 +124,64 @@ func (e *Engine) prepare(workdir string, sub *store.Subscription) (branch, commi
 		statErr = os.ErrNotExist
 	}
 	if statErr != nil {
-		if err := os.MkdirAll(filepath.Dir(workdir), 0o755); err != nil {
-			return "", "", fmt.Errorf("mkdir workdir parent: %w", err)
-		}
-		remote, err := authURL(sub)
-		if err != nil {
-			return "", "", err
-		}
-		if _, err := git("", "clone", "--depth=1", remote, workdir); err != nil {
-			return "", "", fmt.Errorf("clone: %w", err)
-		}
-		b, err := git(workdir, "symbolic-ref", "--short", "HEAD")
-		if err != nil {
-			return "", "", fmt.Errorf("detect branch: %w", err)
-		}
-		branch = strings.TrimSpace(b)
-	} else {
-		branch = sub.Branch
-		if _, err := git(workdir, "fetch", "origin"); err != nil {
-			return "", "", fmt.Errorf("fetch: %w", err)
-		}
-		if _, err := git(workdir, "reset", "--hard", "origin/"+branch); err != nil {
-			return "", "", fmt.Errorf("reset: %w", err)
-		}
+		return e.clone(ctx, workdir, sub)
 	}
-	c, err := git(workdir, "rev-parse", "origin/"+branch)
+	branch = sub.Branch
+	if _, err := git(ctx, workdir, "fetch", "origin"); err != nil {
+		return "", "", fmt.Errorf("fetch: %w", err)
+	}
+	if _, err := git(ctx, workdir, "reset", "--hard", "origin/"+branch); err != nil {
+		// 上游默认分支改名自愈:丢弃旧工作区重克隆(重新探测默认分支)
+		if rmErr := os.RemoveAll(workdir); rmErr != nil {
+			return "", "", fmt.Errorf("heal stale branch (remove workdir): %w", rmErr)
+		}
+		return e.clone(ctx, workdir, sub)
+	}
+	c, err := git(ctx, workdir, "rev-parse", "origin/"+branch)
 	if err != nil {
 		return "", "", fmt.Errorf("remote head: %w", err)
 	}
 	return branch, strings.TrimSpace(c), nil
+}
+
+// clone 首克隆:浅克隆 + 探测默认分支 + 远端头 commit
+func (e *Engine) clone(ctx context.Context, workdir string, sub *store.Subscription) (branch, commit string, err error) {
+	if err := os.MkdirAll(filepath.Dir(workdir), 0o755); err != nil {
+		return "", "", fmt.Errorf("mkdir workdir parent: %w", err)
+	}
+	remote, err := authURL(sub)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := git(ctx, "", "clone", "--depth=1", remote, workdir); err != nil {
+		return "", "", fmt.Errorf("clone: %w", err)
+	}
+	b, err := git(ctx, workdir, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("detect branch: %w", err)
+	}
+	branch = strings.TrimSpace(b)
+	c, err := git(ctx, workdir, "rev-parse", "origin/"+branch)
+	if err != nil {
+		return "", "", fmt.Errorf("remote head: %w", err)
+	}
+	return branch, strings.TrimSpace(c), nil
+}
+
+// SourceCount 来源标记下已装包数(GUI 列表与引擎共用)
+func SourceCount(pk Packages, source string) int {
+	n := 0
+	for _, name := range pk.ListPackages() {
+		if src, ok := pk.PackageSource(name); ok && src == source {
+			n++
+		}
+	}
+	return n
+}
+
+// sourceCount 来源标记下已装包数
+func (e *Engine) sourceCount(source string) int {
+	return SourceCount(e.Packages, source)
 }
 
 // uninstallRenamed 卸载本订阅来源下、与本次导入不同名的旧包(上游改名;组引用等卸载失败仅告警,由用户手动清理)
@@ -192,8 +225,11 @@ func (e *Engine) workdir(id int64) string {
 	return filepath.Join(e.WorkDir, strconv.FormatInt(id, 10))
 }
 
-// CheckPath 订阅 path 合法性(空 = ".";必须为相对路径且不穿越;创建入口与同步共用)
+// CheckPath 订阅 path 合法性(空 = ".";入口预检;POSIX 语义,Windows 反斜杠与穿越由 safePkgDir 的 Rel 复核兜底)
 func CheckPath(subPath string) error {
+	if strings.Contains(subPath, `\`) {
+		return fmt.Errorf("subscription path must use / separator: %s", subPath)
+	}
 	clean := path.Clean("/" + subPath) // 归一为根相对路径,消解 .. 与前导 /
 	rel := strings.TrimPrefix(clean, "/")
 	if rel == "" || rel == "." {
@@ -241,7 +277,12 @@ func authURL(sub *store.Subscription) (string, error) {
 		return sub.RepoURL, nil
 	}
 	if sub.Token != "" {
-		u.User = url.UserPassword(sub.User, sub.Token)
+		user := sub.User
+		if user == "" {
+			// 空用户名 + 令牌形态部分服务端拒绝,以惯例占位
+			user = "token"
+		}
+		u.User = url.UserPassword(user, sub.Token)
 	} else if u.User != nil {
 		// 用户把凭据粘进了 repo_url:剥掉密码,避免 git 错误回显泄漏(token 字段为空时掩码不可达)
 		u.User = url.User(u.User.Username())
@@ -249,19 +290,26 @@ func authURL(sub *store.Subscription) (string, error) {
 	return u.String(), nil
 }
 
-// maskToken 错误消息掩码(git 输出常回显含凭据 URL)
+// maskToken 错误消息掩码(git 输出常回显含凭据 URL;编码形态一并掩码——URL 内凭据为 percent-encode 形式)
 func maskToken(msg, token string) string {
 	if token == "" {
 		return msg
 	}
-	return strings.ReplaceAll(msg, token, "***")
+	msg = strings.ReplaceAll(msg, token, "***")
+	if esc := url.QueryEscape(token); esc != token {
+		msg = strings.ReplaceAll(msg, esc, "***")
+	}
+	return msg
 }
 
-// CheckPublicURL URL 级出站校验:仅 https,域名全部解析 IP 须为公网(git CLI 自行拨号,此为创建/同步前防线)
+// CheckPublicURL URL 级出站校验:仅 https、禁 URL 内嵌凭据(走表单字段),域名全部解析 IP 须为公网(git CLI 自行拨号,此为创建/同步前防线)
 func CheckPublicURL(repoURL string) error {
 	u, err := url.Parse(repoURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return fmt.Errorf("only https repo url allowed")
+	}
+	if u.User != nil {
+		return fmt.Errorf("credentials in url not allowed (use user/token fields)")
 	}
 	host := u.Hostname()
 	if ip := net.ParseIP(host); ip != nil {
