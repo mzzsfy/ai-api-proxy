@@ -120,7 +120,7 @@ func TestPackageLoop_TemplateInstallExportReimport(t *testing.T) {
 	}
 
 	// ② 安装模板包
-	if err := f.app.AdminDeps.Packages.Install(ctx, tplBytes); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(ctx, tplBytes, ""); err != nil {
 		t.Fatalf("install template: %v", err)
 	}
 	rev1 := f.app.AdminDeps.Packages.Revision("my-package")
@@ -144,7 +144,7 @@ func TestPackageLoop_TemplateInstallExportReimport(t *testing.T) {
 	}
 
 	// ⑤ 再导入(同 name 升级 revision+1,实例配置保留)
-	if err := f.app.AdminDeps.Packages.Install(ctx, exported); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(ctx, exported, ""); err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
 	rev2 := f.app.AdminDeps.Packages.Revision("my-package")
@@ -255,7 +255,7 @@ func TestPackageDelete_ReferencedRejected(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("template: %d", status)
 	}
-	if err := f.app.AdminDeps.Packages.Install(context.Background(), tplBytes); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(context.Background(), tplBytes, ""); err != nil {
 		t.Fatal(err)
 	}
 	code, body = f.adminMethod(t, http.MethodDelete, "/admin/api/packages/my-package", "")

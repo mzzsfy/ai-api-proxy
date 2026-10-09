@@ -39,7 +39,7 @@ type fixture struct {
 func v2Ddl() []string {
 	return []string{
 		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
-			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
+			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL DEFAULT 'local')`,
 		`CREATE TABLE model_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE, base_package TEXT NOT NULL,
 			params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
@@ -88,7 +88,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 	protoSrc := `module.exports = {
 		buildRequest: function(){return {url:"u"}}, mapEvent: function(ctx,e){return e;}, mapResponse: function(ctx,b){return b;} };
 	module.exports.settings = { base_url: setting.string({required: true}) };`
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: protoSrc})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: protoSrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 包级密钥 + 包参数(连接信息在包,不在模型行)
@@ -192,7 +192,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 	};
 	module.exports.settings = { base_url: setting.string({required: true}) };`
 	}
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pkgs.Keys().Set("js-proto", "api_key", map[string]any{"api_key": "sk-live-key"}); err != nil {

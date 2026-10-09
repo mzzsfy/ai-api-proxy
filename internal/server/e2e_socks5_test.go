@@ -167,7 +167,7 @@ func TestE2E_Socks5_RealService(t *testing.T) {
 	t.Cleanup(func() { _ = app.Close() })
 	ctx := context.Background()
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{
-		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc})); err != nil {
+		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.AdminDeps.Packages.Keys().Set("js-openai", "api_key", map[string]any{"api_key": upstreamAPIKey}); err != nil {

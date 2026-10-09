@@ -108,7 +108,7 @@ func newGeminiFixture(t *testing.T, apiKey, model string, egress geminiEgress) *
 	t.Helper()
 	manifest, src := mustGeminiFiles(t)
 	f := newFourGroupsWith(t, geminiClientTimeout, egress.transports...)
-	if err := f.app.AdminDeps.Packages.Install(t.Context(), aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(t.Context(), aapZip(t, manifest, map[string]string{"protocol.js": src}), ""); err != nil {
 		t.Fatalf("install gemini pkg: %v", err)
 	}
 	if egress.transport != "" {

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NDrawer, NDrawerContent, NIcon, NLayout, NLayoutContent, NLayoutHeader, NLayoutSider, useMessage } from 'naive-ui'
 import {
   AnalyticsOutline,
+  CloudDownloadOutline,
   CubeOutline,
   ExtensionPuzzleOutline,
   GitNetworkOutline,
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
   { to: { name: 'packages' }, label: '插件管理', icon: ExtensionPuzzleOutline },
   { to: { name: 'history' }, label: '请求历史', icon: AnalyticsOutline },
   { to: { name: 'transports' }, label: '传输通道', icon: GitNetworkOutline },
+  { to: { name: 'subscriptions' }, label: '仓库订阅', icon: CloudDownloadOutline },
 ]
 
 const pageTitle = computed(() => {

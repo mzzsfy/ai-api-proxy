@@ -30,6 +30,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/subscribe"
 	"github.com/mzzsfy/ai-api-proxy/internal/scheduler"
 	"github.com/mzzsfy/ai-api-proxy/internal/store"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
@@ -238,12 +239,20 @@ func Build(cfg *Config) (*App, error) {
 		// 无配置口令:打印一次,重启重新生成
 		log.Printf("generated admin password (print once): %s", randomPass)
 	}
+	// 订阅同步引擎(工作区随数据目录;URL 校验默认公网防线)
+	subEngine := &subscribe.Engine{
+		Store:    st,
+		Packages: pkgs,
+		WorkDir:  filepath.Join(cfg.DataDir, "subscriptions"),
+	}
 	adminDeps := &admin.Deps{
-		Packages:   pkgs,
-		Upstream:   reg,
-		Metrics:    recorder,
-		History:    hist,
-		HTTPClient: &http.Client{},
+		Packages:          pkgs,
+		Upstream:          reg,
+		Metrics:           recorder,
+		History:           hist,
+		HTTPClient:        &http.Client{},
+		Subscriptions:     subEngine,
+		SubscriptionStore: st,
 		KeysFunc: func(pkg string) map[string]any {
 			// 键行(不 dump prev,详情端点取)+ 轮询指针位(按 List 序,指向下次请求将选的行;空池 0)
 			keys := pkgs.Keys().List(pkg)
@@ -708,7 +717,7 @@ func ensureBuiltinPackage(ctx context.Context, pkgs *plugin.Registry) error {
 	if err := zw.Close(); err != nil {
 		return err
 	}
-	return pkgs.Install(ctx, buf.Bytes())
+	return pkgs.Install(ctx, buf.Bytes(), "")
 }
 
 // importPluginDirs 装配期导入:普通目录按文件序全量导入(同名后者胜),内置目录只补缺(不覆盖用户包)
@@ -768,7 +777,7 @@ func installSource(ctx context.Context, pkgs *plugin.Registry, src string, seen 
 			return nil
 		}
 	}
-	if err := pkgs.Install(ctx, data); err != nil {
+	if err := pkgs.Install(ctx, data, ""); err != nil {
 		return err
 	}
 	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil && existing.Revision > 1 {

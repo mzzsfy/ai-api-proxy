@@ -191,3 +191,25 @@ export type HistoryEntry = {
 export type HistoryPage = { items: HistoryEntry[]; total: number }
 
 export type Transport = { name: string; url: string }
+
+export type Subscription = {
+  id: number
+  name: string
+  repo_url: string
+  user: string
+  branch: string
+  path: string
+  token_set: boolean
+  package_count: number
+  last_synced_commit: string
+  last_synced_at: string
+  last_error: string
+}
+
+export type SubscriptionCreate = {
+  name: string
+  repo_url: string
+  user?: string
+  path?: string
+  token?: string
+}

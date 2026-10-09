@@ -81,7 +81,7 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", initAndTaskFiles(
 		`module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined));}}`,
 		`module.exports={handler:function(ctx){ctx.keys.set("signed");}}`,
-	))); err != nil {
+	)), ""); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool {
@@ -98,7 +98,7 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.0", initAndTaskFiles(
 		`module.exports={onLoad:function(ctx){storage.set("probe", "x");}}`,
 		`module.exports={handler:function(ctx){ctx.keys.set("signed-2");}}`,
-	))); err != nil {
+	)), ""); err != nil {
 		t.Fatal(err)
 	}
 	runSignIn("signed-2")
@@ -118,7 +118,7 @@ func TestHooks_InstallTriggersOnLoadAndKeysFlow(t *testing.T) {
 	// 卸载清理(keys + settings)
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.2.1", initAndTaskFiles(
 		`module.exports={}`, `module.exports={handler:function(ctx){}}`,
-	))); err != nil {
+	)), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := pkgs.Delete(ctx, "checkin"); err != nil {
@@ -138,7 +138,7 @@ func TestHooks_TaskRunsViaRunner(t *testing.T) {
 	defer sched.Stop()
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(ctx.task);}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond) // 等 onLoad 回调(无 init.js,无副作用)
@@ -174,7 +174,7 @@ func TestHooks_TaskManualRun(t *testing.T) {
 	wire.AdminDeps.RunTaskFunc = wire.RunTaskOnce
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(ctx.task);}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 种子键(逐键执行目标)
@@ -220,7 +220,7 @@ func TestHooks_TaskManualRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Install(ctx, plainAAP); err != nil {
+	if err := pkgs.Install(ctx, plainAAP, ""); err != nil {
 		t.Fatal(err)
 	}
 	if w = runTask("plain", "x"); w.Code != http.StatusBadRequest || !containsStr(w.Body.String(), "no hooks") {
@@ -233,7 +233,7 @@ func TestHooks_AdminKeysEndpointPlaintext(t *testing.T) {
 	pkgs, _ := testRegistry(t)
 	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pkgs.Keys().Set("checkin", "token", "secret-value"); err != nil {
@@ -263,7 +263,7 @@ func TestHooks_SettingsLifecycle(t *testing.T) {
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     `module.exports.settings={account:{type:"string",description:"账号"},level:{type:"int",default:1}}`,
 		"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.keys.set(String(ctx.settings.account||"?"));}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	pkg, _ := pkgs.GetPackage("checkin")

@@ -20,7 +20,7 @@ func pluginUIFixture(t *testing.T, extra map[string]string) (*plugin.Registry, a
 	for k, v := range extra {
 		files[k] = v
 	}
-	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", files)); err != nil {
+	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", files), ""); err != nil {
 		t.Fatal(err)
 	}
 	return pkgs, mux
@@ -91,7 +91,7 @@ func TestPluginUI_Flags(t *testing.T) {
 	pkgs, mux := keysFixture(t)
 	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()

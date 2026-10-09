@@ -291,15 +291,15 @@ func newFourGroupsWith(t *testing.T, clientTimeout time.Duration, extraTransport
 	// 安装 2 个真实插件包(v2:协议包内含 rewrite filter 源,独立 rewrite 包仅用于包粒度装包验证)
 	ctx := context.Background()
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoManifest, map[string]string{
-		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc})); err != nil {
+		plugin.ProtocolEntry: jsProtoSrc, "filters/rewrite.js": rewriteSrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 同源码的 anthropic 协议声明包(声明式单协议:入口 anthropic 需行绑 anthropic-messages 包)
 	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, jsProtoAnthropicManifest, map[string]string{
-		plugin.ProtocolEntry: jsProtoSrc})); err != nil {
+		plugin.ProtocolEntry: jsProtoSrc}), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc})); err != nil {
+	if err := app.AdminDeps.Packages.Install(ctx, aapZip(t, rewriteManifest, map[string]string{"filters/rewrite.js": rewriteSrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 包级密钥(单键 = api_key 条目;data 为 map 形态)+ 包参数(v2 连接信息归属包;行 params 仅覆盖差异槽)

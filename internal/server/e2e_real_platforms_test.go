@@ -86,7 +86,7 @@ func newPlatformFixture(t *testing.T, name, baseUrl, model string) *fourGroupsFi
 	t.Helper()
 	manifest, src := mustOpencodeFiles(t)
 	f := newFourGroups(t)
-	if err := f.app.AdminDeps.Packages.Install(context.Background(), aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(context.Background(), aapZip(t, manifest, map[string]string{"protocol.js": src}), ""); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{

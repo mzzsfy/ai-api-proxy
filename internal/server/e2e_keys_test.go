@@ -36,7 +36,7 @@ func TestKeys_ApiWriteReadFlow(t *testing.T) {
 			keyWrite:function(ctx,id,value,old){ if(id==="token" && value){ return String(value).trim(); } return value; },
 			keyRead:function(ctx,id){ return {masked:String(ctx.key && ctx.key.data).slice(0,2)+"**"}; },
 		}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// GET keys:能力标记三 bool
@@ -115,7 +115,7 @@ func TestKeys_ApiBoundaries(t *testing.T) {
 	pkgs, mux := keysFixture(t)
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 键名含 /(路由无法寻址)
@@ -158,7 +158,7 @@ func TestKeys_FormFlow(t *testing.T) {
 				return null;
 			},
 		}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// form 声明
@@ -217,7 +217,7 @@ func TestKeys_FormFlow(t *testing.T) {
 	if err := pkgs2.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
 		"keys.js":         `module.exports={keyWrite:function(ctx,id,v){return v;}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	w5 := httptest.NewRecorder()
@@ -234,7 +234,7 @@ func TestKeys_Timeout500(t *testing.T) {
 	if err := pkgs.Install(ctx, hooksAAP(t, "0.1.0", map[string]string{
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
 		"keys.js":         `module.exports={keyWrite:function(ctx,id,v){while(true){}}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()

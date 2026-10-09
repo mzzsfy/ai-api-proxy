@@ -86,7 +86,7 @@ func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 	manifest, src := mustOpencodeFiles(t)
 	f := newFourGroups(t)
 	ctx := context.Background()
-	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src}), ""); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Keys().Set("opencode", "api_key", map[string]any{"api_key": apiKey}); err != nil {
@@ -229,7 +229,7 @@ func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 	f := newFourGroups(t)
 	manifest, src := mustOpencodeFiles(t)
 	ctx := context.Background()
-	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src})); err != nil {
+	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{

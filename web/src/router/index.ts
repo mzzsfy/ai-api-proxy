@@ -8,6 +8,7 @@ import PackageSettingsPage from '@/pages/PackageSettingsPage.vue'
 import MonitorPage from '@/pages/MonitorPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
 import TransportsPage from '@/pages/TransportsPage.vue'
+import SubscriptionsPage from '@/pages/SubscriptionsPage.vue'
 
 const router = createRouter({
   history: createWebHashHistory('/admin/'),
@@ -24,6 +25,7 @@ const router = createRouter({
         { path: 'monitor', name: 'monitor', component: MonitorPage },
         { path: 'history', name: 'history', component: HistoryPage },
         { path: 'transports', name: 'transports', component: TransportsPage },
+        { path: 'subscriptions', name: 'subscriptions', component: SubscriptionsPage },
       ],
     },
   ],

@@ -45,7 +45,7 @@ func buildZip(t *testing.T, manifest string, files map[string]string) []byte {
 func v3Ddl() []string {
 	return []string{
 		`CREATE TABLE packages (name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
-			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}')`,
+			revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')), declaration_json TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL DEFAULT 'local')`,
 		`CREATE TABLE model_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE,
 			base_package TEXT NOT NULL, params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
@@ -105,7 +105,7 @@ func installBuiltinLikePkgForm(t *testing.T, pkgs *plugin.Registry, name, form, 
 	module.exports.settings = { base_url: setting.string({required: true}) };`, impl)
 	// 经 zip 装包走 Install 全流程
 	data := buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})
-	if err := pkgs.Install(context.Background(), data); err != nil {
+	if err := pkgs.Install(context.Background(), data, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -339,7 +339,7 @@ func TestResolve_FilterOrderAndConfig(t *testing.T) {
 	installBuiltinLikePkg(t, pkgs, "base")
 	fManifest := `{"manifestVersion":1,"name":"onlyf","version":"1","parts":{"filters":[{"name":"f1"}]}}`
 	fsrc := `module.exports = { mapRequest: function (ctx, p) { return p; } };`
-	if err := pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"filters/f1.js": fsrc})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, fManifest, map[string]string{"filters/f1.js": fsrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// filter 挂进 base 包:base 升级带 filter
@@ -353,7 +353,7 @@ func TestResolve_FilterOrderAndConfig(t *testing.T) {
 	};
 	module.exports.settings = { base_url: setting.string({required: true}) };`
 	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{
-		plugin.ProtocolEntry: psrc, "filters/f1.js": fsrc})); err != nil {
+		plugin.ProtocolEntry: psrc, "filters/f1.js": fsrc}), ""); err != nil {
 		t.Fatal(err)
 	}
 	g := mustGroup(t, reg, "base", "base", map[string]any{"base_url": "https://d"})

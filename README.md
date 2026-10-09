@@ -25,6 +25,8 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
   入口协议或形态不符时路由直接 400 拒绝(逐行注明拒因),不做转换、不做兜底。管道权威格式 = 声明协议格式,无中间格式
 - **快速路径**:openai 入口 ∧ 内置协议工厂 ∧ 空 filter 链 → 字节直发(不重序列化)
 - **runtime 池**:JS hook 粒度借还(池 = GOMAXPROCS,env `API_PROXY_POOL_SIZE` 逃生),排队 5s 超时 → 503
+- **仓库订阅**:管理 GUI 登记私有 git 仓库(HTTPS + PAT),手动同步导入仓库内包目录(monorepo 填子路径,单包仓库填 `.`);
+  包带 `subscription/<名>` 来源标记,与本地上传互斥覆盖;删除订阅联动卸载其包并清理克隆工作区(`data/subscriptions/`)
 
 ## 配置
 

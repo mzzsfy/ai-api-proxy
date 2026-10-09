@@ -52,7 +52,7 @@ func testDB(t *testing.T) *sql.DB {
 		name TEXT PRIMARY KEY, manifest_json TEXT NOT NULL, parts_json TEXT NOT NULL,
 		revision INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
 		declaration_json TEXT NOT NULL DEFAULT '{}',
-		created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`); err != nil {
+		created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL DEFAULT 'local')`); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -89,7 +89,7 @@ func mustInstall(t *testing.T, r *Registry) *Package {
 	if err := r.Install(context.Background(), buildAAP(t, goodManifest, map[string]string{
 		"protocol.js":         protoSrc,
 		"filters/identity.js": filterSrc,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	pkg, err := r.GetPackage("demo")
@@ -136,7 +136,7 @@ func TestValidate_MissingProtocolNameRejected(t *testing.T) {
 	m := `{"manifestVersion":1,"name":"nfm","version":"1","parts":{
 		"protocol":{"features":["tools"]}}}`
 	r := NewRegistry(testDB(t))
-	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: protoSrc})); err == nil {
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: protoSrc}), ""); err == nil {
 		t.Fatal("missing protocol name accepted")
 	}
 }
@@ -147,7 +147,7 @@ func TestValidate_MissingImplementationRejected(t *testing.T) {
 		"protocol":{"protocol":"openai-completions"}}}`
 	src := `module.exports = { buildRequest: function(){return {url:"u"}} };`
 	r := NewRegistry(testDB(t))
-	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src}))
+	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src}), "")
 	if err == nil || !strings.Contains(err.Error(), "no forms") {
 		t.Fatalf("install must reject missing impl: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestValidate_ExtraImplAccepted(t *testing.T) {
 		mapEvent: function(ctx,e){ return e; },
 		mapResponse: function(ctx,b){ return b; } };`
 	r := NewRegistry(testDB(t))
-	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src})); err != nil {
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{ProtocolEntry: src}), ""); err != nil {
 		t.Fatalf("full impl must be accepted: %v", err)
 	}
 }
@@ -172,7 +172,7 @@ func TestValidate_SyntaxErrorLineReported(t *testing.T) {
 		"filters":[{"name":"f"}]}}`
 	src := "module.exports = function (config) {\n  return { mapRequest: function (ctx, p) {\n    return p  // 缺分号致下一行语法错\n  } };\n};\n)))"
 	r := NewRegistry(testDB(t))
-	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/f.js": src}))
+	err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/f.js": src}), "")
 	if err == nil || !strings.Contains(err.Error(), "Line 6") {
 		t.Fatalf("syntax error must report line: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestValidate_DuplicatedFilterNameRejected(t *testing.T) {
 	m := `{"manifestVersion":1,"name":"dup","version":"1","parts":{
 		"filters":[{"name":"same"},{"name":"same"}]}}`
 	r := NewRegistry(testDB(t))
-	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/same.js": filterSrc})); err == nil {
+	if err := r.Install(context.Background(), buildAAP(t, m, map[string]string{"filters/same.js": filterSrc}), ""); err == nil {
 		t.Fatal("duplicate filter accepted")
 	}
 }
@@ -196,7 +196,7 @@ func TestRegistry_InstallUpgradePersist(t *testing.T) {
 	if err := r.Install(context.Background(), buildAAP(t, goodManifest, map[string]string{
 		"protocol.js":         protoSrc,
 		"filters/identity.js": filterSrc,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if r.Revision("demo") != 2 {

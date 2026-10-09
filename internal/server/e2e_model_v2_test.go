@@ -116,7 +116,7 @@ func newV2Env(t *testing.T) *v2Env {
 	f := newFourGroups(t)
 	ctx := context.Background()
 	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, v2PkgManifest, map[string]string{
-		plugin.ProtocolEntry: v2ProtoJS, "filters/redact.js": v2RedactJS})); err != nil {
+		plugin.ProtocolEntry: v2ProtoJS, "filters/redact.js": v2RedactJS}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Keys().Set("anthropic-compatible", "api_key", map[string]any{"api_key": "K1"}); err != nil {

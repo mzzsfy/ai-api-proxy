@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/history"
+	"github.com/mzzsfy/ai-api-proxy/internal/ipguard"
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/store"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 )
 
@@ -57,6 +59,25 @@ type Deps struct {
 	KeySubmitFunc func(pkg string, values map[string]any) ([]string, map[string]any, error)
 	// RunTaskFunc 手动触发 hooks 任务一次(keyID 空 = 全键跑;同步执行,逐键结果)
 	RunTaskFunc func(pkg, task, keyID string) ([]TaskRunResult, error)
+	// Subscriptions 订阅同步/删除引擎(nil = 订阅路由 501)
+	Subscriptions SubscriptionEngine
+	// SubscriptionStore 订阅 CRUD(nil = 订阅路由 501)
+	SubscriptionStore SubscriptionStore
+	// SubscriptionCheck repo_url 出站校验(nil = subscribe.CheckPublicURL)
+	SubscriptionCheck func(repoURL string) error
+}
+
+// SubscriptionEngine 订阅同步/删除(消费侧最小接口)
+type SubscriptionEngine interface {
+	Sync(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id int64) error
+}
+
+// SubscriptionStore 订阅 CRUD(消费侧最小接口)
+type SubscriptionStore interface {
+	CreateSubscription(ctx context.Context, sub *store.Subscription) (int64, error)
+	ListSubscriptions(ctx context.Context) ([]*store.Subscription, error)
+	GetSubscription(ctx context.Context, id int64) (*store.Subscription, error)
 }
 
 // TaskRunResult 手动"测试"单项(键维度)
@@ -117,6 +138,10 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /admin/api/transports", d.listTransports)
 	mux.HandleFunc("POST /admin/api/transports/{name}/test", d.testTransport)
 	mux.HandleFunc("POST /admin/api/transports/{name}/evict", d.evictTransport)
+	mux.HandleFunc("GET /admin/api/subscriptions", d.listSubscriptions)
+	mux.HandleFunc("POST /admin/api/subscriptions", d.createSubscription)
+	mux.HandleFunc("DELETE /admin/api/subscriptions/{id}", d.deleteSubscription)
+	mux.HandleFunc("POST /admin/api/subscriptions/{id}/sync", d.syncSubscription)
 	return mux
 }
 
@@ -260,32 +285,8 @@ func publicDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return d.DialContext(ctx, network, net.JoinHostPort(dialIP.String(), port))
 }
 
-// forbiddenIP 非公网地址判定(环回/私网/链路本地/组播/未指定/CGNAT/基准测试/保留段/IPv6 文档段)
-func forbiddenIP(ip net.IP) bool {
-	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil {
-		// 0.0.0.0/8"本网络"段、240/4 保留段(含 255.255.255.255 广播)
-		if v4[0] == 0 || v4[0] >= 240 {
-			return true
-		}
-		// 100.64/10 CGNAT 共享地址段
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] < 128 {
-			return true
-		}
-		// 198.18/15 基准测试段;192.0.0/24 IETF 协议分配段
-		if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
-			return true
-		}
-		if v4[0] == 192 && v4[1] == 0 && v4[2] == 0 {
-			return true
-		}
-		return false
-	}
-	// IPv6:2001:db8::/32 文档段(ULA fc00::/7 已由 IsPrivate 覆盖)
-	return len(ip) == 16 && ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8
-}
+// forbiddenIP 非公网地址判定(共享谓词,见 internal/ipguard)
+func forbiddenIP(ip net.IP) bool { return ipguard.Forbidden(ip) }
 
 // maxUpload 上传/拉取包大小上限;读取按上限+1 判定超限(拒绝而非静默截断)
 const maxUpload = 8 * 1024 * 1024
@@ -315,7 +316,7 @@ func (d *Deps) installPackage(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "read body")
 		return
 	}
-	if err := d.Packages.Install(r.Context(), data); err != nil {
+	if err := d.Packages.Install(r.Context(), data, ""); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -341,7 +342,7 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := d.Packages.Install(r.Context(), data); err != nil {
+	if err := d.Packages.Install(r.Context(), data, ""); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}

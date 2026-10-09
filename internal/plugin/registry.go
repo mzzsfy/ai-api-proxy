@@ -80,9 +80,9 @@ func (r *Registry) BuiltinFactory(name string) (BuiltinFactory, bool) {
 	return f, ok
 }
 
-// LoadFromDB 启动时从库恢复(含禁用行与 revision + declaration_json)
+// LoadFromDB 启动时从库恢复(含禁用行与 revision + declaration_json + source)
 func (r *Registry) LoadFromDB(ctx context.Context) error {
-	rows, err := r.db.QueryContext(ctx, `SELECT name, manifest_json, parts_json, revision, enabled, declaration_json FROM packages`)
+	rows, err := r.db.QueryContext(ctx, `SELECT name, manifest_json, parts_json, revision, enabled, declaration_json, source FROM packages`)
 	if err != nil {
 		return fmt.Errorf("query packages: %w", err)
 	}
@@ -90,10 +90,10 @@ func (r *Registry) LoadFromDB(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for rows.Next() {
-		var name, manifestRaw, partsRaw, declRaw string
+		var name, manifestRaw, partsRaw, declRaw, source string
 		var revision int64
 		var enabled bool
-		if err := rows.Scan(&name, &manifestRaw, &partsRaw, &revision, &enabled, &declRaw); err != nil {
+		if err := rows.Scan(&name, &manifestRaw, &partsRaw, &revision, &enabled, &declRaw, &source); err != nil {
 			return fmt.Errorf("scan package: %w", err)
 		}
 		m := &Manifest{}
@@ -104,7 +104,7 @@ func (r *Registry) LoadFromDB(ctx context.Context) error {
 		_ = json.Unmarshal([]byte(partsRaw), &files)
 		decl := map[string]any{}
 		_ = json.Unmarshal([]byte(declRaw), &decl)
-		r.pkgs[name] = &Package{Manifest: m, Files: files, Revision: revision, Declaration: decl}
+		r.pkgs[name] = &Package{Manifest: m, Files: files, Revision: revision, Declaration: decl, Source: normalizeSource(source)}
 		r.revs[name] = revision
 		if !enabled {
 			r.disabled[name] = true
@@ -121,9 +121,22 @@ func extractDeclaration(pkg *Package, deps *HooksDeps) (map[string]any, error) {
 	return ExtractDeclaration(pkg, *deps)
 }
 
+// SourceLocal 本地来源标记(上传/URL 导入/目录导入)
+const SourceLocal = "local"
+
+// normalizeSource 空串归一为 local(历史调用方不感知 source)
+func normalizeSource(source string) string {
+	if source == "" {
+		return SourceLocal
+	}
+	return source
+}
+
 // Install 安装(zip 字节);同 name = 升级(revision 自增)
+// source 空串 = local,订阅同步传 subscription/<name>;同名包已存在且 source 不同则拒绝(双向防静默覆盖)
 // 编排:结构/编译校验 → 声明提取(拒装点)→ 升级快照 → 落库(declaration_json 同事务)→ 内存替换 → onLoad/onChange/next 链
-func (r *Registry) Install(ctx context.Context, data []byte) error {
+func (r *Registry) Install(ctx context.Context, data []byte, source string) error {
+	source = normalizeSource(source)
 	pkg, err := ParseAAP(data)
 	if err != nil {
 		return err
@@ -140,9 +153,13 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 		return fmt.Errorf("declaration: %w", err)
 	}
 	pkg.Declaration = decl
+	pkg.Source = source
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old, exists := r.pkgs[pkg.Manifest.Name]
+	if exists && old.Source != source {
+		return fmt.Errorf("package %q owned by source %q, refusing install from %q", pkg.Manifest.Name, old.Source, source)
+	}
 	prevRev := int64(0)
 	if exists {
 		prevRev = old.Revision
@@ -153,10 +170,11 @@ func (r *Registry) Install(ctx context.Context, data []byte) error {
 	filesRaw, _ := json.Marshal(pkg.Files)
 	declRaw, _ := json.Marshal(pkg.Declaration)
 	_, err = r.db.ExecContext(ctx,
-		`INSERT INTO packages(name, manifest_json, parts_json, revision, enabled, declaration_json) VALUES(?,?,?,?,1,?)
+		`INSERT INTO packages(name, manifest_json, parts_json, revision, enabled, declaration_json, source) VALUES(?,?,?,?,1,?,?)
 		 ON CONFLICT(name) DO UPDATE SET manifest_json=excluded.manifest_json, parts_json=excluded.parts_json,
-		 revision=excluded.revision, enabled=1, declaration_json=excluded.declaration_json, updated_at=datetime('now')`,
-		pkg.Manifest.Name, string(manifestRaw), string(filesRaw), pkg.Revision, string(declRaw))
+		 revision=excluded.revision, enabled=1, declaration_json=excluded.declaration_json,
+		 source=excluded.source, updated_at=datetime('now')`,
+		pkg.Manifest.Name, string(manifestRaw), string(filesRaw), pkg.Revision, string(declRaw), source)
 	if err != nil {
 		return fmt.Errorf("persist package: %w", err)
 	}
@@ -420,6 +438,17 @@ func (r *Registry) SettingsOverrides(pkgName string) map[string]any {
 
 // DeleteSettings 卸载清理 overrides
 func (r *Registry) DeleteSettings(name string) { r.settings.Delete(name) }
+
+// PackageSource 包安装来源(内存态;不存在包 ok=false)
+func (r *Registry) PackageSource(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.pkgs[name]
+	if !ok {
+		return "", false
+	}
+	return normalizeSource(p.Source), true
+}
 
 // Revision 包当前 revision(未知包 0)
 func (r *Registry) Revision(name string) int64 {

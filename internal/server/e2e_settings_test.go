@@ -13,13 +13,13 @@ func settingsPkg(t *testing.T, pkgs pkgRegistry, decl string) {
 	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     decl,
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
 type pkgRegistry = interface {
-	Install(ctx context.Context, data []byte) error
+	Install(ctx context.Context, data []byte, source string) error
 }
 
 func TestSettings_GetViewExpands(t *testing.T) {
@@ -106,7 +106,7 @@ func TestSettings_Boundaries(t *testing.T) {
 	if err := pkgs.Install(context.Background(), hooksAAP(t, "0.1.0", map[string]string{
 		"settings.js":     `module.exports.settings={}`,
 		"tasks/signIn.js": `module.exports={handler:function(ctx){}}`,
-	})); err != nil {
+	}), ""); err != nil {
 		t.Fatal(err)
 	}
 	// 构造无 hooks 包:纯 protocol 包复用 builtin 声明面——直接用 hooks 包验证非法 cron 边界

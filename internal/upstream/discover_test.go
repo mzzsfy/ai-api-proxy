@@ -23,7 +23,7 @@ func installDiscoverPkg(t *testing.T, pkgs *plugin.Registry, name, style string)
 		}, mapResponse: function (ctx, b) { return b; } };
 	};
 	module.exports.settings = { base_url: setting.string({required: true}) };`
-	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src})); err != nil {
+	if err := pkgs.Install(context.Background(), buildZip(t, manifest, map[string]string{plugin.ProtocolEntry: src}), ""); err != nil {
 		t.Fatal(err)
 	}
 }

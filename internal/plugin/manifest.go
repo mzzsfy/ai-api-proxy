@@ -118,6 +118,7 @@ type Package struct {
 	Files       map[string][]byte // 文件路径 → 源码(多文件布局;族文件 + lib/*.js)
 	Revision    int64
 	Declaration map[string]any // 合并后的 settings 声明(安装/升级/在线保存时提取;declaration_json 持久化)
+	Source      string         // 安装来源:local / subscription/<name>
 }
 
 // HasProtocol 是否含 protocol 部件(主包判定)

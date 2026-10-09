@@ -15,6 +15,8 @@ import type {
   ModelGroup,
   PackageInfo,
   PackageSettings,
+  Subscription,
+  SubscriptionCreate,
   TaskResultRow,
   TestResult,
   Transport,
@@ -101,5 +103,12 @@ export const api = {
     test: (name: string) => post<TestResult>(`/transports/${encodeURIComponent(name)}/test`),
     evict: (name: string, scope: 'lease' | 'egress', value: string) =>
       post<{ ok: true }>(`/transports/${encodeURIComponent(name)}/evict`, { scope, value }),
+  },
+
+  subscriptions: {
+    list: () => get<Subscription[]>('/subscriptions'),
+    create: (sub: SubscriptionCreate) => post<{ ok: true; id: number }>('/subscriptions', sub),
+    remove: (id: number) => del(`/subscriptions/${id}`),
+    sync: (id: number) => post<{ ok: true }>(`/subscriptions/${id}/sync`),
   },
 }

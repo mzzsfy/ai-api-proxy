@@ -145,7 +145,7 @@ func TestAdmin_ListPackagesIncludesProtocolName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pkgs.Install(context.Background(), data); err != nil {
+	if err := pkgs.Install(context.Background(), data, ""); err != nil {
 		t.Fatal(err)
 	}
 	deps := newAdminDeps(pkgs)
