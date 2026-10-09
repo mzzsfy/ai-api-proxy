@@ -144,6 +144,7 @@ type App struct {
 	// credsShared per-pkg 槽资源(桥与 handler 引擎共用同实例;Build 装配,测试直构 App 懒建)
 	credsShared *handlerShared
 	credsMu     sync.Mutex
+	wdCancel    context.CancelFunc
 }
 
 // transportNames 传输实例名清单(稳定序)
@@ -399,6 +400,9 @@ func (a *App) startHooks() {
 
 // Close 释放资源(传输供给方级联在先——实例拨号依赖存储后端无关,先关无序约束)
 func (a *App) Close() error {
+	if a.wdCancel != nil {
+		a.wdCancel()
+	}
 	if a.Scheduler != nil {
 		a.Scheduler.Stop()
 		a.Scheduler.Wait()
@@ -603,6 +607,21 @@ func Run(cfg *Config) error {
 	}
 	defer func() { _ = app.Close() }()
 	app.startHooks()
+	// RSS 看门狗(独立进程部署:软限丢池拒新,硬限进程退出;≤0 关闭)
+	if cfg.HandlerRSSSoftPercent > 0 {
+		if total := sysTotalMemory(); total > 0 {
+			soft := total * uint64(cfg.HandlerRSSSoftPercent) / 100
+			wd := NewWatchdog(app.Gateway.Handlers, soft, soft*3/2, true, readRSS)
+			wdCtx, wdCancel := context.WithCancel(context.Background())
+			app.credsMu.Lock()
+			app.wdCancel = wdCancel
+			app.credsMu.Unlock()
+			go wd.Run(wdCtx)
+			log.Printf("watchdog: soft=%dMiB hard=%dMiB (%d%% of %dMiB)", soft>>20, soft*3/2>>20, cfg.HandlerRSSSoftPercent, total>>20)
+		} else {
+			log.Printf("watchdog: total memory unknown, disabled")
+		}
+	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           app.Mux,

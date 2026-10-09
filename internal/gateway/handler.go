@@ -118,6 +118,10 @@ func headersFromBody(h http.Header) map[string]string {
 
 // serveHandler 请求路径分流入口(Execute 后回复已写完;历史由 serve defer 记录)
 func (g *Gateway) serveHandler(w http.ResponseWriter, r *http.Request, entry Entry, cand *upstream.Candidate, hp *plugin.Package, body []byte, model string, entryStream bool) {
+	if g.Handlers.RejectNew() {
+		writeError(w, entry, http.StatusBadGateway, "server overloaded (rss soft limit), retry later")
+		return
+	}
 	eng, err := g.Handlers.For(hp)
 	if err != nil {
 		writeError(w, entry, http.StatusInternalServerError, err.Error())

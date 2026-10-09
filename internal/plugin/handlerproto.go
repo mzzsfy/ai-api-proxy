@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
@@ -42,7 +43,17 @@ type HandlerEngines struct {
 	mu      sync.Mutex
 	engines map[string]*HandlerEngine
 	factory func(pkg *Package) HandlerDeps
+	reject  atomic.Bool // RSS 看门狗软限拒新闸(true = 新请求 502)
 }
+
+// ErrRejectNew RSS 软限拒新(502 语义)
+var ErrRejectNew = errors.New("server overloaded (rss soft limit), retry later")
+
+// RejectNew 看门狗拒新闸查询
+func (h *HandlerEngines) RejectNew() bool { return h.reject.Load() }
+
+// SetRejectNew 看门狗闸(软限触发 true/回落 false)
+func (h *HandlerEngines) SetRejectNew(v bool) { h.reject.Store(v) }
 
 // NewHandlerEngines 构造(factory 由宿主装配:Store/Locks/Transport/Log/MaxBorrow 按包绑定)
 func NewHandlerEngines(factory func(pkg *Package) HandlerDeps) *HandlerEngines {
@@ -51,6 +62,9 @@ func NewHandlerEngines(factory func(pkg *Package) HandlerDeps) *HandlerEngines {
 
 // For 取或懒建引擎(包 revision 变更 = 新键新引擎,旧引擎随 CloseAll/闲置不回收语义由宿主管理)
 func (h *HandlerEngines) For(pkg *Package) (*HandlerEngine, error) {
+	if h.reject.Load() {
+		return nil, ErrRejectNew
+	}
 	key := pkg.Manifest.Name + "|" + fmt.Sprint(pkg.Revision)
 	h.mu.Lock()
 	defer h.mu.Unlock()

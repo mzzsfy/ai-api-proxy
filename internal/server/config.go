@@ -48,6 +48,8 @@ type Config struct {
 	ModelsListing string `yaml:"models_listing"`
 	// HandlerVMMaxBorrow handler 池实例借用上限,超过即丢(yaml 绑定不走 applyEnv;≤0 = 缺省 100)
 	HandlerVMMaxBorrow int `yaml:"handler_vm_max_borrow"`
+	// HandlerRSSSoftPercent RSS 看门狗软限(物理内存百分比;≤0 = 关闭;硬限 = 软限×1.5,独立进程退出)
+	HandlerRSSSoftPercent int `yaml:"handler_rss_soft_percent"`
 	Transports    []TransportCfg `yaml:"transports"`
 }
 
