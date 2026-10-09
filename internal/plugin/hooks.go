@@ -53,6 +53,7 @@ type hooksEnv struct {
 	cache  map[string]*goja.Object // file → exports(runtime 内幂等单例)
 	stack  []string                // 求值栈(循环检测)
 	withSetting bool               // setting 构建器全局注入(keyForm 函数体运行期需要)
+	strictWrap bool                // 模块严格模式包装(handler 池构建用;配合 freeze globalThis 使全局写抛错)
 }
 
 // newHooksEnv 构造(runtime/util/setting 注入一次)
@@ -106,7 +107,11 @@ func (e *hooksEnv) load(fromFile, spec string) (*goja.Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("file %q missing in package %s", target, e.pkg.Manifest.Name)
 	}
-	wrapped := "(function(module, exports, require){\n" + string(src) + "\n})"
+	wrapped := "(function(module, exports, require){\n"
+	if e.strictWrap {
+		wrapped += "\"use strict\";\n"
+	}
+	wrapped += string(src) + "\n})"
 	prog, err := hooksProgram(e.pkg, target, []byte(wrapped))
 	if err != nil {
 		return nil, err

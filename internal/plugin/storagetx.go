@@ -49,6 +49,17 @@ func (t *StorageTx) Drop() {
 	t.writes = map[string]*string{}
 }
 
+// Snapshot 缓冲快照(权威槽归并仲裁输入;nil 值 = 删除标记)
+func (t *StorageTx) Snapshot() map[string]*string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]*string, len(t.writes))
+	for k, vp := range t.writes {
+		out[k] = vp
+	}
+	return out
+}
+
 func (t *StorageTx) Get(key string) (string, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
