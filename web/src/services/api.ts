@@ -7,9 +7,9 @@ import type {
   HistoryEntry,
   HistoryPage,
   InspectSummary,
-  KeyDetail,
-  KeyForm,
+  AccountsView,
   KeysView,
+  MetaView,
   MetricsLive,
   MetricsSeriesRow,
   ModelGroup,
@@ -70,22 +70,24 @@ export const api = {
   keys: {
     list: (name: string) => get<KeysView>(`/packages/${encodeURIComponent(name)}/keys`),
     write: (name: string, key: string, value: unknown, baseUpdatedAt: number) =>
-      put<{ updatedAt: number; transformed: boolean }>(
+      put<{ updatedAt: number }>(
         `/packages/${encodeURIComponent(name)}/keys/${encodeURIComponent(key)}`,
         { value, baseUpdatedAt },
       ),
     remove: (name: string, key: string) =>
       del(`/packages/${encodeURIComponent(name)}/keys/${encodeURIComponent(key)}`),
-    detail: (name: string, key: string) =>
-      get<KeyDetail>(`/packages/${encodeURIComponent(name)}/keys/${encodeURIComponent(key)}/detail`),
-    form: (name: string) => post<KeyForm>(`/packages/${encodeURIComponent(name)}/keys/form`),
-    formAction: (name: string, action: string, values: Record<string, unknown>) =>
-      post<{ message: string }>(`/packages/${encodeURIComponent(name)}/keys/form-action`, { action, values }),
-    formSubmit: (name: string, values: Record<string, unknown>) =>
-      post<{ ok: boolean; ids: string[]; errors?: Record<string, string> }>(
-        `/packages/${encodeURIComponent(name)}/keys/form-submit`,
-        { values },
-      ),
+  },
+
+  creds: {
+    login: (name: string, input: unknown) =>
+      post<{ id: string; data: unknown }>(`/packages/${encodeURIComponent(name)}/login`, { input }),
+    accounts: (name: string) => get<AccountsView>(`/packages/${encodeURIComponent(name)}/accounts`),
+    storageGet: (name: string, key: string) =>
+      post<{ value: unknown }>(`/packages/${encodeURIComponent(name)}/accounts/storage`, { op: 'get', key }),
+    storageSet: (name: string, key: string, value: string) =>
+      post<{ ok: true }>(`/packages/${encodeURIComponent(name)}/accounts/storage`, { op: 'set', key, value }),
+    meta: (name: string) => get<MetaView>(`/packages/${encodeURIComponent(name)}/meta`),
+    loginUIUrl: (name: string) => `/admin/api/packages/${encodeURIComponent(name)}/login/ui/`,
   },
 
   metrics: {

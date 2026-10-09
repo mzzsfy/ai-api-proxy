@@ -144,34 +144,30 @@ export type KeyRow = {
   id: string
   data: unknown
   updatedAt: number
-  hasPrev: boolean
 }
 
 export type KeysView = {
   keys: KeyRow[]
   rotation: number
-  hooks: { keyWrite: boolean; keyRead: boolean; keyForm: boolean }
+  login: boolean
 }
 
-export type KeyDetail = {
+export type AccountRow = {
   id: string
   data: unknown
-  prev?: unknown
   updatedAt: number
-  explain?: unknown
 }
 
-export type KeyFormField = {
-  name?: string
-  description?: string
-  type?: 'bool' | 'enum' | 'int' | 'number' | 'text'
-  required?: boolean
-  values?: string[]
+export type AccountsView = {
+  accounts: AccountRow[]
 }
 
-export type KeyFormAction = { name: string; label?: string }
-
-export type KeyForm = { fields: KeyFormField[]; actions: KeyFormAction[] }
+export type MetaView = {
+  name: string
+  version: string
+  revision: number
+  params: Record<string, unknown>
+}
 
 export type HistoryEntry = {
   id: number

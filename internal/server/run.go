@@ -279,7 +279,11 @@ func Build(cfg *Config) (*App, error) {
 					"id": e.ID, "data": e.Data, "updatedAt": e.UpdatedAt, "hasPrev": e.Prev != nil,
 				})
 			}
-			return map[string]any{"keys": out, "rotation": pkgs.Keys().PeekRotation(pkg, len(keys))}
+			login := false
+			if p, err := pkgs.GetPackage(pkg); err == nil {
+				login = p.HasLogin()
+			}
+			return map[string]any{"keys": out, "rotation": pkgs.Keys().PeekRotation(pkg, len(keys)), "login": login}
 		},
 	}
 	mux := http.NewServeMux()
