@@ -185,6 +185,8 @@ type HooksRuntime struct {
 	settings     map[string]any // ctx.settings 快照
 	taskName     string         // ctx.task
 	stx          *StorageTx // storage 事务视图(执行期缓冲;成功归并/失败丢弃)
+	loginFn      goja.Callable // login/index.js 导出函数(GUI 凭据通道)
+	loginParams  any
 }
 
 // 任务文件缺省路径

@@ -43,6 +43,8 @@ type Deps struct {
 	FetchPackage func(r *http.Request, url string) ([]byte, error)
 	// KeysFunc 包键清单视图({keys, rotation};按包名隔离)
 	KeysFunc func(pkg string) map[string]any
+	// Creds login/inspect 凭据通道(nil = 相关路由 501;aap 桥后端)
+	Creds CredsEngine
 	// HTTPClient 模型发现用出站客户端(nil = discover 路由 501)
 	HTTPClient *http.Client
 	// RunTaskFunc 手动触发 hooks 任务一次(keyID 空 = 全键跑;同步执行,逐键结果)
@@ -59,6 +61,23 @@ type Deps struct {
 type SubscriptionEngine interface {
 	Sync(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
+}
+
+// CredsEngine login/inspect 凭据通道(aap 桥后端;全部限域本包)
+type CredsEngine interface {
+	// Login 调 login/index.js 并落库(GUI 登录路径唯一落库通道;返回 {id, data})
+	Login(pkg string, input any) (map[string]any, error)
+	// Accounts 账号清单(inspect.js 变换后视图;无 inspect = data 原样)
+	Accounts(pkg string) ([]map[string]any, error)
+	// Account 单账号(inspect 变换后)
+	Account(pkg, id string) (map[string]any, error)
+	// StorageGet/StorageSet 包级 storage 桥(③直写打权威标)
+	StorageGet(pkg, key string) (any, error)
+	StorageSet(pkg, key, value string) error
+	// HTTPRequest 页面出站(经代理包装,任务同缺省;transport/sessionKey 契约同任务)
+	HTTPRequest(pkg string, opts map[string]any) (map[string]any, error)
+	// Meta 页面自适应信息({name, version, revision, params})
+	Meta(pkg string) (map[string]any, error)
 }
 
 // SubscriptionStore 订阅 CRUD(消费侧最小接口)
@@ -97,6 +116,13 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /admin/api/packages/{name}/enable", d.enablePackage)
 	mux.HandleFunc("GET /admin/api/packages/{name}/keys", d.packageKeys)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/keys/{key}", d.putPackageKey)
+	mux.HandleFunc("POST /admin/api/packages/{name}/login", d.packageLogin)
+	mux.HandleFunc("GET /admin/api/packages/{name}/accounts", d.packageAccounts)
+	mux.HandleFunc("GET /admin/api/packages/{name}/accounts/{key}", d.packageAccount)
+	mux.HandleFunc("POST /admin/api/packages/{name}/accounts/storage", d.packageAccountStorage)
+	mux.HandleFunc("POST /admin/api/packages/{name}/accounts/http", d.packageAccountHTTP)
+	mux.HandleFunc("GET /admin/api/packages/{name}/meta", d.packageMeta)
+	mux.HandleFunc("GET /admin/api/packages/{name}/login/ui/{path...}", d.packageLoginUI)
 	mux.HandleFunc("GET /admin/api/packages/{name}/ui/{path...}", d.packageUI)
 	mux.HandleFunc("POST /admin/api/packages/{name}/ui/proxy", d.packageUIProxy)
 	mux.HandleFunc("DELETE /admin/api/packages/{name}/keys/{key}", d.deletePackageKey)
@@ -671,6 +697,12 @@ func (d *Deps) packageUI(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "ui file not found")
 		return
 	}
+	mimeByWrite(w, rel)
+	_, _ = w.Write(data)
+}
+
+// mimeByWrite 静态资源响应头(nosniff + no-cache)
+func mimeByWrite(w http.ResponseWriter, rel string) {
 	switch {
 	case strings.HasSuffix(rel, ".html"):
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -689,7 +721,6 @@ func (d *Deps) packageUI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write(data)
 }
 
 // packageUIProxy 插件页面出站转发(会话已鉴权;仅 http(s) GET/POST;响应体 ≤1MB;30s 超时)
@@ -837,6 +868,153 @@ func (d *Deps) deletePackageKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// packageLogin aap.login 桥端点(管理页 → login/index.js → Keys.Set 落库;登录路径唯一落库通道)
+func (d *Deps) packageLogin(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "login unavailable")
+		return
+	}
+	var req struct {
+		Input any `json:"input"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	out, err := d.Creds.Login(r.PathValue("name"), req.Input)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// packageAccounts aap.accounts.list(inspect 变换后视图)
+func (d *Deps) packageAccounts(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "accounts unavailable")
+		return
+	}
+	accounts, err := d.Creds.Accounts(r.PathValue("name"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if accounts == nil {
+		accounts = []map[string]any{}
+	}
+	writeJSON(w, map[string]any{"accounts": accounts})
+}
+
+// packageAccount aap.accounts.get(id)
+func (d *Deps) packageAccount(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "accounts unavailable")
+		return
+	}
+	acc, err := d.Creds.Account(r.PathValue("name"), r.PathValue("key"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, acc)
+}
+
+// packageAccountStorage aap.storage 桥端点(③直写打权威标;op = get|set)
+func (d *Deps) packageAccountStorage(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "storage unavailable")
+		return
+	}
+	var req struct {
+		Op    string `json:"op"`
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil || req.Key == "" {
+		httpError(w, http.StatusBadRequest, "key required")
+		return
+	}
+	switch req.Op {
+	case "get":
+		v, err := d.Creds.StorageGet(r.PathValue("name"), req.Key)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"value": v})
+	case "set":
+		if err := d.Creds.StorageSet(r.PathValue("name"), req.Key, req.Value); err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	default:
+		httpError(w, http.StatusBadRequest, "op must be get|set")
+	}
+}
+
+// packageAccountHTTP aap.http.request 桥端点(经代理包装,契约同任务出站)
+func (d *Deps) packageAccountHTTP(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "http unavailable")
+		return
+	}
+	var opts map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8*1024*1024)).Decode(&opts); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
+		return
+	}
+	out, err := d.Creds.HTTPRequest(r.PathValue("name"), opts)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// packageMeta aap.meta(页面自适应:{name, version, revision, params})
+func (d *Deps) packageMeta(w http.ResponseWriter, r *http.Request) {
+	if d.Creds == nil {
+		httpError(w, http.StatusNotImplemented, "meta unavailable")
+		return
+	}
+	out, err := d.Creds.Meta(r.PathValue("name"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// packageLoginUI login/ui/ 页面资源(仿 packageUI;仅 login/ui/ 前缀,禁路径穿越)
+func (d *Deps) packageLoginUI(w http.ResponseWriter, r *http.Request) {
+	pkg, err := d.Packages.GetPackage(r.PathValue("name"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if _, ok := pkg.Files[plugin.LoginUIEntry]; !ok {
+		httpError(w, http.StatusNotFound, "no login ui")
+		return
+	}
+	rel := r.PathValue("path")
+	if strings.Contains(rel, "..") {
+		httpError(w, http.StatusBadRequest, "invalid ui path")
+		return
+	}
+	if rel == "" {
+		rel = "index.html"
+	}
+	src, ok := pkg.Files["login/ui/"+rel]
+	if !ok {
+		httpError(w, http.StatusNotFound, "ui file not found")
+		return
+	}
+	mimeByWrite(w, rel)
+	_, _ = w.Write(src)
 }
 
 // runPackageTask 手动触发 hooks 任务一次(同步执行;供任务行"测试"按钮)

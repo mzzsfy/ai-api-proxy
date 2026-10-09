@@ -141,6 +141,9 @@ type App struct {
 	Scheduler *scheduler.Scheduler
 	// pluginEvictGate 插件 evict 限流闸门(hooks 通道与 Registry 通道共用;Build 装配)
 	pluginEvictGate *evictGate
+	// credsStores per-pkg ③ 权威槽注册表(桥与 handler 引擎共用同槽)
+	credsStores map[string]*plugin.SlotStore
+	credsMu     sync.Mutex
 }
 
 // transportNames 传输实例名清单(稳定序)
@@ -360,6 +363,8 @@ func Build(cfg *Config) (*App, error) {
 		History: hist, pluginEvictGate: gate,
 	}
 	adminDeps.RunTaskFunc = app.RunTaskOnce
+	adminDeps.Creds = app
+	app.credsStores = map[string]*plugin.SlotStore{}
 	return app, nil
 }
 
