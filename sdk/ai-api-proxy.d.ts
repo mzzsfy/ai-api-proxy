@@ -1,8 +1,10 @@
 // ai-api-proxy 插件 SDK 类型定义(hook 全同步;代理层恰一次上游请求,无重试——归下游)
 // 声明式单协议:一个协议部件服务且仅服务 manifest 声明的唯一协议槽
 // 槽位取值只允许 "openai-completions" | "anthropic-messages";入口与槽位不符由主体 400 拒绝,不做任何转换
-// 多文件布局(无单入口):init.js(onLoad)/ keys.js(keyWrite/keyRead/keyForm/keyAction/keySubmit)/ tasks/<name>.js(任务)
-// 任意族文件可挂 settings 声明片段(module.exports.settings);共享常量走 lib/*.js require(包内相对路径,幂等单例)
+// 多文件布局(无单入口):init.js(onLoad)/ tasks/<name>.js(任务)/ handler.js(handler 部件,与 protocol 互斥)/
+//   login/index.js + login/ui/index.html(凭据采集,绑定成对)/ inspect.js(账号展示变换)
+// keys.js 五钩子已废除:出现即拒装;凭据管理见 login/ 目录(03 文档)
+// 任意族文件可挂 settings 声明片段(module.exports.settings;handler.js/login/index.js 除外——导出即拒装);共享常量走 lib/*.js require(包内相对路径,幂等单例)
 // 全局注入:util / log / storage / setting(声明构建器)/ module / exports / require
 
 /** 协议槽枚举(manifest:parts.protocol.protocol) */
@@ -27,7 +29,7 @@ export interface UpstreamRequest {
   headers: Record<string, string>;
   /** 入口原文字节;声明式单协议下与入口同格式,部件不得改写语义 */
   body: string;
-  /** 声明分发意图;须 ∈ 本部件 manifest 的 forms */
+  /** 声明分发意图;须 ∈ 实现推导支持的形态(导出 mapEvent = 流式,mapResponse = 非流式) */
   stream: boolean;
   /** 出站传输实例名(v2;空/缺省 = 内置 direct;命名实例在 config.yaml transports 定义) */
   transport?: string | null;
@@ -145,7 +147,7 @@ export interface Log {
 
 export interface Storage {
   get(key: string): string | null;
-  /** 单键上限 64KB;ns=包名;事务语义:执行期写私有缓冲,本次执行成功才归并持久化,抛错/超时丢弃 */
+  /** 单键上限 64KB;ns=包名;写入语义按执行者分叉:handler 执行 = 事务缓冲(return 归并,失败丢弃;例外:unlock 同步写权威层);任务/init/login 等其余执行 = 直写持久层 */
   set(key: string, value: string): void;
   delete(key: string): void;
 }
@@ -170,18 +172,17 @@ export interface HookHttpResponse {
 
 /** ctx.keys 当前键窗口(hooks 部件专属;宿主每次注入一个键) */
 export interface KeyRef {
-  /** 键 ID(管理台手工键 = 键名;keySubmit 生成 = key-<时间>-<序号>) */
+  /** 键 ID(管理台手工键 = 键名;login 落库 = 宿主生成) */
   id: string;
   /** data 本体(任意 JSON;形态由包约定) */
   data: unknown;
 }
 
-/** ctx.keys 写窗能力:任务窗 = set/merge 整体替换当前键;keySubmit 窗 = set 创建新条目(宿主生成 id);其余钩子无写方法 */
+/** ctx.keys 写窗能力:任务窗 = set/merge 整体替换当前键;其余钩子无写方法 */
 export interface HookKeys {
   /**
    * 任务窗:整体替换当前键 data(原 data 自动移入 prev,单级)
-   * keySubmit 窗:创建新键池条目(data 为整条目内容;返回宿主生成的键 id)
-   * 仅任务执行与 keySubmit 的 ctx 挂载(其余钩子 undefined——阉割即权限);立即持久化,不随任务回滚
+   * 仅任务执行的 ctx 挂载(其余钩子 undefined——阉割即权限);立即持久化,不随任务回滚
    */
   set?(data: unknown): string | void;
   /**
@@ -213,14 +214,15 @@ export interface SettingDecl {
   [key: string]: unknown;
 }
 
-/** hooks 部件调用上下文(onLoad/任务/keys 钩子;settings 仅注入了快照时存在) */
+/** hooks 部件调用上下文(onLoad/任务;settings 仅注入了快照时存在) */
 export interface HookContext {
   http: { run(req: HookHttpRequest): HookHttpResponse };
-  keys: HookKeys;
+  /** keys 写窗能力(仅任务执行挂载;其余钩子 undefined——阉割即权限) */
+  keys?: HookKeys;
   cron: { runAt: string };
-  /** 当前注入键(任务/keyRead/keyWrite 窗存在;无键 undefined) */
+  /** 当前注入键(任务窗存在;无键 undefined) */
   key?: KeyRef;
-  /** 运行时配置快照(声明 ⊕ 管理台覆盖;settings.js/init.js/keys.js/tasks 均可读) */
+  /** 运行时配置快照(声明 ⊕ 管理台覆盖;settings.js/init.js/tasks 均可读) */
   settings?: Record<string, unknown>;
   /** 当前任务名(多行同指一实现时区分调用来源;仅任务调用注入) */
   task?: string;
@@ -249,47 +251,166 @@ export interface InitModule {
 }
 
 /**
- * keys.js 导出(凭据读写钩子 + 添加表单采集;全部可选)
- * ctx 裁剪:keyWrite/keyRead 含 ctx.key(被操作键);keyForm 仅 settings;
- * keyAction/keySubmit 另含 keys.set(创建窗)+ http(采集 = 出站动作)
+ * handler.js 导出(与 protocol 部件互斥;manifest parts.handler 声明入口协议)
+ * 主函数持有整个请求生命周期:出站时机/次数/流处理/续接全内联,同步直线代码
  */
-export interface KeysModule {
-  /** 键写入归一化(管理台新增/编辑;ctx.key = 目标键);undefined/null = 透传;拒绝写入须抛错 */
-  keyWrite?(ctx: HookContext, keyId: string, newValue: unknown, oldValue: unknown): unknown;
-  /** 键详情解释(ctx.key = 被查看键;仅 detail 端点触发);输出须脱敏 */
-  keyRead?(ctx: HookContext, keyId: string): unknown;
+export interface HandlerModule {
+  (ctx: HandlerContext): void;
   /**
-   * 添加表单声明(声明后 GUI 弹层渲染采集表单)
-   * fields 用 setting 构建器声明(建议显式 name,errors 按它定位输入框);actions 按钮点击回调 keyAction
+   * 可选:数据准备(请求开始时执行,返回值 = ctx.data 初始值)
+   * 可用原语:http/storage(含槽锁)/settings 全量,request/params/key 只读同主函数;禁 reply 与 ctx.data(访问即抛错)
+   * 持有的槽锁自然延续到主函数,终局统一兜底释放
    */
-  keyForm?(ctx: HookContext): {
-    fields: SettingDecl[];
-    actions?: { name: string; label: string }[];
-  };
-  /** 表单按钮回调(可出站;如发送验证码);返回值 toast 呈现 */
-  keyAction?(ctx: HookContext, action: string, values: Record<string, unknown>): unknown;
-  /**
-   * 表单提交(可出站;写入经 ctx.keys.set——每次调用创建一条新键池条目,宿主生成 id)
-   * 返回三通道:string = 成功 toast;{message} = 失败提示(存储不变);{errors: {字段: 原因}} = 字段级拒绝(GUI 逐框标红);抛错 = 崩溃处理
-   */
-  keySubmit?(ctx: HookContext, values: Record<string, unknown>): string | {
-    message?: string;
-    errors?: Record<string, string>;
-  } | void;
-  settings?: Record<string, unknown>;
+  prepare?(ctx: PrepareContext): unknown;
 }
+
+/** prepare 调用上下文(与 HandlerContext 同源,去掉 reply 与 data) */
+export interface PrepareContext {
+  request: HandlerRequestInfo;
+  params: Record<string, any>;
+  key: KeyRef;
+  http: HandlerHttp;
+  storage: SlotLockStorage;
+  settings: HandlerSettings;
+}
+
+/** 入口请求信息(经 filters;headers 只读) */
+export interface HandlerRequestInfo {
+  model: string;
+  stream: boolean;
+  body: string;
+  headers: Record<string, string>;
+}
+
+/** 出站请求体(全部经代理包装;transport 缺省 = 组参数解析结果的传输槽) */
+export interface HandlerHttpRequest {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  /** 命名传输实例(config.yaml transports);不存在抛错 */
+  transport?: string;
+  /** 代理会话粘滞键(透传) */
+  sessionKey?: string;
+  /** 本次调用覆写 totalTimeoutMs */
+  timeoutMs?: number;
+}
+
+/** 缓冲出站响应(body 无大小上限) */
+export interface HandlerHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+/** 流式出站 source(frames/body 混用抛错;超时/断流后迭代器终态) */
+export interface HandlerSource {
+  status: number;
+  headers: Record<string, string>;
+  /** 同步迭代器:逐帧产出 {"event","data"};Content-Type 非 event-stream 时抛错(走 body) */
+  frames(): IterableIterator<SSEFrame>;
+  /** 整块取回(与 frames 混用抛错;status>=300 时为全量错误体) */
+  body(): string;
+}
+
+/** handler 出站原语 */
+export interface HandlerHttp {
+  request(req: HandlerHttpRequest): HandlerHttpResponse;
+  /** 流式出站(必须 stream:true,缺省/false 抛错) */
+  open(req: HandlerHttpRequest & { stream: true }): HandlerSource;
+}
+
+/** 应答原语(形态强制校验:json 仅入口 stream=false;sse/event/end/error 仅 stream=true;越序全抛错;零应答 = 502) */
+export interface HandlerReply {
+  /** 非流式应答(一次;其后任何 reply 调用抛错) */
+  json(status: number, bodyText: string): void;
+  /** 流式开场(一次) */
+  sse(): void;
+  /** 产出一个入口协议事件(宿主按入口协议编码,直接 flush) */
+  event(obj: unknown): void;
+  /** 流式正常收尾 */
+  end(): void;
+  /** 流式错误终局;error 已写 = 视同已收尾,return 即正常终局 */
+  error(obj: unknown): void;
+}
+
+/** 执行级出站超时覆写(合并语义,执行局部;非法键抛错) */
+export interface HandlerSettings {
+  overwrite(opts: {
+    /** 建连超时(缺省 30*1000ms;调用时定死) */
+    connectTimeoutMs?: number;
+    /** 响应超时:发出到首字节(缺省 60*1000ms;调用时定死,首字节后让位帧间) */
+    responseTimeoutMs?: number;
+    /** 帧间超时(缺省 180*1000ms;逐帧隙重武装,循环体内覆写下一帧隙生效) */
+    frameIdleTimeoutMs?: number;
+    /** 单次出站整体(缺省 10*60*1000ms;调用时定死) */
+    totalTimeoutMs?: number;
+  }): void;
+}
+
+/**
+ * storage + 槽锁(handler 专属)
+ * 两级:②执行事务缓冲(set/delete;return 归并,抛错丢弃)+ ③SQLite 唯一权威
+ * 槽值 = 字符串;槽写法判据:token 槽全程锁通道,普通槽全程 set/delete,禁止混用
+ */
+export interface SlotLockStorage extends Storage {
+  /** 读并持锁(读③跳②;排队 FIFO 超时抛错;同槽重入抛错;终局兜底释放) */
+  getWithLock(slot: string): string | null;
+  /**
+   * 白放(仅释放)或同步写③+打权威标+释放(排队者即刻见新值;锁定槽唯一写通道)
+   * 写超时 5*1000ms 独立于执行取消;失败 = 抛错 + 锁必释放;未持锁调用抛错
+   * 权威标记永不清除:经锁通道落值的槽不可再回退普通 set 模式(缓冲会被归并丢弃)
+   */
+  unlock(slot: string, value?: string): void;
+}
+
+/** handler 主函数调用上下文(ctx 为调用参数,不进全局——跨请求泄漏构造性不可能) */
+export interface HandlerContext {
+  request: HandlerRequestInfo;
+  /** 合并参数(上游预设 ⊕ 包级默认),与 protocol 路径同源;自由键面(any:键集合由上游参数决定,无法静态枚举) */
+  params: Record<string, any>;
+  /** 当前注入键(只读;handler 零键池写,动态凭据走 storage 槽) */
+  key: KeyRef;
+  /** 执行级数据袋(随意读写;初始值 = prepare 返回值;终局丢弃) */
+  data: unknown;
+  http: HandlerHttp;
+  reply: HandlerReply;
+  storage: SlotLockStorage;
+  settings: HandlerSettings;
+}
+
+/**
+ * login/index.js 导出(login/ 目录:index.js 与 ui/index.html 绑定,缺一拒装)
+ * 登录引导:GUI 经 aap.login 调用(返回值由宿主 Keys.Set 落库,登录路径唯一落库通道);
+ * handler 引导时 require 后传裁剪对象 {params, http, storage(仅 get/set/delete), util},返回值作者自理(标准姿势 unlock 落槽)
+ */
+export type LoginModule = (ctx: LoginContext) => unknown;
+
+/** login 调用上下文(无锁原语、无 reply;http 两调用点统一 request 形态:handler 路径 = ctx.http 透传,GUI 路径 = 宿主适配提供——登录是缓冲出站,不涉流) */
+export interface LoginContext {
+  /** 调用方提供:GUI 桥表单 payload / handler 合成 */
+  params: Record<string, unknown>;
+  /** 出站统一 request 形态:handler 路径透传 ctx.http,GUI 路径宿主适配提供;响应 body 无截断(两调用点形态一致;登录非流式,不涉 open) */
+  http: { request(req: HandlerHttpRequest): HandlerHttpResponse };
+  /** 裁剪形态:仅 get/set/delete(handler 路径剥离锁成员,与 GUI 路径一致) */
+  storage: Storage;
+  util: Util;
+}
+
+/** inspect.js 导出(可选,独立;GUI 展示账号时的变换/脱敏;纯函数) */
+export type InspectModule = (data: unknown) => unknown;
 
 /** 包级键:每键独立实体(id+data+prev+updatedAt);protocol/filter 经 util.key() 只读当前注入键 */
 declare global {
   const util: Util;
   const log: Log;
   const storage: Storage;
-  /** settings 声明构建器(族文件求值时注入;keyForm 函数体运行期同样可用) */
+  /** settings 声明构建器(族文件求值时注入) */
   const setting: SettingBuilders;
-  /** CommonJS 模块面(包内相对路径;扩展名可选/目录索引;同 runtime 幂等单例) */
+  /** CommonJS 模块面(包内相对路径;扩展名可选/目录索引;同 runtime 幂等单例);exports 为 any——部件可自由挂函数/prepare 声明 */
   function require(spec: string): unknown;
-  var module: { exports: unknown };
-  var exports: unknown;
+  var module: { exports: any };
+  var exports: any;
 }
 
 export {}

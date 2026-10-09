@@ -120,12 +120,11 @@ function loadPart(src, config, keys) {
 }
 
 // loadPackage 直接装载包目录(免去各测试文件的读文件样板)
-// dir 为包含 manifest.json 的目录;entry 缺省取协议部件入口,可用 config/keys 覆盖
+// dir 为包含 manifest.json 的目录;协议部件入口 = 约定路径 protocol.js(opts.entry 可显式覆盖)
 function loadPackage(dir, opts) {
   const o = opts || {};
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
-  const entry = o.entry || (manifest.parts && manifest.parts.protocol && manifest.parts.protocol.entry);
-  if (!entry) throw new Error(`package ${dir}: no part entry declared`);
+  const entry = o.entry || "protocol.js";
   const src = fs.readFileSync(path.join(dir, entry), "utf8");
   return loadPart(src, o.config, o.keys);
 }
@@ -187,11 +186,11 @@ if (require.main === module) {
     assert.equal(req.headers.Authorization, "Bearer sk-1");
   });
 
-  test("loadPackage reads manifest entry and passes config/secrets", () => {
+  test("loadPackage falls back to conventional protocol.js and passes config/keys", () => {
     const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "aap-pkg-"));
     fs.writeFileSync(
       path.join(dir, "manifest.json"),
-      JSON.stringify({ manifestVersion: 1, name: "t", parts: { protocol: { entry: "protocol.js" } } })
+      JSON.stringify({ manifestVersion: 1, name: "t", parts: { protocol: { protocol: "openai-completions" } } })
     );
     fs.writeFileSync(
       path.join(dir, "protocol.js"),

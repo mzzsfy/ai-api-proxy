@@ -15,7 +15,7 @@ Gemini 响应 → [本包 mapEvent/mapResponse] → openai-completions 响应 �
 ```
 
 没有中间形态、没有 pivot、没有入口编解码:入口协议与声明槽不符时**主体直接 400 拒绝**,
-`forms` 未声明入口形态时同样 400。所以本包的输入输出格式都由声明槽唯一确定,不存在"同一份代码服务两种入口"。
+实现推导的形态不覆盖入口形态时同样 400(导出 mapEvent = 支持流式,mapResponse = 支持非流式)。所以本包的输入输出格式都由声明槽唯一确定,不存在"同一份代码服务两种入口"。
 
 因此:
 
@@ -50,9 +50,9 @@ Gemini 响应 → [本包 mapEvent/mapResponse] → openai-completions 响应 �
    无可翻译内容三种情况下抛错。
 
 `stream` 字段取自 `ctx.vars.entryStream`(客户端是否要流式),决定 URL 用哪个 action。
-manifest 的 `forms` 必须同时声明 `streaming` 与 `non_streaming`,否则对应形态请求会被主体 400 拒掉。
+本包同时导出 mapEvent 与 mapResponse(实现推导 = 双形态支持),缺哪个导出,对应形态请求就会被主体 400 拒掉。
 
-鉴权用 `util.secret("api_key")` 取密钥,`secretRefs` 在 manifest 里声明。**密钥不要拼进 URL**。
+鉴权用 `util.key().api_key` 取当前注入键 data(键池 round-robin 轮转注入)。**密钥不要拼进 URL**。
 
 ### `mapEvent(ctx, event) → string | null`
 
@@ -127,10 +127,7 @@ manifest 的 `forms` 必须同时声明 `streaming` 与 `non_streaming`,否则�
   "parts": {
     "protocol": {
       "protocol": "openai-completions",
-      "entry": "protocol.js",
-      "form": ["streaming", "non_streaming"],
-      "features": [],
-      "secretRefs": ["api_key"]
+      "features": []
     }
   }
 }
@@ -138,21 +135,23 @@ manifest 的 `forms` 必须同时声明 `streaming` 与 `non_streaming`,否则�
 
 - `protocol` 声明本包服务的唯一协议槽,取值只允许 `"openai-completions"` | `"anthropic-messages"`;
   入口协议不符时主体 400 拒绝,不做转换
-- `form` 声明本包支持的请求形态,主体据此协商路由;**声明的形态必须与实现的钩子对称**
-  (`streaming`↔`mapEvent`,`non_streaming`↔`mapResponse`),校验期强制
+- 形态由实现推导(manifest 不声明):导出 `mapEvent` = 支持流式,导出 `mapResponse` = 支持非流式;本包两者都导出
 - `features` 声明扩展能力(如 `tools`/`vision`)。**本包只支持纯文本,故为空数组**——
   客户端发工具调用请求时宿主会直接回 400,而不是让部件产出畸形上游请求
-- `secretRefs` 声明需要注入的密钥名,部件内用 `util.secret(name)` 取
+- 部件文件按约定路径 `protocol.js` 寻址;参数(base_url/api_version)在 protocol.js 的 `module.exports.settings` 声明
 
 ## 五、测试写法
 
 ```js
 const test = require("node:test");
 const assert = require("node:assert");
-const { loadPackage, mockCtx } = require("../../../sdk/test.js");
+const { loadPackage, mockCtx } = require("../../../test.js");
 
-const hooks = loadPackage(__dirname + "/..");
-const CTX = mockCtx({ target: { baseUrl: "https://example.com" }, vars: { model: "gemini-3.6-flash", entryStream: false } });
+const hooks = loadPackage(__dirname + "/..", {
+  config: { base_url: "https://example.com", api_version: "v1beta" },
+  keys: { api_key: "AIza-test-key" },
+});
+const CTX = mockCtx({ vars: { model: "gemini-3.6-flash", entryStream: false } });
 
 test("buildRequest: system 提为 systemInstruction,连续同角色合并", () => {
   const req = hooks.buildRequest(CTX, JSON.stringify({
@@ -164,7 +163,7 @@ test("buildRequest: system 提为 systemInstruction,连续同角色合并", () =
 });
 ```
 
-运行:`node --test plugins/gemini/test/protocol.test.js`
+运行:`node --test sdk/examples/gemini/test/protocol.test.js`
 
 测试应覆盖三类:
 - **形态翻译**(字段对不对)
@@ -184,9 +183,9 @@ test("buildRequest: system 提为 systemInstruction,连续同角色合并", () =
 - URL 与鉴权形态
 - `mapEvent` / `mapResponse` 的响应解包路径
 
-参考其他实现:同目录的 `opencode`(含客户端伪装头)、`zcode`(anthropic 端点 + 身份指纹 + `cache_control` 注入)。
+参考其他实现:外部插件库 plugins-repo(拉取自本仓库 sdk/)的 opencode(含客户端伪装头)、zcode(anthropic 端点 + 身份指纹 + `cache_control` 注入)。
 
 ## 七、真连验证
 
-本包在真实 Gemini 上游验证过(含流式/非流式 × openai/anthropic 入口)。
+本包在真实 Gemini 上游验证过(openai 入口 × 流式/非流式;本包声明 openai-completions 单槽,anthropic 入口不经本包)。
 主库侧 E2E:`internal/server/e2e_real_gemini_test.go`,env 门控,无 `GEMINI_TEST_KEY` 时整组跳过。

@@ -3,11 +3,10 @@ const test = require("node:test");
 const assert = require("node:assert");
 const { loadPackage, mockCtx } = require("../../../test.js");
 
-const pkg = (config) => loadPackage(__dirname + "/..", { config: config, secrets: SECRETS });
+const pkg = (config) => loadPackage(__dirname + "/..", { config: Object.assign({ base_url: "https://generativelanguage.googleapis.com", api_version: "v1beta" }, config), keys: SECRETS });
 
 const SECRETS = { api_key: "AIza-test-key" };
-const BASE = { id: "t", name: "gemini", baseUrl: "https://generativelanguage.googleapis.com" };
-const CTX = mockCtx({ target: BASE, vars: { model: "gemini-2.0-flash", entryStream: false } });
+const CTX = mockCtx({ vars: { model: "gemini-2.0-flash", entryStream: false } });
 
 const CHAT_ENTRY = JSON.stringify({
   model: "gemini-2.0-flash",
@@ -45,8 +44,8 @@ test("buildRequest: generateContent endpoint + api key header + body translation
 });
 
 test("buildRequest: stream endpoint via entryStream; apiVersion config", () => {
-  const hooks = pkg({ apiVersion: "v1" });
-  const sctx = mockCtx({ target: BASE, vars: { model: "gemini-2.0-flash", entryStream: true } });
+  const hooks = pkg({ api_version: "v1" });
+  const sctx = mockCtx({ vars: { model: "gemini-2.0-flash", entryStream: true } });
   const req = hooks.buildRequest(
     sctx,
     JSON.stringify({ model: "gemini-2.0-flash", messages: [{ role: "user", content: "hi" }] })
@@ -257,7 +256,7 @@ test("buildRequest: developer role as system; stop/max_completion_tokens mapped"
 
 test("buildRequest: model path segment url-encoded", () => {
   const hooks = pkg();
-  const ectx = mockCtx({ target: BASE, vars: { model: "a:b/c", entryStream: false } });
+  const ectx = mockCtx({ vars: { model: "a:b/c", entryStream: false } });
   const req = hooks.buildRequest(ectx, JSON.stringify({ model: "a:b/c", messages: [{ role: "user", content: "hi" }] }));
   assert.ok(req.url.includes("/models/a%3Ab%2Fc:generateContent"));
 });

@@ -14,24 +14,23 @@ protocol 部件把**入口协议**翻译成**上游协议**。设计是"声明�
 ## 二、四个钩子
 
 ```js
-// @ts-check
-/// <reference path="../ai-api-proxy.d.ts" />
-module.exports = {
+module.exports = function (config) {                  // factory 形态:上游连接信息经 config 注入
+  return {
   // 必实现:入口原文 → 上游请求(同步)
   buildRequest: function (ctx, entry) {    var body = JSON.parse(entry);
     return {
-      url: ctx.target.baseUrl + "/v1/chat/completions",
+      url: config.baseUrl + "/v1/chat/completions",
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer " + util.secret("api_key"),   // ref 必须在 manifest secretRefs 里
+        Authorization: "Bearer " + util.key().api_key,   // 当前注入键 data(形态由包约定:对象取字段或裸 token)
       },
       body: JSON.stringify(toUpstream(body)),
-      stream: ctx.vars.entryStream,      // 分发意图,必须 ∈ manifest form 声明
+      stream: ctx.vars.entryStream,      // 分发意图,必须 ∈ 实现推导支持的形态
     };
   },
 
-  // streaming 形态声明时必实现:单帧 → 声明协议事件对象数组的 JSON 字符串
+  // streaming 形态支持时必实现:单帧 → 声明协议事件对象数组的 JSON 字符串
   mapEvent: function (ctx, event) {
     // event = {"event": "...", "data": "..."} 信封字符串(host 分帧)
     var f = JSON.parse(event);
@@ -39,7 +38,7 @@ module.exports = {
     return JSON.stringify([toOpenAIChunk(JSON.parse(f.data))]);   // 注意是数组
   },
 
-  // non_streaming 形态声明时必实现:上游响应体 → 声明协议响应 JSON 字符串
+  // non_streaming 形态支持时必实现:上游响应体 → 声明协议响应 JSON 字符串
   mapResponse: function (ctx, body) {
     return JSON.stringify(toOpenAIResponse(JSON.parse(body)));
   },
@@ -48,8 +47,11 @@ module.exports = {
   mapError: function (ctx, status, body) {
     return JSON.stringify({ error: { message: extract(JSON.parse(body)) } });
   },
+  };
 };
 ```
+
+(节选——`toUpstream/toOpenAIChunk/toOpenAIResponse/extract` 由包自带;完整可编译参考实现见 `examples/gemini`)
 
 契约要点:
 
@@ -64,64 +66,56 @@ module.exports = {
 "parts": {
   "protocol": {
     "protocol": "openai-completions",            // 唯一槽位;文件路径约定 protocol.js(manifest 不写 entry)
-    "features": ["tools", "vision"],             // 能力标记(入口请求携带未声明能力 → 400)
-    "secretRefs": ["api_key"],                   // util.secret 白名单
-    "configSchema": { ... }                      // 部件实例参数(可选)
+    "features": ["tools", "vision"]              // 能力标记(入口请求携带未声明能力 → 400)
   }
 }
 ```
 
 **形态由实现推导,manifest 不声明**:`mapEvent` 导出 = 支持流式;`mapResponse` 导出 = 支持非流式;两者都没有 → 拒装。入口请求的流形态不被支持、协议槽不符、携带未声明 features,运行期宿主一律 400,不做转换。
 
-## 四、实例参数(configSchema)与 factory 形态
+## 四、部件参数(settings 声明)与 factory 形态
 
-同一部件被多个上游引用时,每个上游可有不同参数(如 apiVersion)。两种写法:
+同一部件被多个上游引用时,每个上游可有不同参数(如 api_version)。参数声明走 **settings 声明**(与 hooks 同机制,见 [03](03-settings-keys.md)):部件文件挂 `module.exports.settings`,宿主按"声明 default ⊕ 上游预设参数"合并后经 factory `config` 注入:
 
 ```js
-// factory 形态:宿主用上游实例参数调用一次,返回 hooks
-module.exports = function (config) {
-  var ver = config.apiVersion || "v1beta";
+module.exports = function (config) {             // factory 形态:config = settings 声明的合并值
+  var ver = config.api_version || "v1beta";
   return {
     buildRequest: function (ctx, entry) {
-      return { url: ctx.target.baseUrl + "/" + ver + "/models:generateContent", /* ... */ };
+      return { url: config.base_url + "/" + ver + "/models:generateContent", /* ... */ };
     },
     // ...
   };
 };
+
+module.exports.settings = {
+  base_url: setting.string({ description: "上游地址", default: "https://example.com", required: true }),
+  api_version: setting.string({ description: "API 版本路径段", default: "v1beta" }),
+};
 ```
 
-```jsonc
-// manifest 里声明参数 schema(用户建上游时在 GUI 填写)
-"configSchema": {
-  "type": "object",
-  "properties": {
-    "apiVersion": { "type": "string", "description": "API 版本路径段(默认 v1beta)" }
-  }
-}
-```
+- factory 入参 `config` = settings 声明 default ⊕ 上游预设参数的合并值,另含宿主注入的 `config.protocol`(本部件声明的槽位)
+- **settings 声明里不要占用 `protocol` 键**——宿主注入值会被同名声明键顶掉
+- 无参部件用对象导出形态即可;上游连接信息(base_url 等)就是普通声明参数,经 factory config 注入
 
-- factory 入参 `config` = 用户填的参数对象,另含宿主注入的 `config.protocol`(本部件声明的槽位)
-- **不要在 configSchema 里声明 `protocol` 键**——参数剥离会把宿主注入值删掉
-- 无参部件用对象导出形态即可;`ctx.target` 里有 baseUrl/models 等上游事实
+## 五、protocol / handler / hooks 的边界
 
-## 五、protocol 部件与 hooks 的边界
+| | protocol | handler | hooks |
+|---|---|---|---|
+| 执行时机 | 每个请求热路径 | 每个请求热路径 | 定时/加载 |
+| 网络 | 无(host 执行唯一上游请求) | 有(ctx.http.request/open,可多次出站) | 有(ctx.http.run 限出站) |
+| 参数 | settings 声明(经 factory config 注入,见 §四) | ctx.params(同源合并) | settings 声明(经 ctx.settings 注入) |
+| 凭据 | util.key() 只读当前注入键 data | ctx.key 只读;动态凭据走 storage 槽(见 05) | ctx.keys.set/merge 写当前键 |
 
-| | protocol | hooks |
-|---|---|---|
-| 执行时机 | 每个请求热路径 | 定时/加载/凭据操作 |
-| 网络 | 无(host 执行唯一上游请求) | 有(ctx.http.run 限出站) |
-| 参数 | configSchema(经 config/Upstream.Params 注入) | settings 声明(经 ctx.settings 注入) |
-| 凭据 | util.key() 只读当前注入键 data | ctx.keys.set/merge 写当前键;keySubmit 创建条目 |
-
-protocol/filter 里不要刷 token——那是 hooks 刷新任务 + keys 的事;buildRequest 里 `util.key()` 返回本次请求注入键的 data(请求级 round-robin 选键),刷新任务写完下个请求自然生效。
+protocol 与 handler **互斥**(同包同声明拒装):出站控制能被 buildRequest 单次请求表达 → protocol;需要多次出站/续接/token 运行期轮换/伪流式 → handler(见 [05](05-handler.md))。protocol/filter 里不要刷 token——那是 hooks 刷新任务或 handler 槽锁的事;buildRequest 里 `util.key()` 返回本次请求注入键的 data(请求级 round-robin 选键),刷新任务写完下个请求自然生效。
 
 ## 六、本地测试与示例
 
 ```js
 const { loadPackage, mockCtx } = require("<repo>/sdk/test.js");
-const hooks = loadPackage(__dirname + "/..", { config: { apiVersion: "v1" }, secrets: { api_key: "sk-test" } });
-const req = hooks.buildRequest(mockCtx());
-assert.equal(req.url, "https://upstream.test/v1/...");
+const hooks = loadPackage(__dirname + "/..", { config: { base_url: "https://upstream.test", api_version: "v1" }, keys: { api_key: "sk-test" } });
+const req = hooks.buildRequest(mockCtx({ vars: { model: "m", entryStream: false } }), JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }));
+assert.equal(req.url, "https://upstream.test/v1/models/m:generateContent");
 ```
 
 完整参考实现:`examples/gemini`(四钩子全实现 + factory 形态 + [编写说明](../examples/gemini/README.md))。
