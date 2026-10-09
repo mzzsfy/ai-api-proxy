@@ -216,6 +216,10 @@ func (r *Registry) Inspect(data []byte) (map[string]any, error) {
 		out["protocol"] = p.Protocol
 		out["features"] = p.Features
 	}
+	if m.Parts.Handler != "" {
+		out["handler"] = m.Parts.Handler
+		out["login"] = pkg.HasLogin() // GUI 凭据区两态判定
+	}
 	if h := m.Parts.Hooks; h != nil {
 		tasks := make([]map[string]any, 0, len(h.Tasks))
 		for _, tk := range h.Tasks {
@@ -266,7 +270,8 @@ func (r *Registry) validateParts(pkg *Package) error {
 			}
 		}
 	}
-	return nil
+	// handler 部件:导出形态判据求值一次(handler.js 非 function / settings 导出 = 拒装)
+	return validateHandlerEntry(pkg)
 }
 
 // Enable 启停;包保留在内存(enabled 标记),可重新启用

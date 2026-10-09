@@ -14,8 +14,6 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
-// handlerEntry handler.js 固定入口
-const handlerEntry = "handler.js"
 
 // 执行预算(定案常量)
 const (

@@ -195,7 +195,7 @@ func taskEntry(tk HooksTask) string {
 	return "tasks/" + tk.Name + ".js"
 }
 
-// 族文件固定求值序(声明提取):settings.js → protocol.js → filters/<名>.js(包内序) → init.js → keys.js → tasks/<名>.js
+// 族文件固定求值序(声明提取):settings.js → protocol.js → filters/<名>.js(包内序) → init.js → tasks/<名>.js
 // protocol/filter 参与声明提取:适配器与过滤器的参数槽与读值代码同址声明
 func familyFiles(pkg *Package) []string {
 	out := []string{}
@@ -223,9 +223,6 @@ func familyFiles(pkg *Package) []string {
 	}
 	if _, ok := pkg.Files["init.js"]; ok {
 		add("init.js")
-	}
-	if _, ok := pkg.Files["keys.js"]; ok {
-		add("keys.js")
 	}
 	if h := pkg.Manifest.Parts.Hooks; h != nil {
 		for _, tk := range h.Tasks {

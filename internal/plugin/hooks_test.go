@@ -251,8 +251,7 @@ func TestHooks_ExtractDeclaration(t *testing.T) {
 	files := map[string]string{
 		"settings.js": `module.exports.settings={a:1}`,
 		"init.js":     `module.exports.settings={b:2}`,
-		"keys.js":     `module.exports={keyWrite:function(ctx,k,v){return v;}}; module.exports.settings={c:3}`,
-		"tasks/a.js":  `module.exports.settings={d:4}; module.exports.handler=function(ctx){}`,
+		"tasks/a.js":  `module.exports.settings={c:3}; module.exports.handler=function(ctx){}`,
 	}
 	pkg := hooksPkg(t, files, HooksTask{Name: "a", Cron: "* * * * *"})
 	decl, err := ExtractDeclaration(pkg, HooksDeps{})
@@ -264,9 +263,6 @@ func TestHooks_ExtractDeclaration(t *testing.T) {
 	}
 	if n, _ := numericField(decl["b"]); n != 2 || func() bool { n, _ = numericField(decl["c"]); return n != 3 }() {
 		t.Fatalf("merged decl: %v", decl)
-	}
-	if _, ok := decl["d"]; !ok {
-		t.Fatalf("task slot missing: %v", decl)
 	}
 	// 语法错误拒装
 	bad := hooksPkg(t, map[string]string{"init.js": `module.exports={`}, HooksTask{Name: "a", Cron: "* * * * *"})

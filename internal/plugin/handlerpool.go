@@ -104,28 +104,14 @@ func buildHandlerInstance(deps HandlerDeps) (*handlerInstance, error) {
 	pkg := deps.Package
 	env := newHooksEnv(pkg, HooksDeps{PackageName: pkg.Manifest.Name, Log: deps.Log}, false)
 	env.strictWrap = true
-	exp, err := env.load("", handlerEntry)
+	exp, err := env.load("", HandlerEntry)
 	if err != nil {
-		return nil, fmt.Errorf("load %s: %w", handlerEntry, err)
+		return nil, fmt.Errorf("load %s: %w", HandlerEntry, err)
 	}
 	// 复核导出形态(判据已在装载期求值一次,此处池构建期复核)
-	if s := exp.Get("settings"); s != nil && !goja.IsUndefined(s) && !goja.IsNull(s) {
-		return nil, fmt.Errorf("%s: settings export not allowed (handler params come from ctx.params)", handlerEntry)
-	}
-	fnV := exp.Get("handler") // 兼容 module.exports = fn(命名导出优先)与 module.exports.handler 两种形态
-	if fnV == nil || goja.IsUndefined(fnV) || goja.IsNull(fnV) {
-		fnV = exp
-	}
-	handlerFn, ok := goja.AssertFunction(fnV)
-	if !ok {
-		return nil, fmt.Errorf("%s: export must be a function", handlerEntry)
-	}
-	var prepareFn goja.Callable
-	if pv := exp.Get("prepare"); pv != nil && !goja.IsUndefined(pv) && !goja.IsNull(pv) {
-		prepareFn, ok = goja.AssertFunction(pv)
-		if !ok {
-			return nil, fmt.Errorf("%s: prepare export must be a function", handlerEntry)
-		}
+	handlerFn, prepareFn, err := checkHandlerExports(HandlerEntry, exp)
+	if err != nil {
+		return nil, err
 	}
 	// 全局冻结:运行中写全局/覆写 util/require 当场抛错(严格模块包装组合)
 	if _, err := env.vm.RunString("Object.freeze(globalThis)"); err != nil {

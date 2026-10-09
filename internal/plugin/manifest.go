@@ -33,6 +33,9 @@ const (
 // 部件路径约定(manifest 不写 entry:约定即路径)
 const (
 	ProtocolEntry     = "protocol.js" // protocol 单例部件固定路径
+	HandlerEntry      = "handler.js"  // handler 部件固定路径
+	LoginEntry        = "login/index.js"    // login 逻辑入口
+	LoginUIEntry      = "login/ui/index.html" // login 页面入口(两入口必须同在)
 	FilterEntryPrefix = "filters/"    // filter 部件 = filters/<name>.js
 	HooksTaskEntryFmt = "tasks/%s.js" // hooks 任务缺省 = tasks/<name>.js
 )
@@ -93,6 +96,7 @@ type Manifest struct {
 	Compat          map[string]string `json:"compat,omitempty"`
 	Parts           struct {
 		Protocol  *ProtocolPart  `json:"protocol,omitempty"`
+		Handler   string         `json:"handler,omitempty"` // 出站时机部件:值 = 入口协议全名(与 protocol 互斥)
 		Filters   []FilterPart   `json:"filters,omitempty"`
 		Hooks     *HooksPart     `json:"hooks,omitempty"`
 		Discovery *DiscoveryPart `json:"discovery,omitempty"`
@@ -124,6 +128,16 @@ type Package struct {
 // HasProtocol 是否含 protocol 部件(主包判定)
 func (p *Package) HasProtocol() bool { return p.Manifest.Parts.Protocol != nil }
 
+// HasHandler 是否为 handler 包
+func (p *Package) HasHandler() bool { return p.Manifest.Parts.Handler != "" }
+
+// HasLogin 是否含 login/ 目录(两入口齐备才成立;绑定校验在 Validate)
+func (p *Package) HasLogin() bool {
+	_, js := p.Files[LoginEntry]
+	_, ui := p.Files[LoginUIEntry]
+	return js && ui
+}
+
 // Validate 安装期校验:manifest 一致性 + 部件声明绑定(编译校验在加载期)
 func (p *Package) Validate() error {
 	m := p.Manifest
@@ -145,10 +159,25 @@ func (p *Package) Validate() error {
 		return fmt.Errorf("version required")
 	}
 	proto := m.Parts.Protocol
+	handler := m.Parts.Handler
 	filters := m.Parts.Filters
+	// protocol 与 handler 互斥(一个包不可同时声明两种请求路径)
+	if proto != nil && handler != "" {
+		return fmt.Errorf("parts.protocol and parts.handler are mutually exclusive")
+	}
 	// 至少含一层插槽(hooks 计入)
-	if proto == nil && len(filters) == 0 && m.Parts.Hooks == nil {
-		return fmt.Errorf("package has no parts: need protocol, filters or hooks")
+	if proto == nil && handler == "" && len(filters) == 0 && m.Parts.Hooks == nil {
+		return fmt.Errorf("package has no parts: need protocol, handler, filters or hooks")
+	}
+	// handler 声明绑定:值 = 入口协议全名 + handler.js 存在(导出形态判据在装载期)
+	if handler != "" {
+		if handler != string(ProtocolOpenAICompletions) && handler != string(ProtocolAnthropicMessages) {
+			return fmt.Errorf("handler: unknown protocol %q (want %s | %s)",
+				handler, ProtocolOpenAICompletions, ProtocolAnthropicMessages)
+		}
+		if _, ok := p.Files[HandlerEntry]; !ok {
+			return fmt.Errorf("handler: %s missing in package", HandlerEntry)
+		}
 	}
 	// protocol 声明绑定:协议全名(形态由实现推导,不在 manifest 声明)
 	if proto != nil {
@@ -210,6 +239,28 @@ func (p *Package) Validate() error {
 					return fmt.Errorf("hooks task %s: %w", tk.Name, err)
 				}
 			}
+		}
+	}
+	// login/ 目录绑定:含任一 login/ 前缀文件即要求两入口同在
+	hasLoginPrefix := false
+	for f := range p.Files {
+		if strings.HasPrefix(f, "login/") {
+			hasLoginPrefix = true
+			break
+		}
+	}
+	if hasLoginPrefix {
+		if _, ok := p.Files[LoginEntry]; !ok {
+			return fmt.Errorf("login/: %s missing in package", LoginEntry)
+		}
+		if _, ok := p.Files[LoginUIEntry]; !ok {
+			return fmt.Errorf("login/: %s missing in package", LoginUIEntry)
+		}
+	}
+	// keys.js 拒装:五钩子路径整体删除,不留过渡层
+	for f := range p.Files {
+		if f == "keys.js" || strings.HasSuffix(f, "/keys.js") {
+			return fmt.Errorf("keys.js is removed (package %q must use login/inspect): %s", m.Name, f)
 		}
 	}
 	// 元数据纯展示字段限长(超限拒装注明)
