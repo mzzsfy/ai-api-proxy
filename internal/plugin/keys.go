@@ -23,7 +23,6 @@ type KeysStore struct {
 	blob    *blobStore
 	mu      sync.Mutex
 	rotate  sync.Map // pkg → *atomic.Uint64(指针内存态,重启归零不影响轮询语义)
-	keySeq  atomic.Uint64
 	zeroNow func() int64
 }
 
@@ -188,8 +187,3 @@ func (s *KeysStore) MaskStrings(pkg string) []string {
 	return out
 }
 
-// keySubmitID 表单建键 id(key-<unixmilli base36>-<seq>;进程级序号防同毫秒碰撞)
-func (s *KeysStore) keySubmitID(nowMs int64) string {
-	seq := s.keySeq.Add(1)
-	return fmt.Sprintf("key-%x-%d", nowMs, seq)
-}

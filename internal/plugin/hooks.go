@@ -13,11 +13,13 @@ import (
 
 // HttpRequest ctx.http 请求载体
 type HttpRequest struct {
-	URL     string
-	Method  string
-	Headers map[string]string
-	Body    string
-	Timeout time.Duration // 已钳制后的最终值
+	URL        string
+	Method     string
+	Headers    map[string]string
+	Body       string
+	Timeout    time.Duration // 已钳制后的最终值
+	Transport  string        // 命名传输实例(空 = 缺省回退链)
+	SessionKey string        // 代理会话粘滞键(透传)
 }
 
 // HttpResponse ctx.http 响应载体
@@ -182,8 +184,6 @@ type HooksRuntime struct {
 	deps         HooksDeps
 	settings     map[string]any // ctx.settings 快照
 	taskName     string         // ctx.task
-	written      []string   // keySubmit 期间 set 写入的键 id(多次 set = 多条)
-	collectWrite bool       // set 写 id 收集开关(keySubmit)
 	stx          *StorageTx // storage 事务视图(执行期缓冲;成功归并/失败丢弃)
 }
 
@@ -288,19 +288,6 @@ func LoadInit(pkg *Package, deps HooksDeps, settings map[string]any) (*HooksRunt
 	deps.Storage = tx
 	env := newHooksEnv(pkg, deps, true)
 	exp, err := env.load("", "init.js")
-	if err != nil {
-		return nil, err
-	}
-	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, settings: settings, stx: tx}, nil
-}
-
-// LoadKeys 装载 keys.js(五钩子探测载体;setting 全局注入——keyForm 函数体运行期需要;ctx.settings 快照同族注入)
-func LoadKeys(pkg *Package, deps HooksDeps, settings map[string]any) (*HooksRuntime, error) {
-	deps = normalizeDeps(deps)
-	tx := NewStorageTx(deps.Storage)
-	deps.Storage = tx
-	env := newHooksEnv(pkg, deps, true)
-	exp, err := env.load("", "keys.js")
 	if err != nil {
 		return nil, err
 	}
@@ -414,121 +401,11 @@ func (h *HooksRuntime) RunNext() (int64, bool, error) {
 	return n, true, nil
 }
 
-// keyHook keys.js 钩子调用基座(only keySubmit 可写 keys;其余钩子 ctx 无 merge 能力;storage 事务随钩子成败)
-func (h *HooksRuntime) keyHook(name string, budgetMs int64, args ...goja.Value) (goja.Value, error) {
-	fn := h.handler(name)
-	if fn == nil {
-		return nil, errKeyHookMissing
-	}
-	if h.stx != nil {
-		h.stx.Begin()
-	}
-	window := ""
-	if name == "keySubmit" {
-		window = "submit"
-	}
-	v, err := h.callValue(name, fn, budgetMs, h.newCtx(budgetMs, time.Time{}, nil, window), args...)
-	if err != nil {
-		if h.stx != nil {
-			h.stx.Drop()
-		}
-		return nil, err
-	}
-	if cErr := h.commitStorage(); cErr != nil {
-		return nil, cErr
-	}
-	return v, nil
-}
-
-// CallKeyWrite 键写入归一化(仅管理台 PUT;undefined/null 返回 = 透传原值)
-func (h *HooksRuntime) CallKeyWrite(id string, newData, oldData any) (any, error) {
-	v, err := h.keyHook("keyWrite", KeyHookTimeoutMs,
-		h.vm.ToValue(id), h.vm.ToValue(newData), h.vm.ToValue(oldData))
-	if err != nil {
-		return nil, err
-	}
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return newData, nil
-	}
-	return v.Export(), nil
-}
-
-// CallKeyRead 键详情解释(undefined → nil;未导出 = ErrHookNotExported)
-func (h *HooksRuntime) CallKeyRead(id string) (any, error) {
-	if h.handler("keyRead") == nil {
-		return nil, ErrHookNotExported
-	}
-	v, err := h.keyHook("keyRead", KeyHookTimeoutMs, h.vm.ToValue(id))
-	if err != nil {
-		return nil, err
-	}
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return nil, nil
-	}
-	return v.Export(), nil
-}
-
-// CallKeyForm 添加表单声明(未导出 = ErrHookNotExported)
-func (h *HooksRuntime) CallKeyForm() (any, error) {
-	if h.handler("keyForm") == nil {
-		return nil, ErrHookNotExported
-	}
-	v, err := h.keyHook("keyForm", KeyHookTimeoutMs)
-	if err != nil {
-		return nil, err
-	}
-	return v.Export(), nil
-}
-
-// CallKeyAction 表单按钮回调
-func (h *HooksRuntime) CallKeyAction(action string, values map[string]any) (any, error) {
-	v, err := h.keyHook("keyAction", KeyFlowTimeoutMs, h.vm.ToValue(action), h.vm.ToValue(values))
-	if err != nil {
-		return nil, err
-	}
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return nil, nil
-	}
-	return v.Export(), nil
-}
-
-// CallKeySubmit 表单提交(创建新条目由回调内 ctx.keys.set;written 收集宿主生成 id,多次 set = 多条)
-// 返回契约:errs 非空 = 字段级拒绝(GUI 标红);message 字段已删
-func (h *HooksRuntime) CallKeySubmit(values map[string]any) ([]string, map[string]any, error) {
-	if h.handler("keySubmit") == nil {
-		return nil, nil, ErrHookNotExported
-	}
-	h.written = nil
-	h.collectWrite = true
-	v, err := h.keyHook("keySubmit", KeyFlowTimeoutMs, h.vm.ToValue(values))
-	h.collectWrite = false
-	if err != nil {
-		return nil, nil, err
-	}
-	var errs map[string]any
-	if v != nil && !goja.IsUndefined(v) && !goja.IsNull(v) {
-		if m, ok := v.Export().(map[string]any); ok {
-			if e, ok := m["errors"].(map[string]any); ok && len(e) > 0 {
-				errs = e
-			}
-		}
-	}
-	return h.written, errs, nil
-}
-
 // Handler 导出函数暴露(装配面探测/调用)
 func (h *HooksRuntime) Handler(name string) goja.Callable { return h.handler(name) }
 
 // Deps 运行时依赖视图(宿主在调用钩子前注入键引用等)
 func (h *HooksRuntime) Deps() *HooksDeps { return &h.deps }
-
-// KeyHookTimeoutMs 归一化/读取钩子预算
-const KeyHookTimeoutMs = 5 * 1000
-
-// KeyFlowTimeoutMs 表单采集流程预算(出站登录慢于归一化)
-const KeyFlowTimeoutMs = 10 * 1000
-
-var errKeyHookMissing = fmt.Errorf("hook not implemented")
 
 // HasExport 钩子是否已导出
 func (h *HooksRuntime) HasExport(name string) bool { return h.handler(name) != nil }
@@ -551,26 +428,19 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, tk *HooksTask, write
 		_ = ctx.Set("key", keyObj)
 	}
 	keysObj := h.vm.NewObject()
-	// set:任务窗 = 整体替换当前键 data;submit 窗 = 创建新条目(data 任意 JSON)
+	// set:任务窗 = 整体替换当前键 data(键写通道 = 任务窗/GUI 手编,无创建窗)
 	setKey := func(data any) (string, error) {
 		if h.deps.Keys == nil {
 			return "", fmt.Errorf("keys unavailable (package %s)", h.pkg)
 		}
-		var newID string
-		if writeWindow == "submit" {
-			// 创建窗:宿主生成 id,多条 set = 多条目(无当前键依赖)
-			newID = h.deps.Keys.keySubmitID(h.deps.Now().UnixMilli())
-		} else {
-			if h.deps.Key == nil {
-				return "", fmt.Errorf("keys: no current key context (package %s)", h.pkg)
-			}
-			newID = h.deps.Key.ID
+		if h.deps.Key == nil {
+			return "", fmt.Errorf("keys: no current key context (package %s)", h.pkg)
 		}
 		exported := data
 		if v, ok := data.(goja.Value); ok {
 			exported = v.Export()
 		}
-		if _, err := h.deps.Keys.Set(h.pkg, newID, exported); err != nil {
+		if _, err := h.deps.Keys.Set(h.pkg, h.deps.Key.ID, exported); err != nil {
 			return "", err
 		}
 		// 运行中切片可见新 data(ctx.key 与 Go 侧同步)
@@ -578,22 +448,12 @@ func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, tk *HooksTask, write
 			h.deps.Key.Data = exported
 			_ = keyObj.Set("data", exported)
 		}
-		return newID, nil
-	}
-	switch writeWindow {
-	case "task", "submit":
-		_ = keysObj.Set("set", func(data goja.Value) (string, error) {
-			id, err := setKey(data)
-			if err != nil {
-				return "", err
-			}
-			if h.collectWrite {
-				h.written = append(h.written, id)
-			}
-			return id, nil
-		})
+		return h.deps.Key.ID, nil
 	}
 	if writeWindow == "task" {
+		_ = keysObj.Set("set", func(data goja.Value) (string, error) {
+			return setKey(data)
+		})
 		_ = keysObj.Set("merge", func(patch map[string]any) error {
 			if h.deps.Key == nil {
 				return fmt.Errorf("keys: no current key context (package %s)", h.pkg)
@@ -675,7 +535,10 @@ func (h *HooksRuntime) doHTTP(opts map[string]any, budgetMs int64) (map[string]a
 	if tms, ok := numericField(opts["timeoutMs"]); ok && tms > 0 && tms < budgetMs {
 		timeout = time.Duration(tms) * time.Millisecond
 	}
-	resp, err := h.deps.HTTP.Do(HttpRequest{URL: url, Method: method, Headers: headers, Body: body, Timeout: timeout})
+	transportName, _ := opts["transport"].(string)
+	sessionKey, _ := opts["sessionKey"].(string)
+	resp, err := h.deps.HTTP.Do(HttpRequest{URL: url, Method: method, Headers: headers, Body: body, Timeout: timeout,
+		Transport: transportName, SessionKey: sessionKey})
 	if err != nil {
 		return nil, err
 	}

@@ -23,22 +23,31 @@ type httpExecutor struct {
 	trMgr *transport.Manager
 }
 
-// Do 按 (优先 direct → 任一实例) 出站;供给方类传输(scheme ipp+/aap)不参与回退——空亲和素材会退化为恒定绑定
+// Do 出站:transport 命名实例优先(不存在 = 报错;空 = direct → 任一非供给方回退);sessionKey = 亲和素材
 func (h *httpExecutor) Do(req plugin.HttpRequest) (*plugin.HttpResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
-	preq := pipeline.Request{URL: req.URL, Method: req.Method, Headers: req.Headers, Body: []byte(req.Body)}
+	preq := pipeline.Request{URL: req.URL, Method: req.Method, Headers: req.Headers, Body: []byte(req.Body),
+		Transport: req.Transport, APIKey: req.SessionKey}
 	if h.trMgr == nil {
 		return nil, fmt.Errorf("no outbound transport available")
 	}
-	tr, ok := h.trMgr.Get(hooksTransportName)
-	if !ok {
-		for _, name := range h.trMgr.Names() {
-			if _, isSupplier := h.trMgr.SupplierKind(name); isSupplier {
-				continue
-			}
-			if tr, ok = h.trMgr.Get(name); ok {
-				break
+	var tr pipeline.Transport
+	var ok bool
+	if req.Transport != "" {
+		if tr, ok = h.trMgr.Get(req.Transport); !ok {
+			return nil, fmt.Errorf("transport %q not found", req.Transport)
+		}
+	} else {
+		tr, ok = h.trMgr.Get(hooksTransportName)
+		if !ok {
+			for _, name := range h.trMgr.Names() {
+				if _, isSupplier := h.trMgr.SupplierKind(name); isSupplier {
+					continue
+				}
+				if tr, ok = h.trMgr.Get(name); ok {
+					break
+				}
 			}
 		}
 	}

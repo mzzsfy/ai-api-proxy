@@ -276,42 +276,6 @@ func TestHooks_MergePatch(t *testing.T) {
 	}
 }
 
-func TestHooks_KeySubmitCreatesEntry(t *testing.T) {
-	// BDD 8 表单建键:keySubmit 窗 set(data) = 创建新条目(宿主生成 id,同毫秒多次不碰撞)
-	files := map[string]string{"keys.js": `module.exports={
-		keyForm: function(ctx){ return {fields: []}; },
-		keySubmit: function(ctx, values){ ctx.keys.set({token: values.token}); ctx.keys.set({token: values.token + "2"}); }
-	}`}
-	pkg := hooksPkg(t, files)
-	ks := NewKeysStore(testKeysDB(t))
-	mem := &memKV{m: map[string]string{}}
-	deps := HooksDeps{Keys: ks, Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
-	rt, err := LoadKeys(pkg, deps, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids, errs, err := rt.CallKeySubmit(map[string]any{"token": "tk"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(errs) != 0 {
-		t.Fatalf("errs: %v", errs)
-	}
-	if len(ids) != 2 {
-		t.Fatalf("ids: %v", ids)
-	}
-	if ids[0] == ids[1] {
-		t.Fatalf("id collision: %v", ids)
-	}
-	for _, id := range ids {
-		if e, ok := ks.Get("hp", id); !ok {
-			t.Fatalf("entry %s missing", id)
-		} else if m := e.Data.(map[string]any); m["token"] == nil {
-			t.Fatalf("entry data: %+v", e.Data)
-		}
-	}
-}
-
 func TestHooks_NoMultiKeyJS(t *testing.T) {
 	// BDD 15 JS 权限面:get/list/previous/remove 不存在;util.key("x") 忽略参数等同无参
 	files := map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){
@@ -340,7 +304,7 @@ func TestHooks_NoMultiKeyJS(t *testing.T) {
 	}
 }
 
-func TestHooks_WriteWindowOnlyTaskAndSubmit(t *testing.T) {
+func TestHooks_WriteWindowOnlyTask(t *testing.T) {
 	// BDD 16/写窗矩阵:onLoad ctx 无 set/merge(阉割即权限)
 	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
 	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined && ctx.keys.merge===undefined));}}`})

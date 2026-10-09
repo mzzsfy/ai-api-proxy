@@ -43,20 +43,8 @@ type Deps struct {
 	FetchPackage func(r *http.Request, url string) ([]byte, error)
 	// KeysFunc 包键清单视图({keys, rotation};按包名隔离)
 	KeysFunc func(pkg string) map[string]any
-	// KeyHooksFunc keys 钩子能力探测(write/read/form)
-	KeyHooksFunc func(pkg string) (write, read, form bool)
-	// KeyWriteFunc 单键写入(仅管理台 PUT;per-key baseUpdatedAt 快检 + keyWrite 归一化 + Set 备份)
-	KeyWriteFunc func(pkg, key string, value any, baseUpdatedAt int64) (updated int64, transformed bool, err error)
-	// KeyReadFunc 键详情解释(keyRead;仅 GET detail 触发)
-	KeyReadFunc func(pkg, key string) (any, error)
 	// HTTPClient 模型发现用出站客户端(nil = discover 路由 501)
 	HTTPClient *http.Client
-	// KeyFormFunc 添加表单声明
-	KeyFormFunc func(pkg string) (any, error)
-	// KeyActionFunc 表单按钮回调(可出站)
-	KeyActionFunc func(pkg, action string, values map[string]any) (any, error)
-	// KeySubmitFunc 表单提交(回调内 ctx.keys.set 创建条目;ids=宿主生成 id;errors=字段级拒绝)
-	KeySubmitFunc func(pkg string, values map[string]any) ([]string, map[string]any, error)
 	// RunTaskFunc 手动触发 hooks 任务一次(keyID 空 = 全键跑;同步执行,逐键结果)
 	RunTaskFunc func(pkg, task, keyID string) ([]TaskRunResult, error)
 	// Subscriptions 订阅同步/删除引擎(nil = 订阅路由 501)
@@ -112,10 +100,6 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /admin/api/packages/{name}/ui/{path...}", d.packageUI)
 	mux.HandleFunc("POST /admin/api/packages/{name}/ui/proxy", d.packageUIProxy)
 	mux.HandleFunc("DELETE /admin/api/packages/{name}/keys/{key}", d.deletePackageKey)
-	mux.HandleFunc("GET /admin/api/packages/{name}/keys/{key}/detail", d.packageKeyDetail)
-	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form", d.packageKeyForm)
-	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-action", d.packageKeyFormAction)
-	mux.HandleFunc("POST /admin/api/packages/{name}/keys/form-submit", d.packageKeyFormSubmit)
 	mux.HandleFunc("POST /admin/api/packages/{name}/tasks/{task}/run", d.runPackageTask)
 	mux.HandleFunc("GET /admin/api/packages/{name}/settings", d.packageSettings)
 	mux.HandleFunc("PUT /admin/api/packages/{name}/settings", d.savePackageSettings)
@@ -764,114 +748,13 @@ func (d *Deps) packageUIProxy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maskMarker 密钥掩码占位(UI 展示用;PUT 时合并回旧值;仅字符串叶子,数值/布尔形态不掩码)
-const maskMarker = "***"
-
-// maskData 递归掩码:字符串叶子置 maskMarker
-func maskData(v any) any {
-	switch tv := v.(type) {
-	case string:
-		if tv == "" {
-			return tv
-		}
-		return maskMarker
-	case map[string]any:
-		out := make(map[string]any, len(tv))
-		for k, val := range tv {
-			out[k] = maskData(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(tv))
-		for i, val := range tv {
-			out[i] = maskData(val)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-// mergeMasked 掩码合并:new 中 maskMarker 叶子还原为 old 对应值(须在 keyWrite 钩子前执行);*** 无旧值时报错
-func mergeMasked(old, new any) (any, error) {
-	if s, ok := new.(string); ok && s == maskMarker {
-		if old == nil {
-			return nil, fmt.Errorf("masked value without prior key")
-		}
-		return old, nil
-	}
-	om, ok1 := old.(map[string]any)
-	nm, ok2 := new.(map[string]any)
-	if ok1 && ok2 {
-		out := make(map[string]any, len(nm))
-		for k, val := range nm {
-			mv, err := mergeMasked(om[k], val)
-			if err != nil {
-				return nil, err
-			}
-			out[k] = mv
-		}
-		return out, nil
-	}
-	os, ok1 := old.([]any)
-	ns, ok2 := new.([]any)
-	if ok1 && ok2 && len(os) == len(ns) {
-		out := make([]any, len(ns))
-		for i := range ns {
-			mv, err := mergeMasked(os[i], ns[i])
-			if err != nil {
-				return nil, err
-			}
-			out[i] = mv
-		}
-		return out, nil
-	}
-	return new, nil
-}
-
-// containsMasked 值树中是否含 *** 叶子(新键写入前的掩码守卫)
-func containsMasked(v any) bool {
-	switch tv := v.(type) {
-	case string:
-		return tv == maskMarker
-	case map[string]any:
-		for _, val := range tv {
-			if containsMasked(val) {
-				return true
-			}
-		}
-	case []any:
-		for _, val := range tv {
-			if containsMasked(val) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// packageKeys 包级 keys 视图(明文;masked=1 时字符串叶子掩码;响应并 hooks 能力标记)
+// packageKeys 包级 keys 视图(明文;展示脱敏统一走包内 inspect.js,无掩码通道)
 func (d *Deps) packageKeys(w http.ResponseWriter, r *http.Request) {
 	if d.KeysFunc == nil {
 		httpError(w, http.StatusNotImplemented, "keys unavailable")
 		return
 	}
-	name := r.PathValue("name")
-	out := d.KeysFunc(name)
-	if r.URL.Query().Get("masked") == "1" {
-		if keys, ok := out["keys"].([]map[string]any); ok {
-			for _, row := range keys {
-				row["data"] = maskData(row["data"])
-			}
-		}
-	}
-	hooks := map[string]any{"keyWrite": false, "keyRead": false, "keyForm": false}
-	if d.KeyHooksFunc != nil {
-		write, read, form := d.KeyHooksFunc(name)
-		hooks["keyWrite"], hooks["keyRead"], hooks["keyForm"] = write, read, form
-	}
-	out["hooks"] = hooks
-	writeJSON(w, out)
+	writeJSON(w, d.KeysFunc(r.PathValue("name")))
 }
 
 // validKeyName 键名约束:非空,≤64 字符,无控制字符,不含 /(单路径段寻址)
@@ -887,12 +770,8 @@ func validKeyName(name string) bool {
 	return true
 }
 
-// putPackageKey 单键写入(HW 面:键名校验 400/未启用 409/过期 409/钩子错 400/超时 500)
+// putPackageKey 单键写入(GUI 手编通道:键名校验 400/未启用 409/过期 409/原样保存)
 func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
-	if d.KeyWriteFunc == nil {
-		httpError(w, http.StatusNotImplemented, "keys write unavailable")
-		return
-	}
 	pkg := r.PathValue("name")
 	key := r.PathValue("key")
 	if !validKeyName(key) {
@@ -907,29 +786,27 @@ func (d *Deps) putPackageKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
 		return
 	}
-	// 掩码回填:*** 叶子还原为旧值(在 keyWrite 归一化前;无旧键时 *** 拒绝,掩码字面量永不入库)
-	if d.Packages != nil {
-		if e, ok := d.Packages.Keys().Get(pkg, key); ok {
-			mv, err := mergeMasked(e.Data, req.Value)
-			if err != nil {
-				httpError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			req.Value = mv
-		} else if containsMasked(req.Value) {
-			httpError(w, http.StatusBadRequest, "masked value without prior key")
-			return
-		}
-	}
-	updated, transformed, err := d.KeyWriteFunc(pkg, key, req.Value, req.BaseUpdatedAt)
-	if err != nil {
-		writeKeyErr(w, err)
+	if _, err := d.Packages.GetPackage(pkg); err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"updatedAt": updated, "transformed": transformed})
+	if !d.Packages.IsEnabled(pkg) {
+		httpError(w, http.StatusConflict, "package disabled")
+		return
+	}
+	if cur := d.Packages.Keys().UpdatedAt(pkg, key); cur != req.BaseUpdatedAt {
+		httpError(w, http.StatusConflict, "keys modified (by task or upgrade); reload")
+		return
+	}
+	updated, err := d.Packages.Keys().Set(pkg, key, req.Value)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"updatedAt": updated})
 }
 
-// packageKeyDetail 键详情(data + prev 备份 + keyRead 解释)
+// packageKeyDetail 键详情(data + prev 备份;明文)
 func (d *Deps) packageKeyDetail(w http.ResponseWriter, r *http.Request) {
 	pkg, key := r.PathValue("name"), r.PathValue("key")
 	if !validKeyName(key) {
@@ -941,14 +818,7 @@ func (d *Deps) packageKeyDetail(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "key not found")
 		return
 	}
-	out := map[string]any{"id": e.ID, "data": e.Data, "prev": e.Prev, "updatedAt": e.UpdatedAt}
-	// keyRead 解释(仅此端点触发;501 = 未实现,详情照常)
-	if d.KeyReadFunc != nil {
-		if explain, err := d.KeyReadFunc(pkg, key); err == nil && explain != nil {
-			out["explain"] = explain
-		}
-	}
-	writeJSON(w, out)
+	writeJSON(w, map[string]any{"id": e.ID, "data": e.Data, "prev": e.Prev, "updatedAt": e.UpdatedAt})
 }
 
 // deletePackageKey 单键删除(幂等;键不存在 = 200,包不存在 = 404)
@@ -967,107 +837,6 @@ func (d *Deps) deletePackageKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
-}
-
-// packageKeyForm 添加表单声明
-func (d *Deps) packageKeyForm(w http.ResponseWriter, r *http.Request) {
-	if d.KeyFormFunc == nil {
-		httpError(w, http.StatusNotImplemented, "keys form unavailable")
-		return
-	}
-	decl, err := d.KeyFormFunc(r.PathValue("name"))
-	if err != nil {
-		if errors.Is(err, plugin.ErrPackageDisabled) {
-			httpError(w, http.StatusConflict, err.Error())
-			return
-		}
-		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
-			httpError(w, http.StatusNotImplemented, "keyForm not implemented")
-			return
-		}
-		httpError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	form, ok := decl.(map[string]any)
-	if !ok || form == nil {
-		httpError(w, http.StatusNotImplemented, "keyForm not implemented")
-		return
-	}
-	writeJSON(w, map[string]any{"fields": form["fields"], "actions": form["actions"]})
-}
-
-// packageKeyFormAction 表单按钮回调
-func (d *Deps) packageKeyFormAction(w http.ResponseWriter, r *http.Request) {
-	if d.KeyActionFunc == nil {
-		httpError(w, http.StatusNotImplemented, "keys form unavailable")
-		return
-	}
-	var req struct {
-		Action string         `json:"action"`
-		Values map[string]any `json:"values"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil || req.Action == "" {
-		httpError(w, http.StatusBadRequest, "action required")
-		return
-	}
-	msg, err := d.KeyActionFunc(r.PathValue("name"), req.Action, req.Values)
-	if err != nil {
-		writeKeyErr(w, err)
-		return
-	}
-	writeJSON(w, map[string]any{"message": msg})
-}
-
-// packageKeyFormSubmit 表单提交(写入在钩子内完成;written 收集)
-func (d *Deps) packageKeyFormSubmit(w http.ResponseWriter, r *http.Request) {
-	if d.KeySubmitFunc == nil {
-		httpError(w, http.StatusNotImplemented, "keys form unavailable")
-		return
-	}
-	var req struct {
-		Values map[string]any `json:"values"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&req); err != nil {
-		httpError(w, http.StatusBadRequest, "bad body: "+err.Error())
-		return
-	}
-	ids, errs, err := d.KeySubmitFunc(r.PathValue("name"), req.Values)
-	if err != nil {
-		if errors.Is(err, plugin.ErrNoHooksPart) || errors.Is(err, plugin.ErrHookNotExported) {
-			httpError(w, http.StatusNotImplemented, "keySubmit not implemented")
-			return
-		}
-		writeKeyErr(w, err)
-		return
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	out := map[string]any{"ok": true, "ids": ids}
-	if len(errs) > 0 {
-		// 字段级拒绝:处理成功(200)但提交未通过,GUI 据此定位输入框
-		out["ok"] = false
-		out["errors"] = errs
-	}
-	writeJSON(w, out)
-}
-
-// writeKeyErr 错误映射:禁用 409/冲突 409/无部件 501/其余(钩子抛错/超限/超时)400|500 判别
-func writeKeyErr(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, plugin.ErrPackageDisabled):
-		httpError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, plugin.ErrVersionConflict):
-		httpError(w, http.StatusConflict, "keys modified (by task or upgrade); reload")
-	case errors.Is(err, plugin.ErrNoHooksPart):
-		httpError(w, http.StatusNotImplemented, "hooks not implemented")
-	case errors.Is(err, plugin.ErrHookTimeoutSentinel):
-		httpError(w, http.StatusInternalServerError, err.Error())
-	case strings.Contains(err.Error(), "exceed limit"):
-		httpError(w, http.StatusBadRequest, err.Error())
-	default:
-		httpError(w, http.StatusBadRequest, err.Error())
-	}
 }
 
 // runPackageTask 手动触发 hooks 任务一次(同步执行;供任务行"测试"按钮)
