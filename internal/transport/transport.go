@@ -288,6 +288,31 @@ func (t *httpTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pi
 	return consumeResponse(hresp), nil
 }
 
+// RawTransport 原始响应传输(handler 出站通道;响应体不经理限量读,由消费方自理)
+type RawTransport interface {
+	RoundTripRaw(ctx context.Context, req pipeline.Request) (*http.Response, error)
+}
+
+// RoundTripRaw 执行请求;响应体不消费,原样交出(超时/关停归调用方)
+func (t *httpTransport) RoundTripRaw(ctx context.Context, req pipeline.Request) (*http.Response, error) {
+	var bodyReader io.Reader
+	if len(req.Body) > 0 {
+		bodyReader = bytes.NewReader(req.Body)
+	}
+	hreq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	for k, v := range req.Headers {
+		hreq.Header.Set(k, v)
+	}
+	hresp, err := t.client.Do(hreq)
+	if err != nil {
+		return nil, fmt.Errorf("round trip: %w", err)
+	}
+	return hresp, nil
+}
+
 // ipTransport IP 供给方传输:每请求 Acquire → lease 拨号;失效无错误驱动
 // (403/429 直接透传);恰一次边界:连接建立失败(零字节触达)换出口重试预算 1,
 // 请求已发出后终局透传
@@ -320,7 +345,7 @@ func (t *ipTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pipe
 		}
 		// 契约:Release 幂等;defer 保证 panic/早退路径租约必归还
 		defer lease.Release()
-		resp, dialErr, unwritten := t.via(ctx, lease, req)
+		hresp, dialErr, unwritten := t.viaRaw(ctx, lease, req)
 		if dialErr != nil {
 			var repErr *ipprovider.RepError
 			if errors.As(dialErr, &repErr) && unwritten && retryBudget > 0 && repErr.Rep == ipprovider.AapRepRetry {
@@ -339,8 +364,62 @@ func (t *ipTransport) RoundTrip(ctx context.Context, req pipeline.Request) (pipe
 			}
 			return pipeline.TransportResponse{}, dialErr
 		}
-		return resp, nil
+		return consumeResponse(hresp), nil
 	}
+}
+
+// RoundTripRaw 原始响应路径(handler 出站通道;租约与恰一次语义同 RoundTrip)。
+// 成功路径租约随响应体生命周期:Close 时归还(流式消费跨函数)
+func (t *ipTransport) RoundTripRaw(ctx context.Context, req pipeline.Request) (*http.Response, error) {
+	hint := ipprovider.Hint{SessionKey: sessionKey(req.APIKey, req.Model)}
+	retryBudget := 1
+	var excludes []string
+	for {
+		lease, err := t.provider.Acquire(ctx, hint)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("acquire lease: %w", ctx.Err())
+			}
+			return nil, fmt.Errorf("acquire lease: %w", err)
+		}
+		if ex, ok := lease.(ipprovider.Excluder); ok && len(excludes) > 0 {
+			lease = ex.WithExclude(excludes...)
+		}
+		hresp, dialErr, unwritten := t.viaRaw(ctx, lease, req)
+		if dialErr != nil {
+			lease.Release() // 失败路径即时归还(重试循环不累积租约)
+			var repErr *ipprovider.RepError
+			if errors.As(dialErr, &repErr) && unwritten && retryBudget > 0 && repErr.Rep == ipprovider.AapRepRetry {
+				retryBudget--
+				if id := repErr.LeaseID; !ipprovider.IsZeroLeaseID(id) {
+					excludes = append(excludes, id)
+				}
+				continue
+			}
+			if errors.As(dialErr, &repErr) {
+				return nil, translateRep(repErr)
+			}
+			if unwritten && retryBudget > 0 && lease.Capabilities().CanRotateIP {
+				retryBudget--
+				continue
+			}
+			return nil, dialErr
+		}
+		hresp.Body = &leaseBody{ReadCloser: hresp.Body, release: lease.Release}
+		return hresp, nil
+	}
+}
+
+// leaseBody 租约归还挂接响应体生命周期
+type leaseBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *leaseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
 }
 
 // ErrNoEgress503 rep=1/2 终局(出口不可用/节点并发上限;临时性,gateway 映射 503)
@@ -354,16 +433,16 @@ func translateRep(repErr *ipprovider.RepError) error {
 	return fmt.Errorf("aap node rep=%d", repErr.Rep)
 }
 
-// via 经 lease 建连执行请求(Transport 不设 Proxy 字段——隧道语义在 Lease.Dial 内,设计 R1 定案)。
+// viaRaw 经 lease 建连执行请求,原始响应交出(Transport 不设 Proxy 字段——隧道语义在 Lease.Dial 内,设计 R1 定案)。
 // 第三返回值 unwritten:错误发生时请求是否尚未写出(零字节触达上游;httptrace 边界)。
-func (t *ipTransport) via(ctx context.Context, lease ipprovider.Lease, req pipeline.Request) (pipeline.TransportResponse, error, bool) {
+func (t *ipTransport) viaRaw(ctx context.Context, lease ipprovider.Lease, req pipeline.Request) (*http.Response, error, bool) {
 	var bodyReader io.Reader
 	if len(req.Body) > 0 {
 		bodyReader = bytes.NewReader(req.Body)
 	}
 	hreq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bodyReader)
 	if err != nil {
-		return pipeline.TransportResponse{}, fmt.Errorf("build request: %w", err), true
+		return nil, fmt.Errorf("build request: %w", err), true
 	}
 	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
@@ -389,8 +468,8 @@ func (t *ipTransport) via(ctx context.Context, lease ipprovider.Lease, req pipel
 	if err != nil {
 		// 关闭本 transport 的 idle 池(虽已禁 keep-alive,防御性回收)
 		client.CloseIdleConnections()
-		return pipeline.TransportResponse{}, fmt.Errorf("round trip via lease: %w", err), !(wroteRequest.Load() || tlsStarted.Load())
+		return nil, fmt.Errorf("round trip via lease: %w", err), !(wroteRequest.Load() || tlsStarted.Load())
 	}
 	client.CloseIdleConnections()
-	return consumeResponse(hresp), nil, false
+	return hresp, nil, false
 }

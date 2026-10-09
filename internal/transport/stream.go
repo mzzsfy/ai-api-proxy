@@ -39,35 +39,75 @@ func readAllLimited(r io.Reader) []byte {
 	return b
 }
 
+// FrameSSE 上游响应体 → SSE 帧通道(handler 出站通道同源分帧;data 为多行拼接语义)
+func FrameSSE(body io.ReadCloser) <-chan pipeline.SSEFrame { return frameSSE(body) }
+
+// SSEFrameResult 帧结果:Err 非空 = 底层读错误(断流),随通道终态送达
+type SSEFrameResult struct {
+	Frame pipeline.SSEFrame
+	Err   error
+}
+
+// FrameSSEResult 帧通道 + 断流错误(消费方可区分自然 EOF 与中途断流);stop 关闭后发射方退出
+func FrameSSEResult(body io.ReadCloser, stop <-chan struct{}) <-chan SSEFrameResult {
+	out := make(chan SSEFrameResult, 16)
+	go func() {
+		defer close(out)
+		defer func() { _ = body.Close() }()
+		err := scanSSE(body, func(f pipeline.SSEFrame) {
+			select {
+			case out <- SSEFrameResult{Frame: f}:
+			case <-stop:
+			}
+		})
+		if err != nil {
+			select {
+			case out <- SSEFrameResult{Err: err}:
+			case <-stop:
+			}
+		}
+	}()
+	return out
+}
+
 // frameSSE 上游响应体 → SSE 帧通道(host 分帧;data 为多行拼接语义)
 func frameSSE(body io.ReadCloser) <-chan pipeline.SSEFrame {
 	out := make(chan pipeline.SSEFrame, 16)
 	go func() {
 		defer close(out)
 		defer func() { _ = body.Close() }()
-		sc := bufio.NewScanner(body)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		var event string
-		var data []string
-		flush := func() {
-			if len(data) > 0 || event != "" {
-				out <- pipeline.SSEFrame{Event: event, Data: strings.Join(data, "\n")}
-				event = ""
-				data = data[:0]
-			}
-		}
-		for sc.Scan() {
-			line := sc.Text()
-			switch {
-			case line == "":
-				flush()
-			case strings.HasPrefix(line, "event:"):
-				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			case strings.HasPrefix(line, "data:"):
-				data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
-			}
-		}
-		flush()
+		_ = scanSSE(body, func(f pipeline.SSEFrame) { out <- f })
 	}()
 	return out
+}
+
+// scanSSE 分帧核心(data 为多行拼接语义);返回底层读错误(自然 EOF = nil)
+func scanSSE(body io.ReadCloser, emit func(pipeline.SSEFrame)) error {
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	var event string
+	var data []string
+	flush := func() {
+		if len(data) > 0 || event != "" {
+			emit(pipeline.SSEFrame{Event: event, Data: strings.Join(data, "\n")})
+			event = ""
+			data = data[:0]
+		}
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "event:"):
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	flush()
+	return nil
 }
