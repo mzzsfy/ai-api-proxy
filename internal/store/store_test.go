@@ -104,7 +104,7 @@ func TestKV_NamespaceIsolation(t *testing.T) {
 }
 
 func TestKV_ConcurrentWriteNoBusy(t *testing.T) {
-	// Given WAL 并发写(快照 goroutine + GUI 读) When 并发执行 Then 无 SQLITE_BUSY
+	// Given 并发 KV 写(单写连接下实际串行) When 并发执行 Then 调用面无竞态数据错误(WAL 多连接场景由部署层验证)
 	s := newTestStore(t)
 	ctx := context.Background()
 	var wg sync.WaitGroup

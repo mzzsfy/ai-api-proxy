@@ -22,27 +22,22 @@ func (a *App) credsFor(pkg string) (*plugin.SlotStore, error) {
 	if _, err := a.AdminDeps.Packages.GetPackage(pkg); err != nil {
 		return nil, err
 	}
-	return a.credsSharedView(pkg), nil
+	return a.sharedStoreFor(pkg), nil
 }
 
-// credsSharedView 包 ③ 权威槽实例(桥写口用)
-func (a *App) credsSharedView(pkg string) *plugin.SlotStore {
-	a.credsMu.Lock()
-	defer a.credsMu.Unlock()
-	if a.credsShared == nil {
-		a.credsShared = newHandlerShared(a.St)
-	}
-	return a.credsShared.storeFor(pkg)
-}
-
-// slotView 包 ③ 权威槽视图(懒建;全部通道共用同实例)
+// slotView 包命名空间 ③ 权威槽视图(打标直写)
 func (a *App) slotView(pkg string) plugin.StorageKV {
+	return plugin.AuthoritativeStore{S: a.sharedStoreFor(pkg)}
+}
+
+// sharedStoreFor 命名 ns 槽实例(懒建;桥/handler 引擎/任务/login 全通道共用)
+func (a *App) sharedStoreFor(ns string) *plugin.SlotStore {
 	a.credsMu.Lock()
 	defer a.credsMu.Unlock()
 	if a.credsShared == nil {
 		a.credsShared = newHandlerShared(a.St)
 	}
-	return plugin.AuthoritativeStore{S: a.credsShared.storeFor(pkg)}
+	return a.credsShared.storeFor(ns)
 }
 
 // Login login/index.js → Keys.Set(GUI 登录路径唯一落库通道)
