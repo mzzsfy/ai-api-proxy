@@ -19,15 +19,17 @@ type Watchdog struct {
 	Engines   *plugin.HandlerEngines
 	SoftBytes uint64
 	// HardBytes = 软限×1.5;>0 且独立进程部署 = 到限进程退出
-	HardBytes    uint64
-	Independent  bool
-	readRSS      func() uint64
-	tripped      atomic.Bool
+	HardBytes   uint64
+	Independent bool
+	readRSS     func() uint64
+	tripped     atomic.Bool
+	// poll 轮询周期(缺省 watchdogPoll;测试可调小)
+	poll time.Duration
 }
 
 // NewWatchdog 构造(readRSS 注入可测;totalMemory 缺省 sysTotalMemory)
 func NewWatchdog(engines *plugin.HandlerEngines, softBytes, hardBytes uint64, independent bool, readRSS func() uint64) *Watchdog {
-	return &Watchdog{Engines: engines, SoftBytes: softBytes, HardBytes: hardBytes, Independent: independent, readRSS: readRSS}
+	return &Watchdog{Engines: engines, SoftBytes: softBytes, HardBytes: hardBytes, Independent: independent, readRSS: readRSS, poll: watchdogPoll}
 }
 
 // Run 轮询(阻塞;ctx 取消退出)
@@ -35,11 +37,14 @@ func (w *Watchdog) Run(ctx context.Context) {
 	if w.SoftBytes == 0 || w.readRSS == nil {
 		return
 	}
+	if w.poll <= 0 {
+		w.poll = watchdogPoll
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(watchdogPoll):
+		case <-time.After(w.poll):
 		}
 		rss := w.readRSS()
 		switch {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,22 +12,24 @@ import (
 // 场景: RSS 达软限——丢全部池+拒新;回落后池重建开放
 func TestWatchdog_SoftLimit(t *testing.T) {
 	engines := plugin.NewHandlerEngines(func(pkg *plugin.Package) plugin.HandlerDeps { return plugin.HandlerDeps{} })
-	rss := uint64(100)
-	wd := NewWatchdog(engines, 1000, 0, false, func() uint64 { return rss })
+	var rss atomic.Uint64
+	rss.Store(100)
+	wd := NewWatchdog(engines, 1000, 0, false, func() uint64 { return rss.Load() })
+	wd.poll = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go wd.Run(ctx)
-	time.Sleep(watchdogPoll + 100*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if engines.RejectNew() {
 		t.Fatal("pre-trip reject")
 	}
-	rss = 1500 // 越软限
-	time.Sleep(watchdogPoll + 100*time.Millisecond)
+	rss.Store(1500) // 越软限
+	time.Sleep(50 * time.Millisecond)
 	if !engines.RejectNew() {
 		t.Fatal("soft limit must reject new")
 	}
-	rss = 100 // 回落
-	time.Sleep(watchdogPoll + 100*time.Millisecond)
+	rss.Store(100) // 回落
+	time.Sleep(50 * time.Millisecond)
 	if engines.RejectNew() {
 		t.Fatal("back under must reopen")
 	}
@@ -39,18 +42,19 @@ func TestWatchdog_HardLimit(t *testing.T) {
 	old := exitProcess
 	exitProcess = func(code int) { exited <- code }
 	t.Cleanup(func() { exitProcess = old })
-	rss := uint64(0)
-	wd := NewWatchdog(engines, 100, 150, true, func() uint64 { return rss })
+	var rss atomic.Uint64
+	wd := NewWatchdog(engines, 100, 150, true, func() uint64 { return rss.Load() })
+	wd.poll = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go wd.Run(ctx)
-	rss = 200 // 越硬限
+	rss.Store(200) // 越硬限
 	select {
 	case code := <-exited:
 		if code != 1 {
 			t.Fatalf("exit code %d", code)
 		}
-	case <-time.After(watchdogPoll*2 + time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("hard limit did not exit")
 	}
 }
@@ -62,16 +66,17 @@ func TestWatchdog_HardLimitEmbedded(t *testing.T) {
 	old := exitProcess
 	exitProcess = func(code int) { exited <- code }
 	t.Cleanup(func() { exitProcess = old })
-	rss := uint64(0)
-	wd := NewWatchdog(engines, 100, 150, false, func() uint64 { return rss })
+	var rss atomic.Uint64
+	wd := NewWatchdog(engines, 100, 150, false, func() uint64 { return rss.Load() })
+	wd.poll = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go wd.Run(ctx)
-	rss = 1000
+	rss.Store(1000)
 	select {
 	case code := <-exited:
 		t.Fatalf("embedded must not exit (got %d)", code)
-	case <-time.After(watchdogPoll + 300*time.Millisecond):
+	case <-time.After(300 * time.Millisecond):
 	}
 	if !engines.RejectNew() {
 		t.Fatal("soft trip still applies")

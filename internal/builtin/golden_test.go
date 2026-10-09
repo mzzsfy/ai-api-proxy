@@ -106,6 +106,7 @@ func findRepoRoot(t *testing.T) string {
 }
 
 // TestGolden_JSvsBuiltin_BuildRequest JS 版与内置版 BuildRequest 产物一致
+// 已知差异(非回归):Go 版产物填 APIKey(transport IP 亲和素材),JS 版不含——对拍范围刻意排除该字段;上游从 JS 包切内置协议时同 transport 会话亲和键会变
 func TestGolden_JSvsBuiltin_BuildRequest(t *testing.T) {
 	goProto := &Protocol{
 		Config:     map[string]any{BaseURLParam: goldenBaseURL},
