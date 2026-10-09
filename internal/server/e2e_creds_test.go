@@ -190,7 +190,7 @@ func TestCreds_NotWired(t *testing.T) {
 func TestCreds_LoginCtxContract(t *testing.T) {
 	files := map[string]string{
 		"login/index.js": `module.exports = function(ctx){
-			storage.set("probe", JSON.stringify([String(ctx.keys===undefined), String(ctx.settings===undefined), String(ctx.cron===undefined), String(ctx.http.run!==undefined)]));
+			storage.set("probe", JSON.stringify([String(ctx.keys===undefined), String(ctx.settings===undefined), String(ctx.cron===undefined), String(ctx.http.request!==undefined)]));
 			return {ok: true};
 		}`,
 		"login/ui/index.html": `<html></html>`,

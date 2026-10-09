@@ -160,6 +160,10 @@ export interface HookHttpRequest {
   body?: string;
   /** 缺省 = min(30s, 外层剩余);显式取值亦按外层剩余钳制 */
   timeoutMs?: number;
+  /** 出站命名实例(不存在抛错);缺省 = 全局出站 */
+  transport?: string;
+  /** 亲和素材透传(pipeline Request.APIKey) */
+  sessionKey?: string;
 }
 
 /** ctx.http 响应体 */
@@ -216,7 +220,7 @@ export interface SettingDecl {
 
 /** hooks 部件调用上下文(onLoad/任务;settings 仅注入了快照时存在) */
 export interface HookContext {
-  http: { run(req: HookHttpRequest): HookHttpResponse };
+  http: { request(req: HookHttpRequest): HandlerHttpResponse };
   /** keys 写窗能力(仅任务执行挂载;其余钩子 undefined——阉割即权限) */
   keys?: HookKeys;
   cron: { runAt: string };
@@ -391,7 +395,7 @@ export interface LoginContext {
   /** 调用方提供:GUI 桥表单 payload / handler 合成 */
   params: Record<string, unknown>;
   /** 出站统一 request 形态:handler 路径透传 ctx.http,GUI 路径宿主适配提供;响应 body 无截断(两调用点形态一致;登录非流式,不涉 open) */
-  http: { request(req: HandlerHttpRequest): HandlerHttpResponse };
+  http: { request(req: HandlerHttpRequest): HandlerHttpResponse }; // 响应 body 上限 1MB 截断
   /** 裁剪形态:仅 get/set/delete(handler 路径剥离锁成员,与 GUI 路径一致) */
   storage: Storage;
   util: Util;

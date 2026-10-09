@@ -58,7 +58,7 @@ func (h *HooksRuntime) newLoginCtx() *goja.Object {
 	ctx := h.vm.NewObject()
 	_ = ctx.Set("params", h.loginParams)
 	httpObj := h.vm.NewObject()
-	_ = httpObj.Set("run", func(opts map[string]any) (map[string]any, error) {
+	_ = httpObj.Set("request", func(opts map[string]any) (map[string]any, error) {
 		return h.doHTTP(opts, LoginFlowTimeoutMs)
 	})
 	_ = ctx.Set("http", httpObj)

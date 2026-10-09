@@ -18,7 +18,7 @@ module.exports.settings = {
 };
 ```
 
-- init.js / tasks/*.js 也都能挂自己的 `module.exports.settings`,宿主按 settings.js → init.js → tasks 固定序合并(同名后者胜);handler.js/login/index.js 不参与族序(导出 settings = 拒装,见 [05](05-handler.md))
+- init.js / tasks/*.js 也都能挂自己的 `module.exports.settings`,宿主按 settings.js → init.js → tasks 固定序合并(同名槽拒装(报文件+槽名,冲突显式暴露不静默覆盖));handler.js/login/index.js 不参与族序(导出 settings = 拒装,见 [05](05-handler.md))
 - 声明在安装时被提取进库(declaration_json),语法错误拒绝安装
 
 ### 读取:`ctx.settings` 快照
