@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"time"
@@ -75,7 +74,7 @@ func settingsSnapshot(pkgs *plugin.Registry, pkgName string) map[string]any {
 	return effectiveSettings(decl, pkgs.SettingsOverrides(pkgName))
 }
 
-// hooksDeps 包运行时依赖(调度器与手动触发共用同一通道)
+// hooksDeps 包运行时依赖(调度器与手动触发共用同一通道;storage = ③ 直写打权威标,与桥/handler 同槽)
 func (a *App) hooksDeps(pkgName string) plugin.HooksDeps {
 	pkgs := a.AdminDeps.Packages
 	// 闸门在装配期定档(Build 注入;测试装配路径惰性兜底为进程级单例,避免"每次新 gate 恒满桶"限流失效)
@@ -83,11 +82,12 @@ func (a *App) hooksDeps(pkgName string) plugin.HooksDeps {
 	if gate == nil {
 		gate = sharedEvictGate()
 	}
+	storage := a.slotView(pkgName)
 	return plugin.HooksDeps{
 		PackageName: pkgName,
 		HTTP:        &httpExecutor{trMgr: a.trMgr},
 		Keys:        pkgs.Keys(),
-		Storage:     &kvStorage{db: a.St.DB(), ns: pkgName},
+		Storage:     storage,
 		Log:         hooksLog(pkgName),
 		// 插件定时任务主动失效上报:同一命令转发(限流闸门;仅失效不触发重试)
 		TransportEvict: gatedEvict(gate, evictForwarder(a.trMgr)),
@@ -228,28 +228,6 @@ func hooksLog(pkg string) func(level, msg string) {
 			log.Printf("plugin %s: info: %s", pkg, msg)
 		}
 	}
-}
-
-// kvStorage kv 表存储(与 upstream.dbStorage 同表同形;卸载不清理)
-type kvStorage struct {
-	db *sql.DB
-	ns string
-}
-
-func (s *kvStorage) Get(key string) (string, bool) {
-	var v string
-	err := s.db.QueryRow(`SELECT value FROM kv WHERE ns=? AND key=?`, s.ns, key).Scan(&v)
-	return v, err == nil
-}
-
-func (s *kvStorage) Set(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO kv(ns, key, value) VALUES(?,?,?)
-		ON CONFLICT(ns, key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`, s.ns, key, value)
-	return err
-}
-
-func (s *kvStorage) Delete(key string) {
-	_, _ = s.db.Exec(`DELETE FROM kv WHERE ns=? AND key=?`, s.ns, key)
 }
 
 // resolveOutboundTransport 出站传输解析:命名实例优先(不存在 = 报错);空 = direct → 任一非供给方回退

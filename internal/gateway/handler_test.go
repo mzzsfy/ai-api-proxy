@@ -141,7 +141,6 @@ func TestHandlerShell_BuildRequestFails(t *testing.T) {
 		t.Fatal("shell BuildRequest must fail")
 	}
 	_ = hp
-	fmt.Sprint()
 }
 
 // 场景: TestUpstream/ChatTest 分流(空壳必败,合成请求直入执行器)

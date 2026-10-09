@@ -19,15 +19,30 @@ func loginID(nowMs int64) string {
 
 // credsFor per-pkg ③ 权威槽(懒建;桥与 handler 引擎共用同实例)
 func (a *App) credsFor(pkg string) (*plugin.SlotStore, error) {
-	a.credsMu.Lock()
-	if a.credsShared == nil {
-		a.credsShared = newHandlerShared(a.St)
-	}
-	a.credsMu.Unlock()
 	if _, err := a.AdminDeps.Packages.GetPackage(pkg); err != nil {
 		return nil, err
 	}
-	return a.credsShared.storeFor(pkg), nil
+	return a.credsSharedView(pkg), nil
+}
+
+// credsSharedView 包 ③ 权威槽实例(桥写口用)
+func (a *App) credsSharedView(pkg string) *plugin.SlotStore {
+	a.credsMu.Lock()
+	defer a.credsMu.Unlock()
+	if a.credsShared == nil {
+		a.credsShared = newHandlerShared(a.St)
+	}
+	return a.credsShared.storeFor(pkg)
+}
+
+// slotView 包 ③ 权威槽视图(懒建;全部通道共用同实例)
+func (a *App) slotView(pkg string) plugin.StorageKV {
+	a.credsMu.Lock()
+	defer a.credsMu.Unlock()
+	if a.credsShared == nil {
+		a.credsShared = newHandlerShared(a.St)
+	}
+	return plugin.AuthoritativeStore{S: a.credsShared.storeFor(pkg)}
 }
 
 // Login login/index.js → Keys.Set(GUI 登录路径唯一落库通道)
