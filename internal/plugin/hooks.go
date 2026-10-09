@@ -417,7 +417,7 @@ func (h *HooksRuntime) HasExport(name string) bool { return h.handler(name) != n
 func (h *HooksRuntime) newCtx(budgetMs int64, at time.Time, tk *HooksTask, writeWindow string) *goja.Object {
 	ctx := h.vm.NewObject()
 	httpObj := h.vm.NewObject()
-	_ = httpObj.Set("run", func(opts map[string]any) (map[string]any, error) {
+	_ = httpObj.Set("request", func(opts map[string]any) (map[string]any, error) {
 		return h.doHTTP(opts, budgetMs)
 	})
 	_ = ctx.Set("http", httpObj)

@@ -46,7 +46,7 @@ module.exports = {
   handler: function (ctx) {
     log.info("ran by", ctx.task);          // "report-am" | "report-pm"
     var cfg = ctx.settings;                 // 参数快照(声明 ⊕ 用户覆盖)
-    ctx.http.run({ url: "https://example/api", method: "POST", body: "{}" });
+    ctx.http.request({ url: "https://example/api", method: "POST", body: "{}" });
   },
 };
 ```
@@ -70,7 +70,7 @@ module.exports = {
 // tasks/sync.js —— next 行必须同时导出 handler 与 next
 var state = 0;
 module.exports = {
-  handler: function (ctx) { state = ctx.http.run({ url: "https://example/poll" }).status; },
+  handler: function (ctx) { state = ctx.http.request({ url: "https://example/poll" }).status; },
   next: function (ctx) {
     if (state === 200) return null;                 // 收摊:链终止
     return util.now() + 30 * 60 * 1000;             // 30 分钟后再跑
@@ -87,7 +87,7 @@ module.exports = {
 
 | 字段 | 说明 | 可用性 |
 |---|---|---|
-| `ctx.http.run(req)` | 出站请求;`{url, method?, headers?, body?, timeoutMs?}` → `{status, headers, body}`;body >1MB 截断;timeoutMs 缺省 min(30s, 外层剩余) | 全部 hooks 钩子 |
+| `ctx.http.request(req)` | 出站请求(与 handler/login 同名同形态);`{url, method?, headers?, body?, timeoutMs?}` → `{status, headers, body}`;body >1MB 截断;timeoutMs 缺省 min(30s, 外层剩余) | 全部 hooks 钩子 |
 | `ctx.key` | 当前注入键 `{id, data}`(任务执行 = round-robin 选中的键);无键 undefined。**JS 只见宿主注入的一个键**,无按名取任意键 API(见 03) | 任务 |
 | `ctx.keys.set(data)` / `merge(patch)` | 任务窗:整体替换(或对象浅合并)当前键 data,原 data 自动备份进 prev——**仅任务执行挂载**(其余钩子 undefined——阉割即权限);写**立即持久化不随任务回滚** | 仅任务 |
 | `storage`(全局注入,非 ctx 成员) | 包级 KV `get/set/delete`;任务/init 执行**直写持久层**(非 handler 执行不做事务缓冲,写失败即该次操作失败不回滚;handler 执行才有事务归并,见 [05](05-handler.md)) | 全部 |
@@ -95,7 +95,7 @@ module.exports = {
 | `ctx.task` | 本次任务行名 | 仅任务 |
 | `ctx.cron.runAt` | 触发时刻 | 仅任务 |
 
-约束:**handler/next/onLoad 全部同步**。返回 Promise = 同步性违规报错;耗时长出站操作靠 `ctx.http.run` 的 timeoutMs 控制,不要 setTimeout。
+约束:**handler/next/onLoad 全部同步**。返回 Promise = 同步性违规报错;耗时长出站操作靠 `ctx.http.request` 的 timeoutMs 控制,不要 setTimeout。
 
 ## 六、可选项速查
 

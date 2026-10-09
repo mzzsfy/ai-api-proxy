@@ -103,7 +103,7 @@ module.exports.settings = {
 | | protocol | handler | hooks |
 |---|---|---|---|
 | 执行时机 | 每个请求热路径 | 每个请求热路径 | 定时/加载 |
-| 网络 | 无(host 执行唯一上游请求) | 有(ctx.http.request/open,可多次出站) | 有(ctx.http.run 限出站) |
+| 网络 | 无(host 执行唯一上游请求) | 有(ctx.http.request/open,可多次出站) | 有(ctx.http.request 限出站) |
 | 参数 | settings 声明(经 factory config 注入,见 §四) | ctx.params(同源合并) | settings 声明(经 ctx.settings 注入) |
 | 凭据 | util.key() 只读当前注入键 data | ctx.key 只读;动态凭据走 storage 槽(见 05) | ctx.keys.set/merge 写当前键 |
 

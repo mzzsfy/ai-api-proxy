@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
@@ -51,6 +52,10 @@ func loadJSPackage(t *testing.T) pipeline.Protocol {
 	protoSrc, err := os.ReadFile(filepath.Join(dir, "protocol.js"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// 素材库迁移检测:util.secret 机制已废除(键面统一 util.key());外部夹具未迁移前显式跳过
+	if strings.Contains(string(protoSrc), "util.secret") {
+		t.Skip("js-openai-full fixture still uses removed util.secret (pending plugins-repo migration to util.key)")
 	}
 	aap := zipBytes(t, manifest, map[string]string{"protocol.js": string(protoSrc)})
 	pkg, err := plugin.ParseAAP(aap)
