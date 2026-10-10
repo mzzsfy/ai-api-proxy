@@ -26,14 +26,13 @@ transports: []
 #  - name: socks-relay
 #    url: "socks5://user:pass@host:port"
 #
-# ── 插件化代理节点(aap 协议;会话亲和 + TTL 粘性,见 docs/ai-api-proxy/feat/aap-protocol.md)──
+# ── 插件化代理节点(aap 协议;会话亲和 + TTL 粘性)──
 #  - name: aap-out
 #    url: "aap://node.example:7000?token=YOUR_TOKEN"
 #    options:
 #      affinity_ttl: 86400         # 亲和 TTL 秒(默认 86400)
 #
-# ── IP 供给方传输(ipp+ 前缀;出口 IP 池管理,见 docs/ai-api-proxy/feat/ipprovider.md)──
-# ⚠ 当前 Validate 仅允许 aap 传输携带 options,下列 ipp+ 示例取消注释会启动失败(仅代码构造路径可用,见 sdk/docs/06-transports.md 第四节)
+# ── IP 供给方传输(ipp+ 前缀;出口 IP 池管理,实现见 internal/ipprovider)──
 #  - name: clash-out               # 既有 clash/mihomo 混合端口(单出口,不可轮换)
 #    url: "ipp+clash://clash"
 #    options:

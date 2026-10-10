@@ -20,7 +20,7 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 - **插件包(.aap,zip)**:三层插槽的可选实现集合——protocol(协议适配,模型行绑定包必须)/ filters(请求修改,串行);
   参数槽由包内族文件的 settings 片段统一声明(同名槽拒装)
 - **参数双层级**:插件参数(包级,一次配置)+ 模型行 params(行级稀疏覆盖,保存期白名单校验);密钥独立成包级 keys(util.key 直读,轮换立即生效)
-- **模型行 = {name, plugin, params, enabled}**:行名即模型名;唯一键 (name, plugin)——同名模型可跨协议插件复用
+- **模型行 = {name, plugin, params, enabled}**:行名即模型名;唯一键 (name, plugin)——同名模型可跨协议插件复用。实现上拆为模型组(plugin/params/enabled,组名前缀唯一)+ 组内成员(name/enabled,组内唯一)两层,等价保证该唯一键
 - **声明式单协议**:协议部件在 manifest 声明唯一协议槽(`openai-completions`|`anthropic-messages`)与可处理形态;
   入口协议或形态不符时路由直接 400 拒绝(逐行注明拒因),不做转换、不做兜底。管道权威格式 = 声明协议格式,无中间格式
 - **快速路径**:openai 入口 ∧ 内置协议工厂 ∧ 空 filter 链 → 字节直发(不重序列化)
@@ -42,8 +42,9 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 | builtin_dir | 内置插件目录(随分发的预置包;只补缺,不覆盖用户同名包) | `./builtin-plugins` |
 | history_retention_days | 请求历史保留天数(独立库 `history.db`;管理 GUI"请求历史"页;<0 永久保留,0 视为未配置) | 7 |
 | log_level | 日志级别(log/slog,按级别过滤;非法值拒绝启动) | info |
+| models_listing | `/v1/models` 列表模式:full(全路径)| short(短名,同名轮询)| both(全路径 ∪ 短名) | full |
 | pack_dir | 非空 = 只打包不服务:把上述两级目录打成 `<包名>.aap` 落到此目录 | 空(服务模式) |
-| transports | 命名传输实例(direct/http_proxy/socks5),请求载体 transport 槽按名引用 | direct |
+| transports | 命名传输实例,请求载体 transport 槽按名引用;url scheme 判型:direct(字面值)/ `http(s)://` / `socks5://` / `aap://`(代理节点)| `ipp+<kind>://`(出口 IP 供给方,见 internal/ipprovider) | direct |
 
 ## 插件开发
 
