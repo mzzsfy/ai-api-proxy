@@ -4,7 +4,7 @@ package subscribe
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -192,7 +192,7 @@ func (e *Engine) uninstallRenamed(ctx context.Context, source, keep string) {
 		}
 		if src, ok := e.Packages.PackageSource(name); ok && src == source {
 			if err := e.Packages.Delete(ctx, name); err != nil {
-				log.Printf("subscribe: uninstall renamed %s: %v (left for manual cleanup)", name, err)
+				slog.Warn("subscribe: uninstall renamed (left for manual cleanup)", "package", name, "err", err)
 			}
 		}
 	}

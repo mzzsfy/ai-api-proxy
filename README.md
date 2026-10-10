@@ -41,6 +41,7 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 | plugins_dir | 普通插件目录(裸 .aap 或含 manifest.json 的包目录)启动时自动导入(幂等) | `./plugins` |
 | builtin_dir | 内置插件目录(随分发的预置包;只补缺,不覆盖用户同名包) | `./builtin-plugins` |
 | history_retention_days | 请求历史保留天数(独立库 `history.db`;管理 GUI"请求历史"页;<0 永久保留,0 视为未配置) | 7 |
+| log_level | 日志级别(log/slog,按级别过滤;非法值拒绝启动) | info |
 | pack_dir | 非空 = 只打包不服务:把上述两级目录打成 `<包名>.aap` 落到此目录 | 空(服务模式) |
 | transports | 命名传输实例(direct/http_proxy/socks5),请求载体 transport 槽按名引用 | direct |
 

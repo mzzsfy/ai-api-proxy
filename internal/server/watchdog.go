@@ -4,7 +4,7 @@ package server
 import (
 	"context"
 	"os"
-	"log"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -52,17 +52,17 @@ func (w *Watchdog) Run(ctx context.Context) {
 			// 读取失败:跳过,不动 tripped(真实状态未知不误判回落)
 		case w.HardBytes > 0 && w.Independent && rss >= w.HardBytes:
 			// 硬限:进程退出交部署层 supervisor 拉起(库形态嵌入宿主不启用)
-			log.Printf("watchdog: RSS %d >= hard limit %d, exiting", rss, w.HardBytes)
+			slog.Error("watchdog: RSS over hard limit, exiting", "rss_bytes", rss, "hard_limit_bytes", w.HardBytes)
 			exitProcess(1)
 		case rss >= w.SoftBytes:
 			if !w.tripped.Swap(true) {
-				log.Printf("watchdog: RSS %d >= soft limit %d, dropping all handler pools and rejecting new requests", rss, w.SoftBytes)
+				slog.Warn("watchdog: RSS over soft limit, dropping all handler pools and rejecting new requests", "rss_bytes", rss, "soft_limit_bytes", w.SoftBytes)
 				w.Engines.SetRejectNew(true)
 				w.Engines.CloseAll() // 闲置全弃;在借不 Interrupt,随归还即弃
 			}
 		default:
 			if w.tripped.Swap(false) {
-				log.Printf("watchdog: RSS %d back under %d, handler pools reopen", rss, w.SoftBytes)
+				slog.Info("watchdog: RSS back under soft limit, handler pools reopen", "rss_bytes", rss, "soft_limit_bytes", w.SoftBytes)
 				w.Engines.SetRejectNew(false)
 			}
 		}

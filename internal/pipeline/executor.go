@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
@@ -104,7 +104,7 @@ func terminalResponse(pctx *PipelineContext, u Resolved, status int, body []byte
 	if em, ok := u.Protocol.(ErrorMapper); ok {
 		out, err := em.MapError(pctx, status, body)
 		if err != nil {
-			log.Printf("mapError %s failed (pass through): %v", u.Protocol.Name(), err)
+			slog.Warn("mapError failed (pass through)", "protocol", u.Protocol.Name(), "err", err)
 		} else if out != nil {
 			return &Response{Stream: false, Body: out, Status: status}
 		}
@@ -116,7 +116,7 @@ func terminalResponse(pctx *PipelineContext, u Resolved, status int, body []byte
 func (e *Executor) mapResponse(pctx *PipelineContext, u Resolved, intentStream bool, tresp *TransportResponse) (*Response, error) {
 	stream, warn := decideStream(u.Protocol, intentStream, tresp)
 	if warn {
-		log.Printf("stream dispatch: flag/ct mismatch, processing as actual (%s)", tresp.Headers["Content-Type"])
+		slog.Warn("stream dispatch: flag/ct mismatch, processing as actual", "content_type", tresp.Headers["Content-Type"])
 	}
 	if !stream {
 		body, err := u.Protocol.MapResponse(pctx, tresp.Body)
@@ -157,7 +157,7 @@ func (e *Executor) mapResponse(pctx *PipelineContext, u Resolved, intentStream b
 				mc, err := u.Filters[i].MapChunk(pctx, chunk)
 				if err != nil {
 					// 降级:进入修改链前的 chunk 原样透传(不丢帧)
-					log.Printf("filter %s mapChunk failed: %v", u.Filters[i].Name(), err)
+					slog.Warn("filter mapChunk failed (raw passthrough)", "filter", u.Filters[i].Name(), "err", err)
 					out <- ChunkItem{JSON: pre, RawPass: true}
 					chunk = nil
 					break

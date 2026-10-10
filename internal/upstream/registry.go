@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -180,7 +180,7 @@ func (r *Registry) loadGroups(ctx context.Context) error {
 			return fmt.Errorf("scan group: %w", err)
 		}
 		if err := json.Unmarshal([]byte(paramsRaw), &g.Params); err != nil {
-			log.Printf("load group %d %s: bad params_json (treated as empty): %v", g.ID, g.Prefix, err)
+			slog.Warn("load group: bad params_json (treated as empty)", "id", g.ID, "group", g.Prefix, "err", err)
 		}
 		r.byGroup[g.ID] = g
 	}
@@ -812,7 +812,7 @@ func (r *Registry) instantiateParts(g *Group) (*resolvedParts, error) {
 	// 请求期:未知键剥离不阻断流量(剥离记日志,残留键来自包升级删槽)
 	for k := range g.Params {
 		if _, known := decl[k]; !known {
-			log.Printf("params: group %s: unknown param %q stripped (not declared by package %s)", g.Prefix, k, g.Plugin)
+			slog.Warn("params: unknown param stripped (not declared by package)", "group", g.Prefix, "param", k, "plugin", g.Plugin)
 		}
 	}
 	merged, err := plugin.ResolveParams(decl, pluginVals, g.Params, plugin.ParamRequest)

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -127,8 +127,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	sw := &statusWriter{ResponseWriter: w, code: &status}
 	w = sw
 	defer func() {
-		log.Printf("request %s %s %s status=%d duration=%s%s",
-			r.Method, r.URL.Path, detail, status, time.Since(start).Round(time.Millisecond), levelMark(status))
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"detail", detail,
+			"status", status,
+			"duration", time.Since(start).Round(time.Millisecond),
+			"mark", levelMark(status))
 		// 已知局限:panic 请求(recoverMW 兜底前)状态捕获不到,历史与日志同记默认值 200
 		g.recordHistory(r, model, rowName, status, time.Since(start), reqBody, sw)
 	}()
@@ -170,7 +175,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	rowName = cand.FullName()
 	resolved, release, err := g.Registry.Resolve(cand.Group)
 	if err != nil {
-		log.Printf("resolve %s: %v", cand.FullName(), err)
+		slog.Warn("resolve group", "group", cand.FullName(), "err", err)
 		status = http.StatusBadGateway
 		detail += " row=" + cand.FullName()
 		// 配置类失败(required 槽缺失)注明槽名,便于管理员定位;其余细节只进日志

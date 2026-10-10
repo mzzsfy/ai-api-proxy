@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -106,7 +106,7 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 	for name, p := range providers {
 		if err := p.Close(); err != nil {
-			log.Printf("transport %s: provider close: %v", name, err)
+			slog.Warn("transport: provider close", "transport", name, "err", err)
 		}
 	}
 }

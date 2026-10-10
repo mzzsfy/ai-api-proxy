@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -51,7 +51,7 @@ func packAll(cfg *Config) error {
 		return err
 	}
 	for _, p := range out {
-		log.Printf("packed %s", p)
+		slog.Info("packed", "path", p)
 	}
 	return nil
 }
@@ -204,7 +204,7 @@ func Build(cfg *Config) (*App, error) {
 	// 请求历史:独立库;打开失败降级为不记录(旁路诊断,不阻塞主服务)
 	hist, histErr := history.New(cfg.DataDir + "/history.db")
 	if histErr != nil {
-		log.Printf("history open: %v (recording disabled)", histErr)
+		slog.Warn("history open (recording disabled)", "err", histErr)
 	}
 	shared := newHandlerShared(st)
 	reg := upstream.NewRegistry(st.DB(), pkgs)
@@ -240,7 +240,7 @@ func Build(cfg *Config) (*App, error) {
 				Transport: func(name string) (pipeline.Transport, error) {
 					return resolveOutboundTransport(trMgr, name)
 				},
-				Log:       func(level, msg string) { log.Printf("[handler %s] %s %s", pkg.Manifest.Name, level, msg) },
+				Log: hooksLog(pkg.Manifest.Name),
 				MaxBorrow: cfg.HandlerVMMaxBorrow,
 			}
 		}),
@@ -253,8 +253,8 @@ func Build(cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("admin: %w", err)
 	}
 	if randomPass != "" {
-		// 无配置口令:打印一次,重启重新生成
-		log.Printf("generated admin password (print once): %s", randomPass)
+		// 无配置口令:直写 stderr 打印一次(绕过日志级别过滤,重启重新生成)
+		fmt.Fprintf(os.Stderr, "generated admin password (print once): %s\n", randomPass)
 	}
 	// 订阅同步引擎(工作区随数据目录;URL 校验默认公网防线)
 	subEngine := &subscribe.Engine{
@@ -423,7 +423,7 @@ func recoverMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("panic in %s %s: %v", r.Method, r.URL.Path, rec)
+				slog.Error("panic in handler", "method", r.Method, "path", r.URL.Path, "panic", rec)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"error":{"type":"api_error","message":"internal error"}}`))
@@ -599,6 +599,7 @@ func evictForwarder(trMgr *transport.Manager) func(ctx context.Context, name, sc
 
 // Run 启动 HTTP 服务,阻塞至退出信号;优雅排空(30s 上限);PackDir 非空时只打包
 func Run(cfg *Config) error {
+	applyLogLevel(cfg)
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
@@ -621,9 +622,9 @@ func Run(cfg *Config) error {
 			app.wdCancel = wdCancel
 			app.credsMu.Unlock()
 			go wd.Run(wdCtx)
-			log.Printf("watchdog: soft=%dMiB hard=%dMiB (%d%% of %dMiB)", soft>>20, soft*3/2>>20, cfg.HandlerRSSSoftPercent, total>>20)
+			slog.Info("watchdog enabled", "soft_mib", soft>>20, "hard_mib", soft*3/2>>20, "soft_percent", cfg.HandlerRSSSoftPercent, "total_mib", total>>20)
 		} else {
-			log.Printf("watchdog: total memory unknown, disabled")
+			slog.Warn("watchdog: total memory unknown, disabled")
 		}
 	}
 	srv := &http.Server{
@@ -675,8 +676,12 @@ func Run(cfg *Config) error {
 			}
 		}
 	}()
-	log.Printf("ai-api-proxy listening on %s | packages: %d | groups: %d | entries: POST /v1/chat/completions, POST /v1/messages, GET /v1/models | admin: /admin",
-		cfg.Listen, len(app.AdminDeps.Packages.ListPackages()), len(app.Registry.ListGroups()))
+	slog.Info("ai-api-proxy listening",
+		"listen", cfg.Listen,
+		"packages", len(app.AdminDeps.Packages.ListPackages()),
+		"groups", len(app.Registry.ListGroups()),
+		"entries", "POST /v1/chat/completions, POST /v1/messages, GET /v1/models",
+		"admin", "/admin")
 	select {
 	case <-sigCh:
 	case err = <-errCh:
@@ -711,11 +716,11 @@ func cleanupHistory(app *App) {
 	defer cancel()
 	n, err := app.History.Cleanup(ctx, app.Cfg.HistoryRetentionDays)
 	if err != nil {
-		log.Printf("history cleanup: %v", err)
+		slog.Warn("history cleanup", "err", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("history cleanup: removed %d entries", n)
+		slog.Info("history cleanup: removed entries", "count", n)
 	}
 }
 
@@ -779,7 +784,7 @@ func importPluginDirs(ctx context.Context, pkgs *plugin.Registry, cfg *Config) e
 		}
 		if err := installSource(ctx, pkgs, s.path, seen); err != nil {
 			// 可选目录语义:坏包/冲突告警跳过,不阻塞网关启动
-			log.Printf("plugins dir: install %s: %v (skipped)", s.path, err)
+			slog.Warn("plugins dir: install skipped", "source", s.path, "err", err)
 		}
 	}
 	return nil
@@ -809,7 +814,7 @@ func installSource(ctx context.Context, pkgs *plugin.Registry, src string, seen 
 		return err
 	}
 	if prev, dup := seen[pkg.Manifest.Name]; dup {
-		log.Printf("plugins dir: duplicate package name %q in %s and %s (later source wins)", pkg.Manifest.Name, prev, src)
+		slog.Warn("plugins dir: duplicate package name (later source wins)", "package", pkg.Manifest.Name, "previous", prev, "source", src)
 	}
 	seen[pkg.Manifest.Name] = src
 	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil {
@@ -821,7 +826,7 @@ func installSource(ctx context.Context, pkgs *plugin.Registry, src string, seen 
 		return err
 	}
 	if existing, err := pkgs.GetPackage(pkg.Manifest.Name); err == nil && existing.Revision > 1 {
-		log.Printf("plugins dir: upgraded %s from %s to revision %d", pkg.Manifest.Name, src, existing.Revision)
+		slog.Info("plugins dir: upgraded package", "package", pkg.Manifest.Name, "source", src, "revision", existing.Revision)
 	}
 	return nil
 }
@@ -831,23 +836,23 @@ func persistSnapshot(app *App, now time.Time) {
 	row := app.Recorder.Take(now.Add(-time.Minute))
 	upJSON, err := row.UpstreamJSON()
 	if err != nil {
-		log.Printf("snapshot by_upstream: %v", err)
+		slog.Warn("snapshot by_upstream", "err", err)
 		return
 	}
 	tgJSON, err := row.TargetJSON()
 	if err != nil {
-		log.Printf("snapshot by_target: %v", err)
+		slog.Warn("snapshot by_target", "err", err)
 		return
 	}
 	pkgJSON, err := row.PackageJSON()
 	if err != nil {
-		log.Printf("snapshot by_package: %v", err)
+		slog.Warn("snapshot by_package", "err", err)
 		return
 	}
 	_, err = app.St.DB().Exec(`INSERT OR REPLACE INTO metrics_minutely
 		(minute, requests, errors, max_concurrent, by_upstream_json, by_target_json, by_package_json) VALUES(?,?,?,?,?,?,?)`,
 		row.Minute, row.Requests, row.Errors, row.MaxConc, upJSON, tgJSON, pkgJSON)
 	if err != nil {
-		log.Printf("snapshot persist: %v", err)
+		slog.Warn("snapshot persist", "err", err)
 	}
 }

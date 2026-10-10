@@ -3,7 +3,7 @@ package server
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,7 +92,7 @@ func releaseExample(path string) error {
 	if err := os.WriteFile(path, configexample.Example, 0o600); err != nil {
 		return fmt.Errorf("release example config %s: %w", path, err)
 	}
-	log.Printf("config %s not found: released example config (edit api_keys before production use)", path)
+	slog.Info("config not found: released example config (edit api_keys before production use)", "path", path)
 	return nil
 }
 
@@ -187,6 +187,10 @@ func (c *Config) Validate() error {
 	case "", "full", "short", "both": // 空 = 未配置(Load 会取默认 full;直接构造 Config 的调用方合法)
 	default:
 		return fmt.Errorf("models_listing must be full|short|both, got %q", c.ModelsListing)
+	}
+	if _, ok := logLevels[c.LogLevel]; !ok && c.LogLevel != "" {
+		// 空 = 未配置(Load 会取默认 info;直接构造 Config 的调用方合法)
+		return fmt.Errorf("log_level must be debug|info|warn|error, got %q", c.LogLevel)
 	}
 	for i, t := range c.Transports {
 		if t.Name == "" {
@@ -283,4 +287,25 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// logLevels 合法日志级别名 → slog 级别(Validate 与 parseLogLevel 共用的单一来源)
+var logLevels = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// parseLogLevel 日志级别名 → slog 级别;未知回退 info(Validate 负责拒绝非法配置)
+func parseLogLevel(name string) slog.Level {
+	if lv, ok := logLevels[name]; ok {
+		return lv
+	}
+	return slog.LevelInfo
+}
+
+// applyLogLevel 把配置级别挂到 log/slog 默认桥,使 slog 输出按级别过滤
+func applyLogLevel(cfg *Config) {
+	slog.SetLogLoggerLevel(parseLogLevel(cfg.LogLevel))
 }

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -485,5 +485,5 @@ func vmBytes(vm *goja.Runtime, b []byte) goja.Value { return vm.ToValue(string(b
 
 // logHookTimeout hook 超时可观测(池自动补建)
 func logHookTimeout(part, hook string) {
-	log.Printf("js hook timeout: %s/%s instance discarded", part, hook)
+	slog.Warn("js hook timeout: instance discarded", "part", part, "hook", hook)
 }

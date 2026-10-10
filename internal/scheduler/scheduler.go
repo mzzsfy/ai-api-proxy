@@ -2,7 +2,7 @@
 package scheduler
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -81,7 +81,7 @@ func (s *Scheduler) Refresh() {
 			}
 			sched, err := plugin.CronSchedule(tk.Cron)
 			if err != nil {
-				log.Printf("scheduler: package %s task %s: %v", name, tk.Name, err)
+				slog.Warn("scheduler: task cron parse failed, skipped", "package", name, "task", tk.Name, "err", err)
 				continue
 			}
 			s.scheds[name+"/"+tk.Name] = cronEntry{pkgName: name, task: tk, sched: sched}
@@ -122,7 +122,7 @@ func (s *Scheduler) tick(due time.Time) {
 	s.mu.Lock()
 	for key, e := range s.scheds {
 		if s.busy[key] {
-			log.Printf("scheduler: %s skipped (previous run in progress)", key)
+			slog.Warn("scheduler: skipped (previous run in progress)", "task", key)
 			continue
 		}
 		n := e.sched.Next(window)
@@ -144,7 +144,7 @@ func (s *Scheduler) tick(due time.Time) {
 			s.sem <- struct{}{}
 			defer func() { <-s.sem }()
 			if err := s.run(d.e.pkgName, d.e.task, due, ""); err != nil {
-				log.Printf("scheduler: %s: %v", d.key, err)
+				slog.Warn("scheduler: task failed", "task", d.key, "err", err)
 			}
 		}()
 	}

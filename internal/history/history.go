@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -104,7 +104,7 @@ func (s *Store) migrate() error {
 // Record 同步落一条历史(超限 body 截断;失败仅日志,不影响请求路径)
 func (s *Store) Record(e Entry) {
 	if _, err := s.insert(e, time.Now().UnixMilli()); err != nil {
-		log.Printf("history record: %v", err)
+		slog.Warn("history record", "err", err)
 	}
 }
 

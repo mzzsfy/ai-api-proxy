@@ -1,6 +1,8 @@
 package server
 
 import (
+	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +134,75 @@ func TestValidate_TransportOptionsWhitelist(t *testing.T) {
 			t.Fatalf("bad case %d should fail", i)
 		}
 	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	// Given log_level 字符串 When parseLogLevel Then 映射到对应 slog 级别,未知回退 info
+	cases := []struct {
+		in   string
+		want slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"info", slog.LevelInfo},
+		{"warn", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"", slog.LevelInfo},
+		{"bogus", slog.LevelInfo},
+	}
+	for _, tc := range cases {
+		if got := parseLogLevel(tc.in); got != tc.want {
+			t.Errorf("parseLogLevel(%q) = %v; want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestValidate_LogLevel(t *testing.T) {
+	// Given 非法 log_level When Validate Then 拒绝;合法或空 Then 通过
+	cfg := &Config{APIKeys: []string{"k"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty log_level must be allowed: %v", err)
+	}
+	cfg.LogLevel = "warn"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legal log_level rejected: %v", err)
+	}
+	cfg.LogLevel = "bogus"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("bogus log_level must be refused")
+	}
+}
+
+func TestApplyLogLevel_SuppressesInfo(t *testing.T) {
+	// Given 级别 warn When slog.Info 输出 Then 不落日志;When slog.Warn Then 落日志
+	prev := log.Writer()
+	log.SetOutput(&sink{})
+	t.Cleanup(func() {
+		log.SetOutput(prev)
+		slog.SetLogLoggerLevel(slog.LevelInfo)
+	})
+	applyLogLevel(&Config{LogLevel: "warn"})
+	slog.Info("should-not-appear")
+	if sinkString := sinkText(); strings.Contains(sinkString, "should-not-appear") {
+		t.Fatalf("info log leaked at warn level: %q", sinkString)
+	}
+	slog.Warn("should-appear")
+	if sinkString := sinkText(); !strings.Contains(sinkString, "should-appear") {
+		t.Fatalf("warn log dropped at warn level: %q", sinkString)
+	}
+}
+
+// sinkBuffer 日志输出捕获缓冲
+var sinkBuffer strings.Builder
+
+// sink 捕获 log/slog 默认输出的 io.Writer
+type sink struct{}
+
+func (sink) Write(p []byte) (int, error) { return sinkBuffer.Write(p) }
+
+// sinkText 取捕获文本并清空,供后续断言
+func sinkText() string {
+	defer func() { sinkBuffer.Reset() }()
+	return sinkBuffer.String()
 }
 
 // yamlNode 测试辅助:map → yaml.Node

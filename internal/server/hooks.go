@@ -4,7 +4,7 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/admin"
@@ -163,11 +163,11 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		}
 		rt, err := plugin.LoadInit(pkg, app.hooksDeps(pkg.Manifest.Name), settingsSnapshot(pkgs, pkg.Manifest.Name))
 		if err != nil {
-			log.Printf("hooks: %s: load: %v", pkg.Manifest.Name, err)
+			slog.Warn("hooks: load failed", "package", pkg.Manifest.Name, "err", err)
 			return
 		}
 		if err := rt.RunOnLoad(); err != nil {
-			log.Printf("hooks: %s: onLoad: %v", pkg.Manifest.Name, err)
+			slog.Warn("hooks: onLoad failed", "package", pkg.Manifest.Name, "err", err)
 		}
 	}
 	// run 单次任务执行;keyID 非空 = 单键(逐键调度的最小单元),空 = 键池逐键循环(0 键 = 跳过)
@@ -202,7 +202,7 @@ func wireHooks(app *App) *scheduler.Scheduler {
 		var firstErr error
 		for _, e := range keys {
 			if err := runOne(&plugin.KeyRef{ID: e.ID, Data: e.Data}); err != nil {
-				log.Printf("hooks: %s: task %s key %s: %v", pkgName, task.Name, e.ID, err)
+				slog.Warn("hooks: task failed", "package", pkgName, "task", task.Name, "key", e.ID, "err", err)
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -221,11 +221,11 @@ func hooksLog(pkg string) func(level, msg string) {
 	return func(level, msg string) {
 		switch level {
 		case "error":
-			log.Printf("plugin %s: %s", pkg, msg)
+			slog.Error("plugin", "package", pkg, "msg", msg)
 		case "warn":
-			log.Printf("plugin %s: warn: %s", pkg, msg)
+			slog.Warn("plugin", "package", pkg, "msg", msg)
 		default:
-			log.Printf("plugin %s: info: %s", pkg, msg)
+			slog.Info("plugin", "package", pkg, "msg", msg)
 		}
 	}
 }
