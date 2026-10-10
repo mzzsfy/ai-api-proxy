@@ -444,6 +444,26 @@ func TestSave_PersistAndReload(t *testing.T) {
 	}
 }
 
+func TestSaveMember_Update_NoOrderDuplicate(t *testing.T) {
+	// Given 已有成员 When SaveMember 更新(启停切换)Then ListMembers 恒 1 条(内存 order 不重复追加)
+	pkgs, reg := testEnv(t)
+	installBuiltinLikePkg(t, pkgs, "demo")
+	g := mustGroup(t, reg, "demo", "demo", nil)
+	m := mustMember(t, reg, g.ID, "m", true)
+	for i := 0; i < 3; i++ {
+		if err := reg.SaveMember(context.Background(), &Member{ID: m.ID, GroupID: g.ID, Name: "m", Enabled: false}); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.SaveMember(context.Background(), &Member{ID: m.ID, GroupID: g.ID, Name: "m", Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mems := reg.ListMembers(g.ID)
+	if len(mems) != 1 {
+		t.Fatalf("更新 6 次后成员应为 1 条,得到 %d: %+v", len(mems), mems)
+	}
+}
+
 func TestDeleteGroup_CascadesMembers(t *testing.T) {
 	// Given 组含成员 When DeleteGroup Then 组与成员同灭
 	pkgs, reg := testEnv(t)

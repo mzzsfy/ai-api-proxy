@@ -205,10 +205,13 @@ func (r *Registry) loadMembers(ctx context.Context) error {
 	return rows.Err()
 }
 
-// indexMember 成员入索引(调用方持写锁)
+// indexMember 成员入索引(调用方持写锁);已跟踪的成员只覆写条目,不重复追加 order
 func (r *Registry) indexMember(m *Member) {
+	_, tracked := r.byMember[m.ID]
 	r.byMember[m.ID] = m
-	r.memberOrder[m.GroupID] = append(r.memberOrder[m.GroupID], m.ID)
+	if !tracked {
+		r.memberOrder[m.GroupID] = append(r.memberOrder[m.GroupID], m.ID)
+	}
 }
 
 // ValidateGroup 组保存期校验(前缀/插件必填;插件存在且含协议;params 声明槽白名单)
