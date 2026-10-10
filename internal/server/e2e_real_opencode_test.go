@@ -80,11 +80,12 @@ func opencodeTestBaseURL() string {
 	return "https://openrouter.ai/api"
 }
 
-// newOpencodeFixture 安装 opencode 包并建 OpenRouter 模型行(v2:连接=包参数,密钥=包级 keys)
+// newOpencodeFixture 安装 opencode 包并建模型行(v2:连接=包参数,密钥=包级 keys);
+// 真实网络:推理模型延迟可达数十秒,客户端超时按 e2e_groups 约定放宽
 func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 	t.Helper()
 	manifest, src := mustOpencodeFiles(t)
-	f := newFourGroups(t)
+	f := newFourGroupsWith(t, 90*time.Second)
 	ctx := context.Background()
 	if err := f.app.AdminDeps.Packages.Install(ctx, aapZip(t, manifest, map[string]string{"protocol.js": src}), ""); err != nil {
 		t.Fatalf("install opencode pkg: %v", err)
@@ -93,7 +94,7 @@ func newOpencodeFixture(t *testing.T, apiKey, model string) *fourGroupsFixture {
 		t.Fatalf("merge opencode key: %v", err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
-		"base_url": "https://openrouter.ai/api"}}); err != nil {
+		"base_url": opencodeTestBaseURL()}}); err != nil {
 		t.Fatalf("put opencode params: %v", err)
 	}
 	g := &upstream.Group{Prefix: "opencode", Plugin: "opencode", Enabled: true}
@@ -146,40 +147,20 @@ func TestRealOpencode_ChatStream(t *testing.T) {
 	}
 }
 
-func TestRealOpencode_MessageNonStream(t *testing.T) {
-	// When anthropic 入口(上游 chat 形态,态适配聚合)Then message JSON + text 含 pong
+func TestRealOpencode_MessageFormRejected(t *testing.T) {
+	// Given opencode 包声明 openai-completions(声明式单协议,不跨协议转换)
+	// When anthropic 入口 /v1/messages 打该包 Then 400 拒绝且拒因含声明协议(锁定现行契约)
 	key, model := opencodeTestEnv(t)
 	f := newOpencodeFixture(t, key, model)
 	payload := fmt.Sprintf(`{"model":%q,"max_tokens":32,"stream":false,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`, model)
 	got, body := f.post(t, "/v1/messages", map[string]string{
 		"x-api-key": "sk-test", "anthropic-version": "2023-06-01", "Content-Type": "application/json",
 	}, payload)
-	if got != http.StatusOK {
-		t.Fatalf("status %d body: %s", got, body)
+	if got != http.StatusBadRequest {
+		t.Fatalf("期望声明式单协议 400 拒绝,得到 %d body: %s", got, body)
 	}
-	if !strings.Contains(body, `"type":"message"`) || !strings.Contains(body, "pong") {
-		t.Fatalf("message body: %s", body)
-	}
-}
-
-func TestRealOpencode_MessageStream(t *testing.T) {
-	// When anthropic 入口流式 Then anthropic SSE 事件序列完整
-	key, model := opencodeTestEnv(t)
-	f := newOpencodeFixture(t, key, model)
-	payload := fmt.Sprintf(`{"model":%q,"max_tokens":32,"stream":true,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`, model)
-	got, body := f.post(t, "/v1/messages", map[string]string{
-		"x-api-key": "sk-test", "anthropic-version": "2023-06-01", "Content-Type": "application/json",
-	}, payload)
-	if got != http.StatusOK {
-		t.Fatalf("status %d body: %s", got, body)
-	}
-	for _, want := range []string{"message_start", "content_block_delta", "message_stop"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("missing %s: %q", want, body)
-		}
-	}
-	if strings.Contains(body, "[DONE]") {
-		t.Fatal("anthropic stream must not emit [DONE]")
+	if !strings.Contains(body, "openai-completions") {
+		t.Fatalf("拒因应含声明协议,得到 %s", body)
 	}
 }
 
@@ -233,7 +214,7 @@ func TestRealOpencode_KeyPoolProbes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := f.app.AdminDeps.Packages.Settings().Put("opencode", plugin.PutInput{Config: map[string]any{
-		"base_url": "https://openrouter.ai/api"}}); err != nil {
+		"base_url": opencodeTestBaseURL()}}); err != nil {
 		t.Fatal(err)
 	}
 	// 组一次性建好,成员逐 key 命名(组内短名唯一)
