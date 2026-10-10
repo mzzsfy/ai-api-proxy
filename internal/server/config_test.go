@@ -110,11 +110,12 @@ func TestValidate_TransportRules(t *testing.T) {
 }
 
 func TestValidate_TransportOptionsWhitelist(t *testing.T) {
-	// Given options 白名单规则 When Validate Then 仅 aap 允许 affinity_ttl
+	// Given options 白名单规则 When Validate Then aap 仅 affinity_ttl,ipp+ 任意键,其余必须空
 	base := &Config{APIKeys: []string{"k"}}
 	good := []TransportCfg{
 		{Name: "a", URL: "aap://h:1?token=t", Options: yamlNode(t, map[string]any{"affinity_ttl": 3600})},
 		{Name: "b", URL: "direct"},
+		{Name: "c", URL: "ipp+clash://clash", Options: yamlNode(t, map[string]any{"type": "http_proxy", "url": "http://127.0.0.1:6654"})},
 	}
 	for i, tc := range good {
 		cfg := *base
@@ -125,7 +126,8 @@ func TestValidate_TransportOptionsWhitelist(t *testing.T) {
 	}
 	bad := []TransportCfg{
 		{Name: "c", URL: "aap://h:1?token=t", Options: yamlNode(t, map[string]any{"unknown": 1})},
-		{Name: "d", URL: "direct", Options: yamlNode(t, map[string]any{"x": 1})}, // 非 aap 有 options
+		{Name: "d", URL: "direct", Options: yamlNode(t, map[string]any{"x": 1})}, // 非 aap/ipp+ 有 options
+		{Name: "e", URL: "http://h:1", Options: yamlNode(t, map[string]any{"x": 1})},
 	}
 	for i, tc := range bad {
 		cfg := *base

@@ -24,7 +24,7 @@ func yamlUnmarshal(node *yaml.Node, target any) error {
 type TransportCfg struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url"` // scheme 判型:direct(字面值)|socks5://|http://|https://|aap://|ipp+<kind>://
-	// Options 供给方私有配置(仅 aap:affinity_ttl;其余 scheme 必须为空)
+	// Options 供给方私有配置(aap 仅 affinity_ttl;ipp+ 键由供给方定义;其余 scheme 必须为空)
 	Options yaml.Node `yaml:"options"`
 }
 
@@ -243,7 +243,7 @@ func validateTransportURL(name, raw string) error {
 	}
 }
 
-// validateTransportOptions options 白名单:仅 aap 允许 affinity_ttl,其余必须为空
+// validateTransportOptions options 白名单:aap 仅 affinity_ttl,ipp+ 任意键(供给方构建期严格解码),其余必须为空
 func validateTransportOptions(name, raw string, node yaml.Node) error {
 	if node.Kind == 0 {
 		return nil
@@ -252,9 +252,12 @@ func validateTransportOptions(name, raw string, node yaml.Node) error {
 	if err := node.Decode(&opts); err != nil {
 		return fmt.Errorf("transports[%s].options: %w", name, err)
 	}
+	if strings.HasPrefix(raw, "ipp+") {
+		return nil
+	}
 	if !strings.HasPrefix(raw, "aap://") {
 		if len(opts) > 0 {
-			return fmt.Errorf("transports[%s]: 仅 aap 传输支持 options", name)
+			return fmt.Errorf("transports[%s]: 仅 aap 与 ipp+ 传输支持 options", name)
 		}
 		return nil
 	}

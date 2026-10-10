@@ -8,7 +8,7 @@
 transports:                    # 列表;每项 = 一个命名实例
   - name: my-proxy             # 必填;实例名,上游按名引用
     url: "..."                 # 判型见下表
-    options: {}                # 可选;仅 aap 允许 affinity_ttl,其余 scheme 必须为空
+    options: {}                # 可选;aap 仅允许 affinity_ttl,ipp+ 键由供给方定义,其余 scheme 必须为空
 ```
 
 ### url scheme 判型表
@@ -26,7 +26,7 @@ transports:                    # 列表;每项 = 一个命名实例
 - 非 `direct` 的 url 必须含 `://` 且 scheme 后非空,否则拒绝启动
 - `aap://` 的 url 必须含 `token=` 且 token 长度 1..255
 - `ipp+<kind>://` 的 kind 须已注册(未注册 = 缺构建支持),否则拒绝启动
-- options 白名单:仅 `aap://` 允许携带 `affinity_ttl`;其他 scheme 带 options、或 aap 带未知键,均拒绝启动
+- options 白名单:`aap://` 仅允许 `affinity_ttl`;`ipp+<kind>` 允许任意键(内容在供给方构建期严格解码,未知键拒绝);其他 scheme 带 options 拒绝启动
 - `direct` 实例无需声明——运行时保证名为 `direct` 的默认实例必然存在;显式声明同形体亦合法
 - 实例名不可重复;启动期全部构建,任一失败整体拒绝启动并级联关闭已建供给方
 
@@ -87,8 +87,6 @@ transports:
 节点须实现 aap 协议:握手(校验 token)→ TUNNEL(ttl/session_key/exclude/目标地址;rep 应答含 lease_id 与 expires)→ 裸字节双向流;可选实现 A3 evict。
 
 ## 四、ipp+ 供给方传输
-
-> ⚠ 现状警示:`Validate` 当前只允许 aap 传输携带 options(见第六节"仅 aap 传输支持 options"),因此**下列 ipp+ 示例配置经 config.yaml 启动会被拒绝**。ipp+ 的 options 仅代码构造路径(`TransportDef.ProviderCfg.Options`)可用;待校验放宽后本节示例即恢复正常用法。
 
 `ipp+<kind>://<参数>` 接入出口 IP 供给方。kind 经注册表静态注册,当前内置:
 
@@ -155,7 +153,7 @@ transports:
 | `transports[<name>]: aap url 须含 token` | `aap://` 缺 `token=` |
 | `transports[<name>]: aap token 长度须 1..255` | token 为空或超 255 字节 |
 | `transports[<name>]: provider "<kind>" not registered(缺构建标签或未注册)` | `ipp+<kind>` 未注册 |
-| `transports[<name>]: 仅 aap 传输支持 options` | 非 aap 传输带 options |
+| `transports[<name>]: 仅 aap 与 ipp+ 传输支持 options` | direct/http/socks5 传输带 options(ipp+ options 内容在供给方构建期严格校验) |
 | `transports[<name>]: unknown aap option "<k>"` | aap options 出现 affinity_ttl 以外的键 |
 | `aap <name>: affinity_ttl 须 ≥0` | 负值 TTL(构建期) |
 | `ipp_clash <name>: type 须为 http_proxy|socks5` | type 非法 |
@@ -165,7 +163,7 @@ transports:
 | `transport "<n>" not found` | 上游引用了未声明的实例名(请求期,502) |
 | options 未知字段报错 | options 经供给方结构体严格解码,未知键拒绝 |
 
-注意:options 的供给方级校验(clash/remote 的 type/url/base 等)发生在实例构建期——启动即失败,不是运行期。但 config.yaml 路径下这些错误**当前不可达**:更早的 `Validate` 已因"仅 aap 传输支持 options"拒绝带 options 的 ipp+ 传输;下表 ipp_clash/ipp_remote 各条仅在绕过 `Validate` 的代码构造路径出现。
+注意:options 的供给方级校验(ipp_clash/ipp_remote 的 type/url/base 等)发生在实例构建期——启动即失败,不是运行期。
 
 ## 七、实现索引
 
@@ -174,7 +172,7 @@ transports:
 - internal/server/config.go:24 `TransportCfg` 结构(name/url/options)
 - internal/server/config.go:195-206 transports 校验入口(name 必填、url、options 三段)
 - internal/server/config.go:210-244 `validateTransportURL`:direct 精确匹配、scheme 白名单、aap token 必含与 1..255、ipp+<kind> 注册校验
-- internal/server/config.go:247-267 `validateTransportOptions`:仅 aap 允许 affinity_ttl,其余 scheme 必须为空
+- internal/server/config.go:247-267 `validateTransportOptions`:aap 仅 affinity_ttl,ipp+ 任意键,其余 scheme 必须为空
 - internal/transport/transport.go:57-60 `direct` 默认实例必然存在
 - internal/transport/transport.go:172-236 `build`:各 scheme 构造;aap/ipp+ 走 ipprovider.Create;ipp+ 参数段拆 kind,`//` 后内容原样传入 ProviderCfg.URL
 - internal/transport/transport.go:255-261 `sessionKey`:sha256(apiKey+NUL+model) 前 16 字节;model 空退化
