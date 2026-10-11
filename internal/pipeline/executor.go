@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/streamct"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
 )
 
@@ -214,37 +215,9 @@ func decideStream(p Protocol, intentStream bool, tresp *TransportResponse) (stre
 	return intentStream, false
 }
 
-// containsStreamCT Content-Type 是否事件流
+// containsStreamCT Content-Type 是否 SSE
 func containsStreamCT(ct string) bool {
-	for _, part := range splitSemi(ct) {
-		if trimSpace(part) == "text/event-stream" {
-			return true
-		}
-	}
-	return false
-}
-
-func splitSemi(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ';' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	out = append(out, s[start:])
-	return out
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
+	return streamct.IsSSE(ct)
 }
 
 // sseFrameJSON 帧 → mapEvent 入参形态 {"event": string, "data": string}

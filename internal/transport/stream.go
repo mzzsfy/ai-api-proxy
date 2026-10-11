@@ -7,11 +7,27 @@ import (
 	"strings"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/streamct"
 )
+
+// IsSSECT 判断 Content-Type 是否为合法 SSE media type。
+func IsSSECT(ct string) bool {
+	return streamct.IsSSE(ct)
+}
+
+// IsEventStreamCT 判断 Content-Type 是否为 AWS EventStream media type。
+func IsEventStreamCT(ct string) bool {
+	return streamct.IsEventStream(ct)
+}
+
+// IsStreamCT 判断 Content-Type 是否为支持的流式 media type。
+func IsStreamCT(ct string) bool {
+	return IsSSECT(ct) || IsEventStreamCT(ct)
+}
 
 // isEventStream Content-Type 是否 SSE
 func isEventStream(ct string) bool {
-	return strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
+	return IsSSECT(ct)
 }
 
 // maxBodySize 非流式响应读取上限(防失控上游)

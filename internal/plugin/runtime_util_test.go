@@ -28,6 +28,53 @@ func runUtil(t *testing.T, expr string) string {
 	return string(b)
 }
 
+func TestUtil_EventStreamCannotBeOverwritten(t *testing.T) {
+	vm := goja.New()
+	bindUtil(vm, HostDeps{})
+	got, err := vm.RunString(`(function(){
+	util.extraHelper = 42;
+	const before = typeof util.extraHelper === "number";
+	try { util.eventstream = {decode:function(){}}; } catch (_) {}
+	return [before, typeof util.eventstream.decode];
+})()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := got.Export().([]interface{})
+	if v[0] != true || v[1] != "function" {
+		t.Fatalf("util extension or eventstream protection changed: %#v", v)
+	}
+}
+
+func TestUtil_BigEndian64(t *testing.T) {
+	vm := goja.New()
+	bindUtil(vm, HostDeps{})
+	for _, tt := range []struct {
+		expr string
+		want string
+	}{
+		{`util.i64be(new Uint8Array([127,255,255,255,255,255,255,255]).buffer,0).toString()`, "9223372036854775807"},
+		{`util.i64be(new Uint8Array([128,0,0,0,0,0,0,0]).buffer,0).toString()`, "-9223372036854775808"},
+		{`util.u64be(new Uint8Array([255,255,255,255,255,255,255,255]).buffer,0).toString()`, "18446744073709551615"},
+		{`util.u64be(new Uint8Array([0,0,0,0,0,0,0,1]).buffer,0).toString()`, "1"},
+		{`util.u64be(new Uint8Array([99,0,0,0,0,0,0,0,0,1,88]).subarray(1,10),1).toString()`, "1"},
+	} {
+		got, err := vm.RunString(tt.expr)
+		if err != nil || got.String() != tt.want {
+			t.Fatalf("%s = %v, %v; want %s", tt.expr, got, err, tt.want)
+		}
+	}
+	for _, expr := range []string{
+		`util.u64be(new Uint8Array(8),-1)`,
+		`util.u64be(new Uint8Array(8),1)`,
+		`util.u64be("not bytes",0)`,
+	} {
+		if _, err := vm.RunString(expr); err == nil {
+			t.Fatalf("%s must fail", expr)
+		}
+	}
+}
+
 func TestUtil_DeepMerge(t *testing.T) {
 	// b 覆盖;嵌套合并;数组整体替换;返回新对象
 	got := runUtil(t, `util.deepMerge({a:{x:1,y:2},arr:[1,2]}, {a:{y:3},arr:[9]})`)

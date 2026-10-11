@@ -13,11 +13,305 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dop251/goja"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 )
 
-// rawTestTransport httptest 直连传输(RawTransport 形态)
+func TestOutboundBodyBytesPreservesRawBytesWithoutContentTypeGate(t *testing.T) {
+	want := []byte{0x00, 0x80, 0xff, 0xc3, 0x28}
+	body := &countingCloseBody{Reader: bytes.NewReader(want)}
+	src := &outboundSource{
+		status:    http.StatusOK,
+		headers:   map[string]string{"Content-Type": "application/octet-stream"},
+		body:      body,
+		totalAt:   time.Now().Add(time.Minute),
+		stop:      make(chan struct{}),
+		closeDone: make(chan struct{}),
+	}
+
+	got, err := src.BodyBytes(context.Background())
+	if err != nil {
+		t.Fatalf("BodyBytes: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("BodyBytes = %v, want %v", got, want)
+	}
+	if body.closeCount != 1 {
+		t.Fatalf("body Close count = %d, want 1", body.closeCount)
+	}
+	if _, err := src.Body(context.Background()); err == nil {
+		t.Fatal("Body after BodyBytes must fail single-consume guard")
+	}
+	if _, err := src.BodyBytes(context.Background()); err == nil {
+		t.Fatal("second BodyBytes must fail single-consume guard")
+	}
+	if _, err := src.Chunks(); err == nil {
+		t.Fatal("Chunks after BodyBytes must fail single-consume guard")
+	}
+	if _, err := src.Frames(); err == nil {
+		t.Fatal("Frames after BodyBytes must fail single-consume guard")
+	}
+}
+
+type countingCloseBody struct {
+	io.Reader
+	closeCount int
+}
+
+func (b *countingCloseBody) Close() error {
+	b.closeCount++
+	return nil
+}
+func TestOutboundChunkIteratorReturnCloseError(t *testing.T) {
+	closeErr := errors.New("body close failed")
+	src := &outboundSource{headers: map[string]string{"Content-Type": "text/event-stream"}, body: &closeErrorBody{closeErr: closeErr}, stop: make(chan struct{}), closeDone: make(chan struct{})}
+	vm := goja.New()
+	var ex handlerExec
+	source := ex.bindSource(vm, src)
+	if err := vm.Set("source", source); err != nil {
+		t.Fatal(err)
+	}
+	got, err := vm.RunString(`(function(){
+	const it=source.chunks();
+	let first=false, second=false;
+	try { it.return(); } catch (e) { first=String(e).includes("body close failed"); }
+	try { it.return(); } catch (e) { second=String(e).includes("body close failed"); }
+	return first && second;
+})()`)
+	if err != nil || !got.ToBoolean() {
+		t.Fatalf("both return calls should preserve close error: %v, %v", got, err)
+	}
+}
+
+type blockingReadBody struct {
+	started chan struct{}
+	closed  chan struct{}
+}
+
+func (b *blockingReadBody) Read([]byte) (int, error) {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	<-b.closed
+	return 0, errors.New("body closed")
+}
+func (b *blockingReadBody) Close() error { close(b.closed); return nil }
+
+func TestOutboundChunkIteratorReturnUnblocksNext(t *testing.T) {
+	body := &blockingReadBody{started: make(chan struct{}), closed: make(chan struct{})}
+	cli := &outboundClient{to: outboundTimeouts{Connect: time.Second, Response: time.Second, FrameIdle: time.Minute, Total: time.Minute}}
+	src := &outboundSource{cli: cli, status: 200, headers: map[string]string{"Content-Type": "text/event-stream"}, body: body,
+		totalAt: time.Now().Add(time.Minute), chunks: transport.RawChunks(body, make(chan struct{})),
+		stop: make(chan struct{}), closeDone: make(chan struct{})}
+	iter := &chunkIter{s: src}
+	nextDone := make(chan error, 1)
+	go func() {
+		_, _, err := iter.Next(context.Background())
+		nextDone <- err
+	}()
+	<-body.started
+	if err := src.close(); err != nil {
+		t.Fatalf("close source: %v", err)
+	}
+	if err := <-nextDone; !errors.Is(err, errSourceTerminated) {
+		t.Fatalf("next error after source close = %v, want errSourceTerminated", err)
+	}
+	if _, ok, err := iter.Next(context.Background()); !errors.Is(err, errSourceTerminated) || ok {
+		t.Fatalf("next after source close: ok=%v err=%v, want errSourceTerminated", ok, err)
+	}
+}
+
+func TestOutboundSourceCloseErrorIsStable(t *testing.T) {
+	closeErr := errors.New("body close failed")
+	body := &closeErrorBody{closeErr: closeErr}
+	src := &outboundSource{body: body, stop: make(chan struct{}), closeDone: make(chan struct{})}
+	if err := src.close(); !errors.Is(err, closeErr) {
+		t.Fatalf("first close error = %v", err)
+	}
+	if err := src.close(); !errors.Is(err, closeErr) {
+		t.Fatalf("repeated close error = %v", err)
+	}
+	const waiters = 8
+	var wg sync.WaitGroup
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := src.close(); !errors.Is(err, closeErr) {
+				t.Errorf("concurrent close error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestStreamDeadlineErrorBeatsReadyDataAtCommit(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		at   time.Time
+		want error
+	}{
+		{name: "total timeout", ctx: context.Background(), at: now.Add(-time.Second), want: errOutboundTimeout},
+		{name: "canceled context", ctx: canceledContext(), at: now.Add(time.Minute), want: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := streamDeadlineError(tc.ctx, tc.at, now.Add(time.Minute), now); !errors.Is(err, tc.want) {
+				t.Fatalf("deadline error=%v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func TestOutboundChunkNextAfterTotalDeadlineRejectsBufferedChunk(t *testing.T) {
+	body := &countingCloseBody{Reader: bytes.NewReader(nil)}
+	stop := make(chan struct{})
+	chunks := make(chan transport.ChunkResult, 1)
+	chunks <- transport.ChunkResult{Data: []byte("late")}
+	cli := &outboundClient{to: outboundTimeouts{FrameIdle: time.Minute, Total: time.Minute}}
+	src := &outboundSource{cli: cli, body: body, status: http.StatusOK, headers: map[string]string{"Content-Type": "text/event-stream"}, totalAt: time.Now().Add(-time.Second), stop: stop, closeDone: make(chan struct{}), chunks: chunks}
+	_, ok, err := (&chunkIter{s: src}).Next(context.Background())
+	if ok || !errors.Is(err, errOutboundTimeout) {
+		t.Fatalf("Next ok=%v err=%v, want total timeout", ok, err)
+	}
+}
+
+func TestOutboundFrameNextAfterTotalDeadlineRejectsBufferedFrame(t *testing.T) {
+	body := &countingCloseBody{Reader: bytes.NewReader(nil)}
+	frames := make(chan transport.SSEFrameResult, 1)
+	frames <- transport.SSEFrameResult{Frame: pipeline.SSEFrame{Data: "late"}}
+	cli := &outboundClient{to: outboundTimeouts{FrameIdle: time.Minute, Total: time.Minute}}
+	src := &outboundSource{cli: cli, body: body, status: http.StatusOK, headers: map[string]string{"Content-Type": "text/event-stream"}, totalAt: time.Now().Add(-time.Second), stop: make(chan struct{}), closeDone: make(chan struct{}), events: frames}
+	_, ok, err := (&frameIter{s: src}).Next(context.Background())
+	if ok || !errors.Is(err, errOutboundTimeout) {
+		t.Fatalf("Next ok=%v err=%v, want total timeout", ok, err)
+	}
+}
+
+func TestOutboundChunkIteratorReturnsDoneAfterTerminal(t *testing.T) {
+	for _, terminal := range []error{nil, errors.New("upstream stream broken")} {
+		src := &outboundSource{dead: true, terminal: terminal}
+		iter := &chunkIter{s: src}
+		chunk, ok, err := iter.Next(context.Background())
+		if err != nil || ok || chunk != nil {
+			t.Fatalf("after terminal: chunk=%v ok=%v err=%v", chunk, ok, err)
+		}
+	}
+}
+
+func TestOutboundSourceTerminateUsesContextIfCloseWon(t *testing.T) {
+	committed := errors.New("previous timeout")
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+		want   error
+	}{
+		{name: "canceled context wins", cancel: true, want: context.Canceled},
+		{name: "committed terminal with live context", want: committed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			src := &outboundSource{closed: true, dead: true, terminal: committed}
+			if err := src.terminateSource(ctx, errors.New("idle timeout")); !errors.Is(err, tc.want) {
+				t.Fatalf("terminal error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestOutboundChunkNextAfterClosePrefersContextError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := &outboundSource{cli: &outboundClient{}, closed: true, terminal: errors.New("read failed")}
+	iter := &chunkIter{s: src}
+	_, ok, err := iter.Next(ctx)
+	if ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Next = (ok=%v, err=%v), want canceled context", ok, err)
+	}
+}
+
+func TestOutboundNextAfterCommittedTerminalReturnsDone(t *testing.T) {
+	for _, name := range []string{"chunk", "frame"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			src := &outboundSource{closed: true, dead: true, terminal: errors.New("previous read error")}
+			if name == "chunk" {
+				_, ok, err := (&chunkIter{s: src}).Next(ctx)
+				if ok || err != nil {
+					t.Fatalf("chunk Next = (ok=%v, err=%v), want done", ok, err)
+				}
+				return
+			}
+			_, ok, err := (&frameIter{s: src}).Next(ctx)
+			if ok || err != nil {
+				t.Fatalf("frame Next = (ok=%v, err=%v), want done", ok, err)
+			}
+		})
+	}
+}
+
+func TestOutboundFrameNextAfterClosePrefersContextError(t *testing.T) {
+	for _, name := range []string{"chunk", "frame"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			src := &outboundSource{cli: &outboundClient{}, closed: true, terminal: errors.New("read failed")}
+			if name == "chunk" {
+				_, ok, err := (&chunkIter{s: src}).Next(ctx)
+				if ok || !errors.Is(err, context.Canceled) {
+					t.Fatalf("chunk Next = (ok=%v, err=%v)", ok, err)
+				}
+				return
+			}
+			_, ok, err := (&frameIter{s: src}).Next(ctx)
+			if ok || !errors.Is(err, context.Canceled) {
+				t.Fatalf("frame Next = (ok=%v, err=%v)", ok, err)
+			}
+		})
+	}
+}
+
+func TestOutboundNextAfterCloseWithLiveContextIsTerminated(t *testing.T) {
+	for _, name := range []string{"chunk", "frame"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			src := &outboundSource{cli: &outboundClient{}, closed: true, terminal: errors.New("read failed")}
+			if name == "chunk" {
+				_, ok, err := (&chunkIter{s: src}).Next(ctx)
+				if ok || !errors.Is(err, errSourceTerminated) {
+					t.Fatalf("chunk Next = (ok=%v, err=%v)", ok, err)
+				}
+				return
+			}
+			_, ok, err := (&frameIter{s: src}).Next(ctx)
+			if ok || !errors.Is(err, errSourceTerminated) {
+				t.Fatalf("frame Next = (ok=%v, err=%v)", ok, err)
+			}
+		})
+	}
+}
+
+type closeErrorBody struct{ closeErr error }
+
+func (b *closeErrorBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (b *closeErrorBody) Close() error             { return b.closeErr }
+
 type rawTestTransport struct{ client *http.Client }
 
 func (t *rawTestTransport) Name() string { return "test" }
@@ -31,7 +325,7 @@ func (t *rawTestTransport) RoundTrip(ctx context.Context, req pipeline.Request) 
 	for k := range hresp.Header {
 		headers[k] = hresp.Header.Get(k)
 	}
-	if strings.HasPrefix(strings.ToLower(headers["Content-Type"]), "text/event-stream") {
+	if transport.IsSSECT(headers["Content-Type"]) {
 		return pipeline.TransportResponse{Status: hresp.StatusCode, Headers: headers, Events: transport.FrameSSE(hresp.Body)}, nil
 	}
 	return pipeline.TransportResponse{Status: hresp.StatusCode, Headers: headers}, nil
@@ -288,8 +582,8 @@ func TestOutboundSourceSingleConsume(t *testing.T) {
 	if err == nil || !errors.Is(err, errOutboundTimeout) {
 		t.Fatalf("frame idle timeout: %v", err)
 	}
-	if _, _, err := it.Next(context.Background()); err == nil || !strings.Contains(err.Error(), "terminated") {
-		t.Fatalf("iterator terminal state: %v", err)
+	if _, _, err := it.Next(context.Background()); err != nil {
+		t.Fatalf("next after committed terminal should be done: %v", err)
 	}
 }
 

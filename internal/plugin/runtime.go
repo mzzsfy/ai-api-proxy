@@ -3,10 +3,13 @@ package plugin
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +21,9 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
-// MaxStorageValue storage 单键上限
+//go:embed jshelper/eventstream.js
+var eventStreamHelper string
+
 const MaxStorageValue = 64 * 1024
 
 // KeyRef 当前键引用(请求级/逐键注入;JS 经 ctx.key 或 util.key() 读取,无按名通道)
@@ -130,6 +135,13 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 		}
 		return string(b), nil
 	})
+	_ = util.Set("u64be", func(buf goja.Value, offset int) (*big.Int, error) {
+		return readBigEndian64(vm, buf, offset, false)
+	})
+	_ = util.Set("i64be", func(buf goja.Value, offset int) (*big.Int, error) {
+		return readBigEndian64(vm, buf, offset, true)
+	})
+	_ = vm.Set("util", util)
 	_ = util.Set("uuid", func() string {
 		return uuid.NewString()
 	})
@@ -183,6 +195,13 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 	})
 	_ = vm.Set("util", util)
 	injectSettingBuilders(vm)
+	_, err := vm.RunString(eventStreamHelper)
+	if err != nil {
+		panic(vm.NewGoError(err))
+	}
+	if _, err := vm.RunString(`Object.defineProperty(util, "eventstream", {writable:false, configurable:false})`); err != nil {
+		panic(vm.NewGoError(err))
+	}
 	// log(输出经 secrets 掩码)
 	logObj := vm.NewObject()
 	for _, lvl := range []string{"info", "warn", "error"} {
@@ -223,7 +242,53 @@ func bindUtil(vm *goja.Runtime, deps HostDeps) {
 	_ = vm.Set("storage", st)
 }
 
-// injectSettingBuilders setting 声明构建器注入(统一求值环境:片段声明与工厂同文件,v2 声明统一)
+func readBigEndian64(vm *goja.Runtime, buf goja.Value, offset int, signed bool) (*big.Int, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("64-bit integer offset must be non-negative")
+	}
+	if buffer, ok := buf.Export().(goja.ArrayBuffer); ok {
+		return readBigEndian64Bytes(buffer.Bytes(), offset, signed)
+	}
+	value, ok := buf.(*goja.Object)
+	if !ok {
+		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
+	}
+	isViewValue, err := vm.RunString("ArrayBuffer.isView")
+	if err != nil {
+		return nil, err
+	}
+	isView, ok := goja.AssertFunction(isViewValue)
+	if !ok {
+		return nil, fmt.Errorf("ArrayBuffer.isView unavailable")
+	}
+	result, err := isView(goja.Undefined(), value)
+	if err != nil || !result.ToBoolean() {
+		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
+	}
+	bufferValue := value.Get("buffer")
+	buffer, ok := bufferValue.Export().(goja.ArrayBuffer)
+	if !ok {
+		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
+	}
+	byteOffset := int(value.Get("byteOffset").ToInteger())
+	byteLength := int(value.Get("byteLength").ToInteger())
+	if byteOffset < 0 || byteLength < 0 || byteOffset > len(buffer.Bytes()) || byteLength > len(buffer.Bytes())-byteOffset {
+		return nil, fmt.Errorf("invalid TypedArray view")
+	}
+	return readBigEndian64Bytes(buffer.Bytes()[byteOffset:byteOffset+byteLength], offset, signed)
+}
+
+func readBigEndian64Bytes(view []byte, offset int, signed bool) (*big.Int, error) {
+	if offset > len(view) || len(view)-offset < 8 {
+		return nil, fmt.Errorf("64-bit integer read out of bounds")
+	}
+	value := new(big.Int).SetUint64(binary.BigEndian.Uint64(view[offset : offset+8]))
+	if signed && value.Bit(63) != 0 {
+		value.Sub(value, new(big.Int).Lsh(big.NewInt(1), 64))
+	}
+	return value, nil
+}
+
 func injectSettingBuilders(vm *goja.Runtime) {
 	b := map[string]any{}
 	for _, typ := range []string{"string", "int", "number", "bool", "enum"} {

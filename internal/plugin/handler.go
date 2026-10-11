@@ -14,14 +14,13 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
 
-
 // 执行预算(定案常量)
 const (
-	handlerOverallBudget = 60 * time.Minute // 整体预算(含 prepare/池排队/锁排队)
-	handlerStatementCap  = 10 * time.Second // 纯计算上限(无原语活动即超限)
-	handlerGlobalConcurr = 64               // 全局 handler 总并发(所有包合计)
-	handlerQueueTimeout  = 60 * time.Second // 池排队上界(写死,不做配置)
-	handlerVMMaxBorrowDft = 100             // 借出次数缺省(≤0 视为缺省)
+	handlerOverallBudget  = 60 * time.Minute // 整体预算(含 prepare/池排队/锁排队)
+	handlerStatementCap   = 10 * time.Second // 纯计算上限(无原语活动即超限)
+	handlerGlobalConcurr  = 64               // 全局 handler 总并发(所有包合计)
+	handlerQueueTimeout   = 60 * time.Second // 池排队上界(写死,不做配置)
+	handlerVMMaxBorrowDft = 100              // 借出次数缺省(≤0 视为缺省)
 )
 
 // ErrHandlerTimeout 执行级超时哨兵(整体/纯计算/池排队/锁等待)
@@ -78,10 +77,10 @@ type handlerExec struct {
 	vm       *goja.Runtime
 	ctxObj   *goja.Object
 
-	broken   atomic.Bool  // 执行级取消污染(实例丢弃)
-	lastAct  atomic.Int64 // 最近原语活动(unixnano;纯计算超限判定锚点)
-	prim     atomic.Int64 // 原语内计数(>0 = 阻塞在 Go 原语,不计纯计算)
-	replyMode  string // "" | "json" | "sse"
+	broken     atomic.Bool  // 执行级取消污染(实例丢弃)
+	lastAct    atomic.Int64 // 最近原语活动(unixnano;纯计算超限判定锚点)
+	prim       atomic.Int64 // 原语内计数(>0 = 阻塞在 Go 原语,不计纯计算)
+	replyMode  string       // "" | "json" | "sse"
 	sseStarted bool
 	replyDone  bool
 }
@@ -338,12 +337,12 @@ func (ex *handlerExec) finalize() {
 	ex.srcMu.Lock()
 	for _, src := range ex.sources {
 		if src.consumed {
-			src.close()
+			_ = src.close()
 			continue
 		}
 		// 情形 a:开了没读(既未 body 也未迭代)
 		ex.log("warn", fmt.Sprintf("handler %s: outbound source not consumed, closed (url %s)", ex.deps.Package.Manifest.Name, src.req.URL))
-		src.close()
+		_ = src.close()
 	}
 	ex.sources = nil
 	ex.srcMu.Unlock()

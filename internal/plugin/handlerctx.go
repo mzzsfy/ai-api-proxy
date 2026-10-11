@@ -4,6 +4,7 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -292,7 +293,7 @@ func (ex *handlerExec) buildOutbound(opts map[string]any, stream bool) (outbound
 	return r, newOutboundClient(tr, ex.out.callTimeouts()), nil
 }
 
-// bindSource 上游 source 导出:{status, headers, frames(), body()}
+// bindSource 上游 source 导出:{status, headers, frames(), chunks(), body(), bodyBytes()}
 func (ex *handlerExec) bindSource(vm *goja.Runtime, src *outboundSource) *goja.Object {
 	o := vm.NewObject()
 	_ = o.Set("status", src.status)
@@ -325,6 +326,74 @@ func (ex *handlerExec) bindSource(vm *goja.Runtime, src *outboundSource) *goja.O
 		}
 		return iter, nil
 	})
+	_ = o.Set("chunks", func() (*goja.Object, error) {
+		ex.touch()
+		it, err := src.Chunks()
+		if err != nil {
+			return nil, err
+		}
+		iter := vm.NewObject()
+		var iterClosed bool
+		var iterMu sync.Mutex
+		var returnMu sync.Mutex
+		var returnErr error
+		_ = iter.Set("next", func() (map[string]any, error) {
+			defer ex.enter()()
+			iterMu.Lock()
+			closed := iterClosed
+			iterMu.Unlock()
+			if closed {
+				return map[string]any{"done": true}, nil
+			}
+			data, ok, err := it.Next(ex.ctx)
+			iterMu.Lock()
+			closedAfterNext := iterClosed
+			if !closedAfterNext && (!ok || err != nil) {
+				iterClosed = true
+			}
+			iterMu.Unlock()
+			if closedAfterNext {
+				return map[string]any{"done": true}, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				iterMu.Lock()
+				iterClosed = true
+				iterMu.Unlock()
+				return map[string]any{"done": true}, nil
+			}
+			return map[string]any{"value": vm.NewArrayBuffer(data), "done": false}, nil
+		})
+		_ = iter.Set("return", func() (map[string]any, error) {
+			returnMu.Lock()
+			defer returnMu.Unlock()
+			iterMu.Lock()
+			alreadyClosed := iterClosed
+			iterClosed = true
+			priorErr := returnErr
+			iterMu.Unlock()
+			if alreadyClosed {
+				if priorErr != nil {
+					return nil, priorErr
+				}
+				return map[string]any{"done": true}, nil
+			}
+			err := src.close()
+			iterMu.Lock()
+			returnErr = err
+			iterMu.Unlock()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"done": true}, nil
+		})
+		if err := jsCall(vm, "(function(o){o[Symbol.iterator]=function(){return o}; return o})", iter); err != nil {
+			return nil, err
+		}
+		return iter, nil
+	})
 	_ = o.Set("body", func() (string, error) {
 		defer ex.enter()()
 		b, err := src.Body(ex.ctx)
@@ -332,6 +401,14 @@ func (ex *handlerExec) bindSource(vm *goja.Runtime, src *outboundSource) *goja.O
 			return "", err
 		}
 		return string(b), nil
+	})
+	_ = o.Set("bodyBytes", func() (goja.ArrayBuffer, error) {
+		defer ex.enter()()
+		b, err := src.BodyBytes(ex.ctx)
+		if err != nil {
+			return goja.ArrayBuffer{}, err
+		}
+		return vm.NewArrayBuffer(b), nil
 	})
 	return o
 }

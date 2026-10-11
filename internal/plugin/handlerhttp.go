@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/streamct"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 )
 
@@ -175,14 +176,15 @@ func (c *outboundClient) roundTrip(ctx context.Context, r outboundReq) (*outboun
 		headers[k] = hresp.Header.Get(k)
 	}
 	return &outboundSource{
-		cli:     c,
-		status:  hresp.StatusCode,
-		headers: headers,
-		body:    hresp.Body,
-		req:     r,
-		totalAt: start.Add(total),
-		cancel:  cancel,
-		stop:    make(chan struct{}),
+		cli:       c,
+		status:    hresp.StatusCode,
+		headers:   headers,
+		body:      hresp.Body,
+		req:       r,
+		totalAt:   start.Add(total),
+		cancel:    cancel,
+		stop:      make(chan struct{}),
+		closeDone: make(chan struct{}),
 	}, nil
 }
 
@@ -225,13 +227,17 @@ type outboundSource struct {
 	req     outboundReq
 	totalAt time.Time
 	events  <-chan transport.SSEFrameResult
-	cancel  context.CancelFunc // per-call ctx(per-call 超时界;随 source 关闭释放)
-	stop    chan struct{}      // 帧发射方退出信号
+	chunks  <-chan transport.ChunkResult
+	cancel  context.CancelFunc
+	stop    chan struct{}
 
-	mu       sync.Mutex
-	consumed bool // frames/body 已消费
-	dead     bool // 迭代器终态
-	closed   bool
+	mu        sync.Mutex
+	consumed  bool
+	dead      bool
+	closed    bool
+	terminal  error
+	closeDone chan struct{}
+	closeErr  error
 }
 
 // markConsume 单次消费仲裁
@@ -253,24 +259,36 @@ func (s *outboundSource) claimConsume() error {
 	return nil
 }
 
-// close 立即关闭(幂等;超时/终局/显式弃置共用)
-func (s *outboundSource) close() {
+func (s *outboundSource) close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
-		_ = s.body.Close()
-		if s.stop != nil {
-			close(s.stop)
-		}
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		s.mu.Lock()
+		err := s.closeErr
+		s.mu.Unlock()
+		return err
+	}
+	s.closed = true
+	close(s.stop)
+	s.mu.Unlock()
+
+	defer close(s.closeDone)
+	defer func() {
 		if s.cancel != nil {
 			s.cancel()
 		}
-	}
+	}()
+	closeErr := s.body.Close()
+	s.mu.Lock()
+	s.closeErr = closeErr
+	s.mu.Unlock()
+	return closeErr
 }
 
 // Close 显式弃置(消费者既不 Frames 也不 Body 的丢弃路径;终局兜底也走此出口)
-func (s *outboundSource) Close() { s.close() }
+func (s *outboundSource) Close() { _ = s.close() }
 
 // Frames 领取帧迭代器(status ≥ 300 或非 event-stream 上游抛错;单次)
 func (s *outboundSource) Frames() (*frameIter, error) {
@@ -297,18 +315,177 @@ func (s *outboundSource) Body(ctx context.Context) ([]byte, error) {
 	return readUnbounded(ctx, s)
 }
 
-// frameIter 帧迭代器(Frames() 一次性领取消费权;迭代内多次 Next 合法)
-type frameIter struct {
-	s *outboundSource
+// Chunks 领取原始字节迭代器(status ≥ 300 或非流式 Content-Type 拒绝;单次)
+func (s *outboundSource) Chunks() (*chunkIter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status >= 300 {
+		return nil, fmt.Errorf("chunks() unavailable on status %d", s.status)
+	}
+	if !streamct.IsStream(s.headers["Content-Type"]) {
+		return nil, fmt.Errorf("chunks() requires SSE or EventStream Content-Type, got %q", s.headers["Content-Type"])
+	}
+	if err := s.claimConsume(); err != nil {
+		return nil, err
+	}
+	s.chunks = transport.RawChunks(s.body, s.stop)
+	return &chunkIter{s: s}, nil
 }
 
-// Next 阻塞取下一帧;frameIdle 逐次调用读当前设置(逐帧隙重武装),frameIdle 与 total 同到期优先报 total
+// BodyBytes 缓冲读取原始响应字节并关闭 source。
+func (s *outboundSource) BodyBytes(ctx context.Context) ([]byte, error) {
+	if err := s.markConsume(); err != nil {
+		return nil, err
+	}
+	defer s.close()
+	return readUnbounded(ctx, s)
+}
+
+// chunkIter 逐次等待无损字节块。
+type chunkIter struct{ s *outboundSource }
+
+func (it *chunkIter) Next(ctx context.Context) ([]byte, bool, error) {
+	s := it.s
+	s.mu.Lock()
+	if s.dead {
+		s.mu.Unlock()
+		return nil, false, nil
+	}
+	if s.closed {
+		ctxErr := ctx.Err()
+		s.mu.Unlock()
+		if ctxErr != nil {
+			return nil, false, ctxErr
+		}
+		return nil, false, errSourceTerminated
+	}
+	chunks := s.chunks
+	s.mu.Unlock()
+	to := s.cli.callTimeouts()
+	idleAt := time.Now().Add(to.FrameIdle)
+	idle := time.NewTimer(time.Until(idleAt))
+	total := time.NewTimer(time.Until(s.totalAt))
+	defer idle.Stop()
+	defer total.Stop()
+	if timeoutErr := streamDeadlineError(ctx, s.totalAt, idleAt, time.Now()); timeoutErr != nil {
+		return nil, false, s.terminateSource(ctx, timeoutErr)
+	}
+	select {
+	case item, ok := <-chunks:
+		s.mu.Lock()
+		if s.closed {
+			ctxErr := ctx.Err()
+			terminal := s.terminal
+			s.mu.Unlock()
+			if ctxErr != nil {
+				return nil, false, ctxErr
+			}
+			if terminal != nil {
+				return nil, false, terminal
+			}
+			return nil, false, errSourceTerminated
+		}
+		if s.dead {
+			s.mu.Unlock()
+			return nil, false, nil
+		}
+		if timeoutErr := streamDeadlineError(ctx, s.totalAt, idleAt, time.Now()); timeoutErr != nil {
+			s.dead = true
+			s.terminal = timeoutErr
+			s.mu.Unlock()
+			_ = s.close()
+			return nil, false, timeoutErr
+		}
+		if !ok {
+			s.dead = true
+			s.mu.Unlock()
+			_ = s.close()
+			return nil, false, nil
+		}
+		if item.Err != nil {
+			mapped := mapSourceReadError(ctx, item.Err)
+			s.dead = true
+			s.terminal = mapped
+			s.mu.Unlock()
+			_ = s.close()
+			return nil, false, mapped
+		}
+		data := item.Data
+		s.mu.Unlock()
+		return data, true, nil
+	case <-ctx.Done():
+		return nil, false, s.terminateSource(ctx, ctx.Err())
+	case <-total.C:
+		return nil, false, s.terminateSource(ctx, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout))
+	case <-idle.C:
+		if !time.Now().Before(s.totalAt) {
+			return nil, false, s.terminateSource(ctx, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout))
+		}
+		return nil, false, s.terminateSource(ctx, fmt.Errorf("%w: frameIdleTimeoutMs exceeded", errOutboundTimeout))
+	}
+}
+
+func streamDeadlineError(ctx context.Context, totalAt, idleAt, now time.Time) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !now.Before(totalAt) {
+		return fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout)
+	}
+	if !now.Before(idleAt) {
+		return fmt.Errorf("%w: frameIdleTimeoutMs exceeded", errOutboundTimeout)
+	}
+	return nil
+}
+
+func mapSourceReadError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout)
+	}
+	return fmt.Errorf("upstream stream broken: %w", err)
+}
+
+func (s *outboundSource) terminateSource(ctx context.Context, err error) error {
+	s.mu.Lock()
+	if s.dead || s.closed {
+		ctxErr := ctx.Err()
+		committed := s.terminal
+		s.mu.Unlock()
+		if ctxErr != nil {
+			return ctxErr
+		}
+		if committed != nil {
+			return committed
+		}
+		return errSourceTerminated
+	}
+	s.dead = true
+	s.terminal = err
+	s.mu.Unlock()
+	_ = s.close()
+	return err
+}
+
+// frameIter 帧迭代器(Frames() 一次性领取消费权;迭代内多次 Next 合法)
+type frameIter struct{ s *outboundSource }
+
 // 返回 (帧, 是否仍有帧, 错误)
 func (it *frameIter) Next(ctx context.Context) (pipeline.SSEFrame, bool, error) {
 	s := it.s
 	s.mu.Lock()
 	if s.dead {
 		s.mu.Unlock()
+		return pipeline.SSEFrame{}, false, nil
+	}
+	if s.closed {
+		ctxErr := ctx.Err()
+		s.mu.Unlock()
+		if ctxErr != nil {
+			return pipeline.SSEFrame{}, false, ctxErr
+		}
 		return pipeline.SSEFrame{}, false, errSourceTerminated
 	}
 	if s.events == nil {
@@ -317,48 +494,88 @@ func (it *frameIter) Next(ctx context.Context) (pipeline.SSEFrame, bool, error) 
 	s.mu.Unlock()
 
 	to := s.cli.callTimeouts()
-	idle := time.NewTimer(to.FrameIdle)
+	idleAt := time.Now().Add(to.FrameIdle)
+	idle := time.NewTimer(time.Until(idleAt))
 	total := time.NewTimer(time.Until(s.totalAt))
 	defer total.Stop()
 	defer idle.Stop()
+	if timeoutErr := streamDeadlineError(ctx, s.totalAt, idleAt, time.Now()); timeoutErr != nil {
+		return pipeline.SSEFrame{}, false, s.terminateSource(ctx, timeoutErr)
+	}
 	select {
 	case res, ok := <-s.events:
+		s.mu.Lock()
+		if s.closed {
+			ctxErr := ctx.Err()
+			terminal := s.terminal
+			s.mu.Unlock()
+			if ctxErr != nil {
+				return pipeline.SSEFrame{}, false, ctxErr
+			}
+			if terminal != nil {
+				return pipeline.SSEFrame{}, false, terminal
+			}
+			return pipeline.SSEFrame{}, false, errSourceTerminated
+		}
+		if s.dead {
+			s.mu.Unlock()
+			return pipeline.SSEFrame{}, false, nil
+		}
+		if timeoutErr := streamDeadlineError(ctx, s.totalAt, idleAt, time.Now()); timeoutErr != nil {
+			s.dead = true
+			s.terminal = timeoutErr
+			s.mu.Unlock()
+			_ = s.close()
+			return pipeline.SSEFrame{}, false, timeoutErr
+		}
 		if !ok {
-			s.mu.Lock()
 			s.dead = true
 			s.mu.Unlock()
-			s.close()
+			_ = s.close()
 			return pipeline.SSEFrame{}, false, nil
 		}
 		if res.Err != nil {
-			s.mu.Lock()
+			mapped := mapSourceReadError(ctx, res.Err)
 			s.dead = true
+			s.terminal = mapped
 			s.mu.Unlock()
-			s.close()
-			if ctx.Err() != nil {
-				// 执行级取消优先于单次出站超时(错误标签如实)
-				return pipeline.SSEFrame{}, false, ctx.Err()
-			}
-			if errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded) {
-				// per-call ctx(total 界)掐断连接产生的读错如实报超时
-				return pipeline.SSEFrame{}, false, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout)
-			}
-			return pipeline.SSEFrame{}, false, fmt.Errorf("upstream stream broken: %w", res.Err)
+			_ = s.close()
+			return pipeline.SSEFrame{}, false, mapped
 		}
+		if s.closed {
+			ctxErr := ctx.Err()
+			terminal := s.terminal
+			s.mu.Unlock()
+			if ctxErr != nil {
+				return pipeline.SSEFrame{}, false, ctxErr
+			}
+			if terminal != nil {
+				return pipeline.SSEFrame{}, false, terminal
+			}
+			return pipeline.SSEFrame{}, false, errSourceTerminated
+		}
+		if s.dead {
+			s.mu.Unlock()
+			return pipeline.SSEFrame{}, false, nil
+		}
+		if timeoutErr := streamDeadlineError(ctx, s.totalAt, idleAt, time.Now()); timeoutErr != nil {
+			s.dead = true
+			s.terminal = timeoutErr
+			s.mu.Unlock()
+			_ = s.close()
+			return pipeline.SSEFrame{}, false, timeoutErr
+		}
+		s.mu.Unlock()
 		return res.Frame, true, nil
 	case <-ctx.Done():
-		s.terminate()
-		return pipeline.SSEFrame{}, false, ctx.Err()
+		return pipeline.SSEFrame{}, false, s.terminateSource(ctx, ctx.Err())
 	case <-total.C:
-		s.terminate()
-		return pipeline.SSEFrame{}, false, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout)
+		return pipeline.SSEFrame{}, false, s.terminateSource(ctx, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout))
 	case <-idle.C:
-		s.terminate()
 		if !time.Now().Before(s.totalAt) {
-			// frameIdle 与 total 同时到期:优先报 total(定序保证错误可复现)
-			return pipeline.SSEFrame{}, false, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout)
+			return pipeline.SSEFrame{}, false, s.terminateSource(ctx, fmt.Errorf("%w: totalTimeoutMs exceeded", errOutboundTimeout))
 		}
-		return pipeline.SSEFrame{}, false, fmt.Errorf("%w: frameIdleTimeoutMs exceeded", errOutboundTimeout)
+		return pipeline.SSEFrame{}, false, s.terminateSource(ctx, fmt.Errorf("%w: frameIdleTimeoutMs exceeded", errOutboundTimeout))
 	}
 }
 
@@ -371,18 +588,5 @@ func (s *outboundSource) terminate() {
 }
 
 func isEventStreamHeader(ct string) bool {
-	const prefix = "text/event-stream"
-	if len(ct) < len(prefix) {
-		return false
-	}
-	for i := 0; i < len(prefix); i++ {
-		a, b := ct[i], prefix[i]
-		if 'A' <= a && a <= 'Z' {
-			a += 'a' - 'A'
-		}
-		if a != b {
-			return false
-		}
-	}
-	return true
+	return transport.IsSSECT(ct)
 }

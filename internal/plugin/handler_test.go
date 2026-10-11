@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -377,7 +378,89 @@ func TestHandlerEnginePseudoStreaming(t *testing.T) {
 	}
 }
 
-// 场景: 流式上游 for-of 逐帧消费 + 越过上游回放
+func TestHandlerChunkIteratorPreservesReadError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		_ = conn.Close()
+	}))
+	defer upstream.Close()
+	plugin := strings.Replace(`module.exports=function(ctx){
+	const source=ctx.http.open({url:"UPURL",method:"GET",stream:true});
+	const iter=source.chunks();
+	iter.next();
+	}`, "UPURL", upstream.URL, 1)
+	pkg := handlerPkg(t, plugin)
+	e, _, _ := testEngine(t, pkg, testTransport())
+	err := e.Execute(context.Background(), execIn("m1", true, "k1"), &fakeSink{})
+	if err == nil || !strings.Contains(err.Error(), "body closed") && !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("chunk read error was swallowed: %v", err)
+	}
+}
+
+func TestHandlerEngineBodyBytesPreservesRawBytes(t *testing.T) {
+	want := []byte{0x00, 0x80, 0xff, 0xc3, 0x28}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(want)
+	}))
+	defer upstream.Close()
+
+	plugin := strings.Replace(`module.exports = function(ctx) {
+	const source = ctx.http.open({url:"UPURL",method:"GET",stream:true});
+	const bytes = new Uint8Array(source.bodyBytes());
+	const got = Array.from(bytes).join(",");
+	const want = "0,128,255,195,40";
+	ctx.reply.json(200, JSON.stringify({same: got === want, bytes: got}));
+}`, "UPURL", upstream.URL, 1)
+	pkg := handlerPkg(t, plugin)
+	engine, _, _ := testEngine(t, pkg, testTransport())
+	sink := &fakeSink{}
+	if err := engine.Execute(context.Background(), execIn("body-bytes", false, "k1"), sink); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var response map[string]any
+	if len(sink.json) == 0 {
+		t.Fatal("bodyBytes response was not sent")
+	}
+	if err := json.Unmarshal([]byte(sink.json[0]), &response); err != nil {
+		t.Fatalf("decode bodyBytes response: %v", err)
+	}
+	if response["same"] != true || response["bytes"] != "0,128,255,195,40" {
+		t.Fatalf("bodyBytes response = %#v", response)
+	}
+}
+
+func TestHandlerEngineEventStreamToSSE(t *testing.T) {
+	payload := []byte(`{"message":"hello"}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(testEventStreamFrame(payload))
+	}))
+	defer upstream.Close()
+	src := strings.Replace(`module.exports = function(ctx){
+	ctx.reply.sse();
+	const source = ctx.http.open({url:"UPURL",method:"GET",stream:true});
+	for (const event of util.eventstream.decode(source.chunks())) {
+		ctx.reply.event({message:Array.from(new Uint8Array(event.payload)).map(x=>String.fromCharCode(x)).join("")});
+	}
+	ctx.reply.end();
+}`, "UPURL", upstream.URL, 1)
+	pkg := handlerPkg(t, src)
+	e, _, _ := testEngine(t, pkg, testTransport())
+	sink := &fakeSink{}
+	if err := e.Execute(context.Background(), execIn("m1", true, "k1"), sink); err != nil {
+		t.Fatal(err)
+	}
+	if !sink.ended || len(sink.events) != 1 || !strings.Contains(sink.events[0], "hello") {
+		t.Fatalf("EventStream relay = %+v", sink)
+	}
+}
+
 func TestHandlerEngineStreamRelay(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -18,6 +18,7 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
+	"github.com/mzzsfy/ai-api-proxy/internal/streamct"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
@@ -716,7 +717,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // isEventStreamCT SSE Content-Type 判定
 func isEventStreamCT(ct string) bool {
-	return strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
+	return streamct.IsSSE(ct)
 }
 
 // maxBodySize 请求体上限
