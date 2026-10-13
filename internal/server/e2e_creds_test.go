@@ -74,39 +74,81 @@ func TestCreds_LoginGeneratedID(t *testing.T) {
 	}
 }
 
-// 场景: inspect 展示变换——data → 脱敏 JSON;无 inspect.js = 原样
+// 场景: inspect 展示变换——列表与单账号接口均返回脱敏 JSON
 func TestCreds_InspectTransform(t *testing.T) {
-	files := map[string]string{
+	_, mux, app := credsFixture(t, map[string]string{
 		"login/index.js":     `module.exports = function(ctx){ return {token: "secret"}; }`,
 		"login/ui/index.html": `<html></html>`,
-	}
-	pkgs, mux, app := credsFixture(t, files)
+		"inspect.js":         `module.exports = function(data){ return {masked: true}; }`,
+	})
 	if _, err := app.Login("checkin", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
-	// 无 inspect:原样
+
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts", nil))
-	if !strings.Contains(w.Body.String(), "secret") {
-		t.Fatalf("plain view: %s", w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("inspect list status: %d %s", w.Code, w.Body.String())
 	}
-	// 有 inspect:脱敏
-	pkg, _ := pkgs.GetPackage("checkin")
-	pkg.Files["inspect.js"] = []byte(`module.exports = function(data){ return {masked: true}; }`)
-	w2 := httptest.NewRecorder()
-	mux.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts", nil))
-	if strings.Contains(w2.Body.String(), "secret") || !strings.Contains(w2.Body.String(), "masked") {
-		t.Fatalf("inspect view: %s", w2.Body.String())
+	if strings.Contains(w.Body.String(), "secret") || !strings.Contains(w.Body.String(), "masked") {
+		t.Fatalf("inspect list: %s", w.Body.String())
 	}
-	// 单账号(id 取列表响应)
+
 	var list struct {
 		Accounts []struct{ ID string `json:"id"` } `json:"accounts"`
 	}
-	_ = json.Unmarshal(w2.Body.Bytes(), &list)
-	w3 := httptest.NewRecorder()
-	mux.ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts/"+list.Accounts[0].ID, nil))
-	if !strings.Contains(w3.Body.String(), "masked") {
-		t.Fatalf("single: %s", w3.Body.String())
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Accounts) != 1 {
+		t.Fatalf("accounts count: %d", len(list.Accounts))
+	}
+
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts/"+list.Accounts[0].ID, nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("inspect single status: %d %s", w2.Code, w2.Body.String())
+	}
+	if strings.Contains(w2.Body.String(), "secret") || !strings.Contains(w2.Body.String(), "masked") {
+		t.Fatalf("inspect single: %s", w2.Body.String())
+	}
+}
+
+// 场景: 未配置 inspect——账号列表与单账号接口均返回原始数据
+func TestCreds_WithoutInspectReturnsOriginalData(t *testing.T) {
+	_, mux, app := credsFixture(t, map[string]string{
+		"login/index.js":     `module.exports = function(ctx){ return {token: "secret"}; }`,
+		"login/ui/index.html": `<html></html>`,
+	})
+	if _, err := app.Login("checkin", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("plain list status: %d %s", w.Code, w.Body.String())
+	}
+	var list struct {
+		Accounts []struct{ ID string `json:"id"` } `json:"accounts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Accounts) != 1 {
+		t.Fatalf("accounts count: %d", len(list.Accounts))
+	}
+	if !strings.Contains(w.Body.String(), "secret") {
+		t.Fatalf("plain list: %s", w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/admin/api/packages/checkin/accounts/"+list.Accounts[0].ID, nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("plain single status: %d %s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), "secret") {
+		t.Fatalf("plain single: %s", w2.Body.String())
 	}
 }
 
