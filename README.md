@@ -17,10 +17,11 @@ go run ./cmd/ai-api-proxy            # 默认 :8080
 
 ## 核心概念
 
-- **插件包(.aap,zip)**:三层插槽的可选实现集合——protocol(协议适配,模型行绑定包必须)/ filters(请求修改,串行);
-  参数槽由包内族文件的 settings 片段统一声明(同名槽拒装)
-- **参数双层级**:插件参数(包级,一次配置)+ 模型行 params(行级稀疏覆盖,保存期白名单校验);密钥独立成包级 keys(util.key 直读,轮换立即生效)
-- **模型行 = {name, plugin, params, enabled}**:行名即模型名;唯一键 (name, plugin)——同名模型可跨协议插件复用。实现上拆为模型组(plugin/params/enabled,组名前缀唯一)+ 组内成员(name/enabled,组内唯一)两层,等价保证该唯一键
+- **渠道**:上游接入配置的核心实体(管理台展示为"渠道";存储与管理 API 仍使用 `model_groups` / `/admin/api/groups` 命名),承载协议插件、渠道参数覆盖与启用状态;传输实例在全局 `transports` 配置,渠道参数以 `transport` 键引用。请求仍通过标准 `model` 字段选择模型
+- **渠道模型**:`{name, enabled}` 路由成员(管理 API 为 `/admin/api/groups/{id}/members`),只定义该渠道可路由的模型名与启用状态,不持有插件或参数。请求的 `model` 可传 `渠道前缀/模型名` 全路径(定向该渠道),或传模型短名;短名在多个启用渠道重名时跨渠道轮询。`/v1/models` 返回名格式由 `models_listing` 决定
+- **参数解析**:插件 settings 声明的 `default` 为底值,包级插件参数覆盖默认值,渠道参数覆盖前两者(渠道 > 插件参数 > settings default);声明类型/枚举在合并后校验,`required` 仅请求期检查(缺失 → 502)
+- **插件包(.aap,zip)**:三层插槽的可选实现集合——protocol(协议适配,渠道必须绑定)/ filters(请求修改,串行);
+  参数槽由包内族文件的 settings 片段统一声明(同名槽拒装);密钥独立成包级 keys(util.key 直读,轮换立即生效)
 - **声明式单协议**:协议部件在 manifest 声明唯一协议槽(`openai-completions`|`anthropic-messages`)与可处理形态;
   入口协议或形态不符时路由直接 400 拒绝(逐行注明拒因),不做转换、不做兜底。管道权威格式 = 声明协议格式,无中间格式
 - **快速路径**:openai 入口 ∧ 内置协议工厂 ∧ 空 filter 链 → 字节直发(不重序列化)

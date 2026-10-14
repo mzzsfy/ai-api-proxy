@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,11 +47,11 @@ func newSubDeps(t *testing.T) (*Deps, *store.Store, *plugin.Registry) {
 		CheckURL: func(string) error { return nil },
 	}
 	d := &Deps{
-		Packages:           reg,
-		Upstream:           upstream.NewRegistry(st.DB(), reg),
-		Subscriptions:      engine,
-		SubscriptionStore:  st,
-		SubscriptionCheck:  func(string) error { return nil },
+		Packages:          reg,
+		Upstream:          upstream.NewRegistry(st.DB(), reg),
+		Subscriptions:     engine,
+		SubscriptionStore: st,
+		SubscriptionCheck: func(string) error { return nil },
 	}
 	return d, st, reg
 }
@@ -70,17 +72,15 @@ func seedRepoLocal(t *testing.T, pkgName string) string {
 	}
 	g(base, "init", "-b", "main", src)
 	pkgDir := filepath.Join(src, "plugins", pkgName)
-	if err := os.MkdirAll(filepath.Join(pkgDir, "filters"), 0o755); err != nil {
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"manifestVersion":1,"name":"` + pkgName + `","version":"1.0.0","parts":{"filters":[{"name":"identity"}]}}`
+	manifest := `{"manifestVersion":1,"name":"` + pkgName + `","version":"1.0.0","parts":{"protocol":{"protocol":"openai-completions"}}}`
 	if err := os.WriteFile(filepath.Join(pkgDir, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	filter := `module.exports = function (config) {
-	return { mapRequest: function (ctx, e) { return e; }, mapChunk: function (ctx, c) { return c; }, mapResponse: function (ctx, r) { return r; } };
-};`
-	if err := os.WriteFile(filepath.Join(pkgDir, "filters", "identity.js"), []byte(filter), 0o644); err != nil {
+	protocol := `module.exports = function (config) { return { buildRequest: function (ctx, entry) { return { url: "https://example.test", method: "POST", headers: {}, body: entry }; }, mapEvent: function (ctx, event) { return event; }, mapResponse: function (ctx, response) { return response; } }; };`
+	if err := os.WriteFile(filepath.Join(pkgDir, "protocol.js"), []byte(protocol), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	g(src, "add", ".")
@@ -99,7 +99,8 @@ func mustJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {	t.Helper()
+func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
 	var rd *strings.Reader
 	if body == "" {
 		rd = strings.NewReader("")
@@ -115,6 +116,93 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) (*httpt
 	var out map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return w, out
+}
+
+func TestSubscriptions_UninstallReferencedPackage_UsesChannelConflictMessage(t *testing.T) {
+	// Given 已安装插件被渠道绑定 When 请求卸载插件 Then 409 提示渠道引用且插件仍可用
+	d, _, reg := newSubDeps(t)
+	pkg := buildChannelPackage(t, "channel-pkg")
+	if err := reg.Install(context.Background(), pkg, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Upstream.SaveGroup(context.Background(), &upstream.Group{
+		Prefix: "primary", Plugin: "channel-pkg", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w, _ := doJSON(t, d.Mux(), http.MethodDelete, "/admin/api/packages/channel-pkg", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "渠道引用") || !strings.Contains(w.Body.String(), "primary") || strings.Contains(w.Body.String(), "模型组") {
+		t.Fatalf("conflict message must identify the channel: %s", w.Body.String())
+	}
+	if _, err := reg.GetPackage("channel-pkg"); err != nil {
+		t.Fatalf("referenced package was uninstalled: %v", err)
+	}
+}
+
+func TestSubscriptions_DeleteReferencedPackage_UsesChannelConflictMessage(t *testing.T) {
+	// Given 订阅源插件已同步且被渠道绑定 When 删除订阅 Then 409 提示渠道引用且订阅与插件保留
+	d, st, reg := newSubDeps(t)
+	repo := seedRepoLocal(t, "channel-pkg")
+	w, resp := doJSON(t, d.Mux(), http.MethodPost, "/admin/api/subscriptions", mustJSON(t, map[string]any{
+		"name": "channel-repo", "repo_url": repo, "path": "plugins/channel-pkg",
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("create subscription: %d %s", w.Code, w.Body.String())
+	}
+	subID := int64(resp["id"].(float64))
+	w, _ = doJSON(t, d.Mux(), http.MethodPost, fmt.Sprintf("/admin/api/subscriptions/%d/sync", subID), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sync subscription: %d %s", w.Code, w.Body.String())
+	}
+	if err := d.Upstream.SaveGroup(context.Background(), &upstream.Group{
+		Prefix: "secondary", Plugin: "channel-pkg", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w, _ = doJSON(t, d.Mux(), http.MethodDelete, fmt.Sprintf("/admin/api/subscriptions/%d", subID), "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "渠道引用") || !strings.Contains(w.Body.String(), "secondary") || strings.Contains(w.Body.String(), "模型组") {
+		t.Fatalf("conflict message must identify the channel: %s", w.Body.String())
+	}
+	if _, err := st.GetSubscription(context.Background(), subID); err != nil {
+		t.Fatalf("referenced subscription was deleted: %v", err)
+	}
+	if _, err := reg.GetPackage("channel-pkg"); err != nil {
+		t.Fatalf("referenced package was uninstalled: %v", err)
+	}
+}
+
+func buildChannelPackage(t *testing.T, name string) []byte {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	zw := zip.NewWriter(buf)
+	manifest := fmt.Sprintf(`{"manifestVersion":1,"name":%q,"version":"1.0.0","parts":{"protocol":{"protocol":"openai-completions"}}}`, name)
+	file, err := zw.Create("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	protocol := `module.exports = function (config) { return { buildRequest: function (ctx, entry) { return { url: "https://example.test", method: "POST", headers: {}, body: entry }; }, mapEvent: function (ctx, event) { return event; }, mapResponse: function (ctx, response) { return response; } }; };`
+	file, err = zw.Create("protocol.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte(protocol)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestSubscriptions_CreateListTokenMasked(t *testing.T) {

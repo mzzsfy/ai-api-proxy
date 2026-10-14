@@ -359,7 +359,7 @@ func (d *Deps) installPackageFromURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// groupRefs 包被哪些组引用(前缀列表;删除/禁用包前的冲突检查用)
+// groupRefs 包被哪些渠道引用(前缀列表;删除/禁用包前的冲突检查用)
 func (d *Deps) groupRefs(name string) []string {
 	var refs []string
 	for _, g := range d.Upstream.ListGroups() {
@@ -370,12 +370,12 @@ func (d *Deps) groupRefs(name string) []string {
 	return refs
 }
 
-// deletePackage 卸载包(被模型组引用拒绝;内置包拒绝)
+// deletePackage 卸载包(被渠道引用拒绝;内置包拒绝)
 func (d *Deps) deletePackage(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	refs := d.groupRefs(name)
 	if len(refs) > 0 {
-		httpError(w, http.StatusConflict, "包被以下模型组引用: "+strings.Join(refs, ","))
+		httpError(w, http.StatusConflict, "包被以下渠道引用: "+strings.Join(refs, ","))
 		return
 	}
 	if err := d.Packages.Delete(r.Context(), name); err != nil {
@@ -636,7 +636,7 @@ func (d *Deps) savePackageSettings(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// 插件参数烘焙进部件闭包:改值后失效引用该包的模型行缓存(Upstream 未装配时无行可失效)
+	// 插件参数烘焙进部件闭包:改值后失效引用该包的渠道部件缓存(Upstream 未装配时无渠道可失效)
 	if d.Upstream != nil {
 		d.Upstream.EvictPackageSettings(name)
 	}
@@ -665,7 +665,7 @@ func (d *Deps) enablePackage(w http.ResponseWriter, r *http.Request) {
 		// 被引用禁用 = 拒绝并提示引用列表(运行期兜底:Pick 报 package disabled)
 		refs := d.groupRefs(name)
 		if len(refs) > 0 {
-			httpError(w, http.StatusConflict, "包被以下模型组引用: "+strings.Join(refs, ","))
+			httpError(w, http.StatusConflict, "包被以下渠道引用: "+strings.Join(refs, ","))
 			return
 		}
 	}

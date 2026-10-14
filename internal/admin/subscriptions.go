@@ -97,7 +97,7 @@ func (d *Deps) createSubscription(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "id": id})
 }
 
-// deleteSubscription 删订阅(联动卸载来源包;被模型组引用的包先阻塞,409 提示先解绑)
+// deleteSubscription 删订阅(联动卸载来源包;被渠道引用的包先阻塞,409 提示先解绑)
 func (d *Deps) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	if d.Subscriptions == nil || d.SubscriptionStore == nil {
 		httpError(w, http.StatusNotImplemented, "subscriptions disabled")
@@ -122,7 +122,7 @@ func (d *Deps) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	for _, name := range d.Packages.ListPackages() {
 		if src, ok := d.Packages.PackageSource(name); ok && src == source {
 			if refs := d.groupRefs(name); len(refs) > 0 {
-				httpError(w, http.StatusConflict, "包 "+name+" 被以下模型组引用: "+strings.Join(refs, ","))
+				httpError(w, http.StatusConflict, "包 "+name+" 被以下渠道引用: "+strings.Join(refs, ","))
 				return
 			}
 		}

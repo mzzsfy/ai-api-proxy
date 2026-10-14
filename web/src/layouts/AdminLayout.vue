@@ -5,9 +5,9 @@ import { NButton, NDropdown, NDrawer, NDrawerContent, NIcon, NLayout, NLayoutCon
 import {
   AnalyticsOutline,
   CloudDownloadOutline,
-  CubeOutline,
   ExtensionPuzzleOutline,
   GitNetworkOutline,
+  LayersOutline,
   LogOutOutline,
   MenuOutline,
   MoonOutline,
@@ -39,7 +39,7 @@ function onThemeSelect(key: string) {
 
 const navItems: NavItem[] = [
   { to: { name: 'monitor' }, label: '监控', icon: PulseOutline },
-  { to: { name: 'models' }, label: '模型管理', icon: CubeOutline },
+  { to: { name: 'models' }, label: '渠道管理', icon: LayersOutline },
   { to: { name: 'packages' }, label: '插件管理', icon: ExtensionPuzzleOutline },
   { to: { name: 'history' }, label: '请求历史', icon: AnalyticsOutline },
   { to: { name: 'transports' }, label: '传输通道', icon: GitNetworkOutline },

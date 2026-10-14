@@ -43,7 +43,7 @@ const pluginOptions = computed(() =>
   (packagesQuery.data.value ?? []).filter((p) => p.hasProtocol).map((p) => ({ label: p.title || p.name, value: p.name })),
 )
 
-// ── 组编辑(抽屉;plugin 编辑态不可改, transport 从 params 拆出独立编辑)──
+// ── 渠道编辑(抽屉;插件编辑态不可改,传输从 params 拆出独立编辑)──
 const editOpen = ref(false)
 const editId = ref<number | null>(null)
 const editPrefix = ref('')
@@ -94,7 +94,7 @@ async function saveEdit() {
   try {
     if (editId.value === null) {
       await api.groups.create({ prefix: editPrefix.value.trim(), plugin: editPlugin.value, params, enabled: editEnabled.value })
-      message.success('已创建组')
+      message.success('已创建渠道')
     } else {
       await api.groups.update(editId.value, {
         id: editId.value,
@@ -112,7 +112,7 @@ async function saveEdit() {
   }
 }
 
-// ── 组级测试/对话测试/删除 ──
+// ── 渠道级测试/对话测试/删除 ──
 async function runTest(row: ModelGroup) {
   try {
     const result = await api.groups.test(row.id)
@@ -176,7 +176,7 @@ async function confirmDelete() {
   }
 }
 
-// ── 成员管理(弹窗)──
+// ── 渠道内模型管理(弹窗)──
 const membersOpen = ref(false)
 const membersGroup = ref<ModelGroup | null>(null)
 const membersQuery = useQuery({
@@ -192,14 +192,14 @@ function openMembers(row: ModelGroup) {
   newMemberName.value = ''
   newMemberEnabled.value = false
   membersOpen.value = true
-  // 重开同组也强制拉最新(组成员可能经 discover apply 等其他路径变更)
+  // 重开同一渠道也强制拉最新数据(模型可能经自动发现等其他路径变更)
   void membersQuery.refetch()
 }
 
 async function addMember() {
   const name = newMemberName.value.trim()
   if (!name || !membersGroup.value) {
-    message.error('成员名不能为空')
+    message.error('模型名不能为空')
     return
   }
   try {
@@ -265,7 +265,7 @@ const memberColumns: DataTableColumns<GroupMember> = [
   },
 ]
 
-// ── 模型发现(弹窗:规则管道 + 预览 + 导入)──
+// ── 渠道模型发现(弹窗:规则管道 + 预览 + 导入)──
 interface RuleRow {
   op: 'only' | 'exclude' | 'rename' | 'limit'
   regex: string
@@ -348,7 +348,7 @@ function rulePlaceholder(field: 'regex' | 'from' | 'to', op: RuleRow['op']): str
 
 const discoverColumns: DataTableColumns<DiscoveryHit> = [
   { title: '上游模型名', key: 'upstream_name', ellipsis: { tooltip: true } },
-  { title: '落库成员名', key: 'member_name', ellipsis: { tooltip: true } },
+  { title: '路由模型名', key: 'member_name', ellipsis: { tooltip: true } },
   {
     title: '动作',
     key: 'action',
@@ -367,13 +367,13 @@ const discoverColumns: DataTableColumns<DiscoveryHit> = [
   },
 ]
 
-// ── 组表格 ──
+// ── 渠道表格 ──
 const columns: DataTableColumns<ModelGroup> = [
   { title: 'ID', key: 'id', width: 70 },
-  { title: '前缀', key: 'prefix', width: 160, ellipsis: { tooltip: true } },
-  { title: '插件包', key: 'plugin', width: 180 },
+  { title: '渠道标识', key: 'prefix', width: 160, ellipsis: { tooltip: true } },
+  { title: '协议插件', key: 'plugin', width: 180 },
   {
-    title: 'params',
+    title: '渠道参数',
     key: 'params',
     render: (row) => h('code', { class: 'mono' }, paramsWithoutTransport(row.params)),
   },
@@ -389,7 +389,7 @@ const columns: DataTableColumns<ModelGroup> = [
     key: 'actions',
     width: 400,
     render: (row) => [
-      h(NButton, { size: 'small', onClick: () => openMembers(row) }, { default: () => '成员' }),
+      h(NButton, { size: 'small', onClick: () => openMembers(row) }, { default: () => '模型' }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openDiscover(row) }, { icon: () => h(NIcon, { component: GitNetworkOutline }) }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openEdit(row) }, { default: () => '编辑' }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => runTest(row) }, { icon: () => h(NIcon, { component: PlayOutline }) }),
@@ -404,12 +404,12 @@ const columns: DataTableColumns<ModelGroup> = [
   <div class="page">
     <div class="page-header">
       <div>
-        <h1>模型管理</h1>
-        <p class="subtitle">共 {{ groupsQuery.data.value?.length ?? 0 }} 组;请求支持「前缀/成员名」全路径或无歧义短名</p>
+        <h1>渠道管理</h1>
+        <p class="subtitle">共 {{ groupsQuery.data.value?.length ?? 0 }} 个渠道；配置上游协议、参数与传输方式，模型作为渠道下的可调用路由</p>
       </div>
       <NButton type="primary" @click="openCreate">
         <template #icon><NIcon :component="AddOutline" /></template>
-        新建模型组
+        新建渠道
       </NButton>
     </div>
 
@@ -421,21 +421,21 @@ const columns: DataTableColumns<ModelGroup> = [
     />
 
     <NDrawer v-model:show="editOpen" :width="480" placement="right">
-      <NDrawerContent :title="editId === null ? '新建模型组' : `编辑组 #${editId}`" closable>
+      <NDrawerContent :title="editId === null ? '新建渠道' : `编辑渠道 #${editId}`" closable>
         <NForm label-placement="top">
-          <NFormItem label="前缀(全路径请求的命名空间,不可含 /)">
+          <NFormItem label="渠道前缀(模型全路径请求的命名空间,不可含 /)">
             <NInput v-model:value="editPrefix" placeholder="opencode" />
           </NFormItem>
-          <NFormItem v-if="editId !== null" label="插件包">
+          <NFormItem v-if="editId !== null" label="协议插件包">
             <NInput :value="editPlugin" disabled />
           </NFormItem>
-          <NFormItem v-else label="插件包">
+          <NFormItem v-else label="协议插件包">
             <NSelect v-model:value="editPlugin" :options="pluginOptions" />
           </NFormItem>
           <NFormItem label="传输通道">
             <NSelect v-model:value="editTransport" :options="transportOptions" />
           </NFormItem>
-          <NFormItem label="params(JSON)">
+          <NFormItem label="渠道参数(JSON)">
             <NInput v-model:value="editParamsJson" type="textarea" :rows="8" class="mono" />
           </NFormItem>
           <NFormItem label="启用">
@@ -450,10 +450,10 @@ const columns: DataTableColumns<ModelGroup> = [
       v-model:show="membersOpen"
       preset="card"
       class="members-modal"
-      :title="`成员管理 — ${membersGroup?.prefix ?? ''}`"
+      :title="`渠道模型 — ${membersGroup?.prefix ?? ''}`"
     >
       <div style="display: flex; gap: 8px; margin-bottom: 12px">
-        <NInput v-model:value="newMemberName" placeholder="成员短名(如 gpt-4o,可含 /)" @keyup.enter="addMember" />
+        <NInput v-model:value="newMemberName" placeholder="渠道模型名(如 gpt-4o,可含 /)" @keyup.enter="addMember" />
         <NCheckbox v-model:checked="newMemberEnabled" style="align-self: center; white-space: nowrap">直接启用</NCheckbox>
         <NButton type="primary" @click="addMember">添加</NButton>
       </div>
@@ -470,7 +470,7 @@ const columns: DataTableColumns<ModelGroup> = [
       v-model:show="discoverOpen"
       preset="card"
       class="discover-modal"
-      :title="`模型发现 — ${discoverGroup?.prefix ?? ''}`"
+      :title="`渠道模型发现 — ${discoverGroup?.prefix ?? ''}`"
     >
       <p class="discover-hint">
         从上游 /v1/models 拉取列表,按规则管道过滤改名。至少需要一条 only/exclude 规则。
@@ -519,7 +519,7 @@ const columns: DataTableColumns<ModelGroup> = [
     <NModal
       v-model:show="chatOpen"
       preset="card"
-      :title="`对话测试 — ${chatGroupLabel}`"
+      :title="`渠道对话测试 — ${chatGroupLabel}`"
       class="chat-modal"
     >
       <NInput v-model:value="chatMessage" type="text" placeholder="测试消息" @keyup.enter="runChatTest" />
@@ -533,8 +533,8 @@ const columns: DataTableColumns<ModelGroup> = [
       :show="deleting !== null"
       preset="dialog"
       type="warning"
-      title="删除模型组"
-      :content="`确认删除组 ${deleting?.prefix ?? ''} ?组内成员一并删除。`"
+      title="删除渠道"
+      :content="`确认删除渠道 ${deleting?.prefix ?? ''} ?渠道下的模型一并删除。`"
       positive-text="删除"
       negative-text="取消"
       @positive-click="confirmDelete"
@@ -546,8 +546,8 @@ const columns: DataTableColumns<ModelGroup> = [
       :show="deletingMember !== null"
       preset="dialog"
       type="warning"
-      title="删除成员"
-      :content="`确认删除成员 ${deletingMember?.name ?? ''} ?`"
+      title="删除渠道模型"
+      :content="`确认删除渠道模型 ${deletingMember?.name ?? ''} ?`"
       positive-text="删除"
       negative-text="取消"
       @positive-click="confirmDeleteMember"

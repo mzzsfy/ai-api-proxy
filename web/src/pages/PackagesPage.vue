@@ -232,7 +232,7 @@ async function confirmRemove() {
       preset="dialog"
       type="warning"
       title="卸载插件包"
-      :content="`确认卸载 ${removing ?? ''} ?被模型行引用时将拒绝。`"
+      :content="`确认卸载 ${removing ?? ''} ?被渠道引用时将拒绝。`"
       positive-text="卸载"
       negative-text="取消"
       @positive-click="confirmRemove"

@@ -246,7 +246,7 @@ func TestPackageDelete_ReferencedRejected(t *testing.T) {
 	f := newFourGroups(t)
 	// ① 被 g1 引用的 js-openai:卸载 → 409 引用列表
 	code, body := f.adminMethod(t, http.MethodDelete, "/admin/api/packages/js-openai", "")
-	if code != http.StatusConflict || !strings.Contains(body, "模型组引用") {
+	if code != http.StatusConflict || !strings.Contains(body, "渠道引用") {
 		t.Fatalf("delete referenced: %d %s", code, body)
 	}
 	// ② 无引用包:卸载 → 200;再卸载 → 404
