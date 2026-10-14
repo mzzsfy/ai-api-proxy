@@ -3,6 +3,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -99,6 +100,9 @@ func (a *App) Accounts(pkg string) ([]map[string]any, error) {
 		if inspect != nil {
 			if v, err := inspect(e.Data); err == nil {
 				data = v
+			} else {
+				// 变换失败回退原 data(BDD 契约);静默吞错无法排障,必须留痕
+				slog.Warn("inspect transform failed, fallback to raw", "pkg", pkg, "account", e.ID, "err", err)
 			}
 		}
 		out = append(out, map[string]any{"id": e.ID, "data": data, "updatedAt": e.UpdatedAt})
@@ -124,6 +128,9 @@ func (a *App) Account(pkg, id string) (map[string]any, error) {
 	if inspect != nil {
 		if v, err := inspect(e.Data); err == nil {
 			data = v
+		} else {
+			// 变换失败回退原 data(BDD 契约);静默吞错无法排障,必须留痕
+			slog.Warn("inspect transform failed, fallback to raw", "pkg", pkg, "account", e.ID, "err", err)
 		}
 	}
 	return map[string]any{"id": e.ID, "data": data, "updatedAt": e.UpdatedAt}, nil
