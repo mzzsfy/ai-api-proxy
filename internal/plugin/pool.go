@@ -58,13 +58,6 @@ func (b *vmBudget) release(pkg string) {
 	}
 }
 
-// budgetSnapshot 测试观测(锁内读双闸计数)
-func budgetSnapshot(pkg string) (global, perPkg int) {
-	vmBudgets.mu.Lock()
-	defer vmBudgets.mu.Unlock()
-	return vmBudgets.global, vmBudgets.perPkg[pkg]
-}
-
 // errPoolClosed 池已关闭(Reload 销毁后借用)
 var errPoolClosed = errors.New("runtime pool closed")
 

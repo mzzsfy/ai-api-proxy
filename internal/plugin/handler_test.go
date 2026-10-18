@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -552,6 +553,7 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 	pool := newHandlerPool("close-leak-h", 100, func() (*handlerInstance, error) {
 		return &handlerInstance{}, nil
 	})
+	t.Cleanup(pool.Close)
 	inst, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatalf("borrow1: %v", err)
@@ -576,7 +578,6 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 		t.Fatal("instance must be discarded after max borrows")
 	}
 	pool.Return(i3, false)
-	pool.Close()
 }
 
 func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
@@ -614,6 +615,7 @@ func TestHandlerPool_CloseReleasesBudget(t *testing.T) {
 	pool := newHandlerPool("close-leak-h", 100, func() (*handlerInstance, error) {
 		return &handlerInstance{}, nil
 	})
+	t.Cleanup(pool.Close)
 	inst, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -622,5 +624,59 @@ func TestHandlerPool_CloseReleasesBudget(t *testing.T) {
 	pool.Close()
 	if _, perPkg := budgetSnapshot("close-leak-h"); perPkg != 0 {
 		t.Fatalf("budget leaked after close: %d", perPkg)
+	}
+}
+
+func TestHandlerPool_CtxCancelInterruptsQueue(t *testing.T) {
+	// Given 单插件预算占满 When ctx 取消 Then 借用立即中断(不等排队上界)
+	pkg := "hcancel"
+	for range PerPkgVMCap {
+		if !vmBudgets.tryAcquire(pkg) {
+			t.Fatal("acquire until cap")
+		}
+	}
+	t.Cleanup(func() {
+		for range PerPkgVMCap {
+			vmBudgets.release(pkg)
+		}
+	})
+	pool := newHandlerPool(pkg, 100, func() (*handlerInstance, error) {
+		return &handlerInstance{}, nil
+	})
+	t.Cleanup(pool.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if _, err := pool.Borrow(ctx); err == nil {
+		t.Fatal("expect cancel error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("cancel must interrupt queue, took %v", elapsed)
+	}
+}
+
+func TestHandlerPool_ClosedDuringWindow(t *testing.T) {
+	// Given 借用进入等待窗 When 窗内 Close Then 窗超后复查关闭即拒绝(不新建实例)
+	var builds int
+	pool := newHandlerPool("t", 100, func() (*handlerInstance, error) {
+		builds++
+		return &handlerInstance{}, nil
+	})
+	orig := poolWait()
+	SetPoolConfig(0, 200*time.Millisecond)
+	t.Cleanup(func() { SetPoolConfig(0, orig) })
+	t.Cleanup(pool.Close)
+	done := make(chan error, 1)
+	go func() { _, err := pool.Borrow(context.Background()); done <- err }()
+	time.Sleep(50 * time.Millisecond)
+	pool.Close()
+	if err := <-done; !errors.Is(err, errHandlerPoolClosed) {
+		t.Fatalf("closed during window: %v", err)
+	}
+	if builds != 0 {
+		t.Fatalf("no build after close, built %d", builds)
 	}
 }

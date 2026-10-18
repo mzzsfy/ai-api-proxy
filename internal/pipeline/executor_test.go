@@ -394,3 +394,15 @@ func TestRefreshSingleflight_Removed(t *testing.T) {
 	// 重试/刷新语义已删除;此占位保证文件非空(删除时同步删除)
 	t.Skip("retry semantics removed by design change: downstream owns retries")
 }
+
+func TestRunLoadsPipelineCtx(t *testing.T) {
+	// Given 空链 When Run Then 执行级 ctx 装入管道上下文(适配层池排队取消依赖;断言在 dispatch 失败前已成立)
+	e := &Executor{Transports: func(string) (Transport, bool) { return nil, false }}
+	pctx := NewContext("r1", UpstreamInfo{}, Vars{})
+	want, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _ = e.Run(want, pctx, resolved(&fakeProtocol{}, nil), []byte(`{}`))
+	if pctx.Ctx != want {
+		t.Fatal("pctx.Ctx must be the executor ctx")
+	}
+}

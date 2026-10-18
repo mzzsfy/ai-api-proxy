@@ -160,11 +160,14 @@ func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink Ha
 	ex.tx = NewStorageTx(nil) // ② 缓冲;③ 经 deps.Store
 
 	// 池排队(VM 预算轮询)上界 60s,计入整体预算;客户端断连/预算耗尽即中断
+	// 排队期登记原语计数(纯计算看门狗豁免:排队无 JS 活动,豁免至借出)
 	pool, err := e.poolFor()
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}
+	ex.prim.Add(1)
 	inst, err := pool.Borrow(ex.ctx)
+	ex.prim.Add(-1)
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}

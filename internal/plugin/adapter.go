@@ -201,11 +201,19 @@ func borrowCtx(ctx *pipeline.PipelineContext) context.Context {
 	return context.Background()
 }
 
+// borrowErr 借用失败映射:取消类保留原因(断连/预算,排障可辨),其余压平池忙
+func borrowErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return pipeline.ErrPoolBusy
+}
+
 // borrowWrap 借还包装:出池按 pctx.Key 无条件重绑键槽(含空值清槽,防池化残留);broken 实例归还时丢弃
 func (g *jsProtocol) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
 	inst, err := g.pool.Borrow(borrowCtx(ctx))
 	if err != nil {
-		return nil, pipeline.ErrPoolBusy
+		return nil, borrowErr(err)
 	}
 	inst.rebindKey(ctx)
 	res, broken, err := fn(inst)
@@ -469,7 +477,7 @@ func (g *jsFilter) Name() string { return g.name }
 func (g *jsFilter) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
 	inst, err := g.pool.Borrow(borrowCtx(ctx))
 	if err != nil {
-		return nil, pipeline.ErrPoolBusy
+		return nil, borrowErr(err)
 	}
 	inst.rebindKey(ctx)
 	res, broken, err := fn(inst)

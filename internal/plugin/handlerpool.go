@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,9 @@ func (hi *handlerInstance) release() {
 	_ = hi.env.q.Close()
 }
 
+// errHandlerPoolClosed 池已关闭(热加载销毁后借用)
+var errHandlerPoolClosed = errors.New("handler pool closed")
+
 // handlerPool 实例池:容量从 0 按需增长(VM 预算约束总量);broken/借满即弃
 type handlerPool struct {
 	pkg       string
@@ -57,7 +61,7 @@ func (p *handlerPool) Borrow(ctx context.Context) (*handlerInstance, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("handler pool closed")
+		return nil, errHandlerPoolClosed
 	}
 	p.wg.Add(1) // 与 closed 检查同临界区(Close→Wait 不允许与 Add 并发)
 	p.mu.Unlock()
@@ -79,7 +83,7 @@ func (p *handlerPool) Borrow(ctx context.Context) (*handlerInstance, error) {
 	closed := p.closed
 	p.mu.Unlock()
 	if closed {
-		return fail(fmt.Errorf("handler pool closed"))
+		return fail(errHandlerPoolClosed)
 	}
 	deadline := time.NewTimer(handlerQueueTimeout)
 	defer deadline.Stop()

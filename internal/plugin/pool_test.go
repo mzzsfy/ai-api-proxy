@@ -310,3 +310,10 @@ func TestPool_CtxCancelInterruptsQueue(t *testing.T) {
 		t.Fatalf("cancel must interrupt queue, took %v", elapsed)
 	}
 }
+
+// budgetSnapshot 测试观测(锁内读双闸计数)
+func budgetSnapshot(pkg string) (global, perPkg int) {
+	vmBudgets.mu.Lock()
+	defer vmBudgets.mu.Unlock()
+	return vmBudgets.global, vmBudgets.perPkg[pkg]
+}
