@@ -1,4 +1,4 @@
-// ai-api-proxy 插件 SDK 类型定义(hook 全同步;代理层恰一次上游请求,无重试——归下游)
+// ai-api-proxy 插件 SDK 类型定义(hook 可 async:宿主等待 settled,超时按各钩子预算;代理层恰一次上游请求,无重试——归下游)
 // 声明式单协议:一个协议部件服务且仅服务 manifest 声明的唯一协议槽
 // 槽位取值只允许 "openai-completions" | "anthropic-messages";入口与槽位不符由主体 400 拒绝,不做任何转换
 // 多文件布局(无单入口):init.js(onLoad)/ tasks/<name>.js(任务)/ handler.js(handler 部件,与 protocol 互斥)/
@@ -44,33 +44,33 @@ export interface SSEFrame {
 /** 协议适配部件(恰一;主包必须含;协议槽由 manifest 声明) */
 export interface ProtocolHooks {
   /**
-   * 构造上游请求(同步)
+   * 构造上游请求(async 允许:宿主等待 settled)
    * @param entry 入口原文字节(声明协议格式,未经任何转换)
    */
-  buildRequest(ctx: Context, entry: string): UpstreamRequest;
+  buildRequest(ctx: Context, entry: string): UpstreamRequest | Promise<UpstreamRequest>;
   /**
    * 流式帧 → 声明协议事件对象数组的 JSON 字符串;返回 null / "[]" / "" 跳帧
    * 仅在 manifest 声明 streaming 时实现,否则校验期拒绝
    * 失败 = 该帧降级原样透传并告警,流不中断
    */
-  mapEvent?(ctx: Context, event: string): string | null;
+  mapEvent?(ctx: Context, event: string): string | null | Promise<string | null>;
   /**
    * 非流式响应体 → 声明协议响应 JSON 字符串
    * 仅在 manifest 声明 non_streaming 时实现,否则校验期拒绝
    */
-  mapResponse?(ctx: Context, body: string): string;
+  mapResponse?(ctx: Context, body: string): string | Promise<string>;
   /** 错误终局映射(可选;一次;未实现原样透传) */
-  mapError?(ctx: Context, status: number, body: string): string;
+  mapError?(ctx: Context, status: number, body: string): string | Promise<string>;
 }
 
-/** 请求修改部件(0..n 串行;不参与能力协商) */
+/** 请求修改部件(0..n 串行;不参与能力协商;async 允许) */
 export interface FilterHooks {
   /** 请求改写(入口格式 → 入口格式);失败 = 请求 502 带部件名 */
-  mapRequest(ctx: Context, entry: string): string | null;
+  mapRequest(ctx: Context, entry: string): string | null | Promise<string | null>;
   /** 流式 chunk 改写(逆序);失败 = 单 chunk 降级 raw */
-  mapChunk?(ctx: Context, chunk: string): string | null;
+  mapChunk?(ctx: Context, chunk: string): string | null | Promise<string | null>;
   /** 非流式响应改写(逆序);失败 = 502 */
-  mapResponse?(ctx: Context, resp: string): string | null;
+  mapResponse?(ctx: Context, resp: string): string | null | Promise<string | null>;
 }
 
 /**
@@ -237,31 +237,31 @@ export interface HookContext {
  * handler:任务体;next 形态(声明 next:true)另导出 next
  */
 export interface TaskModule {
-  /** 任务体(同步) */
-  handler(ctx: HookContext): void;
+  /** 任务体(async 允许:宿主等待 settled) */
+  handler(ctx: HookContext): void | Promise<void>;
   /**
    * 自调度链(声明 next:true 时必须导出;与 cron 互斥)
    * 返回下次触发的 Unix 毫秒时间戳;null = 停止链;返回值 ≤ now = 立即再触发
    */
-  next?(ctx: HookContext): number | null;
+  next?(ctx: HookContext): number | null | Promise<number | null>;
   /** 可挂 settings 声明片段 */
   settings?: Record<string, unknown>;
 }
 
-/** init.js 导出(onLoad 处理器) */
+/** init.js 导出(onLoad 处理器;async 允许) */
 export interface InitModule {
-  onLoad(ctx: HookContext): void;
+  onLoad(ctx: HookContext): void | Promise<void>;
   settings?: Record<string, unknown>;
 }
 
 /**
  * handler.js 导出(与 protocol 部件互斥;manifest parts.handler 声明入口协议)
- * 主函数持有整个请求生命周期:出站时机/次数/流处理/续接全内联,同步直线代码
+ * 主函数持有整个请求生命周期:出站时机/次数/流处理/续接全内联(async 允许:宿主等待 settled)
  */
 export interface HandlerModule {
-  (ctx: HandlerContext): void;
+  (ctx: HandlerContext): void | Promise<void>;
   /**
-   * 可选:数据准备(请求开始时执行,返回值 = ctx.data 初始值)
+   * 可选:数据准备(async 允许;请求开始时执行,返回值 = ctx.data 初始值)
    * 可用原语:http/storage(含槽锁)/settings 全量,request/params/key 只读同主函数;禁 reply 与 ctx.data(访问即抛错)
    * 持有的槽锁自然延续到主函数,终局统一兜底释放
    */
