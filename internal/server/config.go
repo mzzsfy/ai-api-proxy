@@ -50,6 +50,10 @@ type Config struct {
 	HandlerVMMaxBorrow int `yaml:"handler_vm_max_borrow"`
 	// HandlerRSSSoftPercent RSS 看门狗软限(物理内存百分比;≤0 = 关闭;硬限 = 软限×1.5,独立进程退出)
 	HandlerRSSSoftPercent int `yaml:"handler_rss_soft_percent"`
+	// PoolSize JS 池常驻实例上限(每池;归还保留的空闲数,弹性新建总量归 VM 预算;≤0 = 缺省)
+	PoolSize int `yaml:"pool_size"`
+	// PoolWaitMS 池空闲等待窗(窗内归还即复用,超窗新建;≤0 = 缺省)
+	PoolWaitMS int `yaml:"pool_wait_ms"`
 	Transports    []TransportCfg `yaml:"transports"`
 }
 

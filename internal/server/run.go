@@ -207,6 +207,8 @@ func Build(cfg *Config) (*App, error) {
 		slog.Warn("history open (recording disabled)", "err", histErr)
 	}
 	shared := newHandlerShared(st)
+	// 池配置注入(进程级;env API_PROXY_POOL_SIZE 优先于 yaml)
+	plugin.SetPoolConfig(cfg.PoolSize, time.Duration(cfg.PoolWaitMS)*time.Millisecond)
 	reg := upstream.NewRegistry(st.DB(), pkgs)
 	if err := reg.LoadFromDB(ctx); err != nil {
 		_ = st.Close()

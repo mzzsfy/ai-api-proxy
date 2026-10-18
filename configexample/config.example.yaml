@@ -17,6 +17,12 @@ history_retention_days: 7
 # /v1/models 列表模式:full(全路径 prefix/member,默认)|short(短名,多组同名轮询)|both(全路径 ∪ 短名)
 models_listing: "full"
 
+# JS 池常驻实例上限(每池;归还保留的空闲数,并发低时实际常驻更少;弹性新建总量归 VM 预算:单插件 64/全局 128;env API_PROXY_POOL_SIZE 优先)
+pool_size: 4
+
+# 池空闲等待窗毫秒(窗内有归还即复用,超窗才新建;调大省构建开销、调小降延迟)
+pool_wait_ms: 10
+
 # 全局传输实例(部署资产,target 按名引用;仅 yaml 可表达嵌套)
 # url scheme 判型:direct(字面值)|socks5://|http://|https://|aap://|ipp+<kind>://
 # 管理面 /admin → 监控 → 传输实例:可对每个实例做连通测试与失效命令(evict)

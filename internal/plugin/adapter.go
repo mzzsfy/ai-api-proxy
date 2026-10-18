@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
@@ -15,20 +16,57 @@ import (
 
 // ─── JS 部件 → 管道契约适配(runtime 池化;hook 允许 async,宿主等待 settled;超时预算中断)───
 
-// PoolEnvVar 池大小环境变量逃生
-const PoolEnvVar = "API_PROXY_POOL_SIZE"
-
-// poolSizeDefault 池容量上限(JS 实例内存重;宿主函数注册数随实例线性,池化并行收益在 4 路后边际归零)
+// poolSizeDefault 常驻实例上限缺省(每池;归还后保留的空闲实例数,并发低时实际常驻更少)
 const poolSizeDefault = 4
 
-// poolSize 池容量:env 逃生 > 上限
+// poolWaitDefault 空闲等待窗缺省(窗内归还即复用,超窗弹性新建)
+const poolWaitDefault = 10 * time.Millisecond
+
+// poolCfg 进程级池配置(server 装配注入;0 值 = 用缺省)
+var poolCfg struct {
+	mu      sync.Mutex
+	resident int
+	wait    time.Duration
+}
+
+// SetPoolConfig 覆盖池缺省(resident=常驻实例上限;wait=空闲等待窗;非正值忽略)
+func SetPoolConfig(resident int, wait time.Duration) {
+	poolCfg.mu.Lock()
+	defer poolCfg.mu.Unlock()
+	if resident > 0 {
+		poolCfg.resident = resident
+	}
+	if wait > 0 {
+		poolCfg.wait = wait
+	}
+}
+
+// PoolEnvVar 常驻实例上限环境变量逃生(优先于 server 配置;弹性新建总量归 VM 预算)
+const PoolEnvVar = "API_PROXY_POOL_SIZE"
+
+// poolSize 常驻实例上限:env 逃生 > server 配置 > 缺省
 func poolSize() int {
 	if v := os.Getenv(PoolEnvVar); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
+	poolCfg.mu.Lock()
+	defer poolCfg.mu.Unlock()
+	if poolCfg.resident > 0 {
+		return poolCfg.resident
+	}
 	return poolSizeDefault
+}
+
+// poolWait 空闲等待窗:server 配置 > 缺省
+func poolWait() time.Duration {
+	poolCfg.mu.Lock()
+	defer poolCfg.mu.Unlock()
+	if poolCfg.wait > 0 {
+		return poolCfg.wait
+	}
+	return poolWaitDefault
 }
 
 // jsProtocol JS protocol 部件适配

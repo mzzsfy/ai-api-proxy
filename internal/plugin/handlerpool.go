@@ -47,7 +47,7 @@ type handlerPool struct {
 }
 
 func newHandlerPool(pkg string, maxBorrow int, factory func() (*handlerInstance, error)) *handlerPool {
-	return &handlerPool{pkg: pkg, instances: make(chan *handlerInstance, poolSizeDefault), factory: factory, maxBorrow: maxBorrow}
+	return &handlerPool{pkg: pkg, instances: make(chan *handlerInstance, poolSize()), factory: factory, maxBorrow: maxBorrow}
 }
 
 // Borrow 取实例;10ms 空闲窗内复用归还,超窗按 VM 预算弹性新建(达顶轮询至排队上界);
@@ -64,7 +64,7 @@ func (p *handlerPool) Borrow() (*handlerInstance, error) {
 		p.wg.Done()
 		return nil, err
 	}
-	wait := time.NewTimer(PoolIdleWait)
+	wait := time.NewTimer(poolWait())
 	select {
 	case inst := <-p.instances:
 		wait.Stop()
@@ -74,7 +74,7 @@ func (p *handlerPool) Borrow() (*handlerInstance, error) {
 	}
 	deadline := time.NewTimer(handlerQueueTimeout)
 	defer deadline.Stop()
-	tick := time.NewTicker(PoolIdleWait)
+	tick := time.NewTicker(pollStep)
 	defer tick.Stop()
 	for {
 		if vmBudgets.tryAcquire(p.pkg) {

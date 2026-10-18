@@ -9,9 +9,8 @@ import (
 // QueueTimeout 弹性达顶后的排队预算(超时=池耗尽)
 const QueueTimeout = 5 * time.Second
 
-// PoolIdleWait 空闲等待窗与达顶轮询步长:窗内有归还即复用,超窗才新建
-// (并发低时常驻实例随之收缩,省内存;突发以 VM 预算扩容)
-const PoolIdleWait = 10 * time.Millisecond
+// pollStep VM 预算达顶后的轮询步长(唤醒延迟上界;独立于空闲等待窗)
+const pollStep = 10 * time.Millisecond
 
 // PerPkgVMCap 单插件 VM 存活上限(所有部件合计)
 const PerPkgVMCap = 64
@@ -87,7 +86,7 @@ func (p *runtimePool) Borrow() (*hookInstance, error) {
 		p.wg.Done()
 		return nil, err
 	}
-	wait := time.NewTimer(PoolIdleWait)
+	wait := time.NewTimer(poolWait())
 	select {
 	case inst := <-p.instances:
 		wait.Stop()
@@ -102,7 +101,7 @@ func (p *runtimePool) Borrow() (*hookInstance, error) {
 	}
 	deadline := time.NewTimer(p.queue)
 	defer deadline.Stop()
-	tick := time.NewTicker(PoolIdleWait)
+	tick := time.NewTicker(pollStep)
 	defer tick.Stop()
 	for {
 		if vmBudgets.tryAcquire(p.pkg) {
