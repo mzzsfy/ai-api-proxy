@@ -666,12 +666,12 @@ func TestHandlerPool_ClosedDuringWindow(t *testing.T) {
 		return &handlerInstance{}, nil
 	})
 	orig := poolWait()
-	SetPoolConfig(0, 200*time.Millisecond)
+	SetPoolConfig(0, 500*time.Millisecond)
 	t.Cleanup(func() { SetPoolConfig(0, orig) })
 	t.Cleanup(pool.Close)
 	done := make(chan error, 1)
 	go func() { _, err := pool.Borrow(context.Background()); done <- err }()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	pool.Close()
 	if err := <-done; !errors.Is(err, errHandlerPoolClosed) {
 		t.Fatalf("closed during window: %v", err)

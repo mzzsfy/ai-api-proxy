@@ -165,9 +165,17 @@ func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink Ha
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}
-	ex.prim.Add(1)
-	inst, err := pool.Borrow(ex.ctx)
-	ex.prim.Add(-1)
+	// factory 装载用户 JS 可 panic,作用域 defer 保看门狗豁免计数配对;借出后立即归还计数(run 期纯计算照常计时)
+	var inst *handlerInstance
+	func() {
+		ex.prim.Add(1)
+		defer ex.prim.Add(-1)
+		var berr error
+		inst, berr = pool.Borrow(ex.ctx)
+		if berr != nil {
+			err = berr
+		}
+	}()
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}
