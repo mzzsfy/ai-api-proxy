@@ -86,10 +86,7 @@ func buildProtocol(pkg *Package, params map[string]any, storage StorageKV, packa
 	if err := validateProtocolBindings(pkg.Manifest.Name, hooks); err != nil {
 		return nil, err
 	}
-	pool, err := newRuntimePool(poolSize(), QueueTimeout, factory)
-	if err != nil {
-		return nil, err
-	}
+	pool := newRuntimePool(pkg.Manifest.Name, poolSize(), QueueTimeout, factory)
 	return &jsProtocol{name: pkg.Manifest.Name, declared: part.Protocol, support: support, pool: pool}, nil
 }
 
@@ -416,10 +413,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage S
 	if first.hooks.MapRequest.VM() == nil {
 		return nil, fmt.Errorf("filter %s/%s: mapRequest missing", pkg.Manifest.Name, part.Name)
 	}
-	pool, err := newRuntimePool(poolSize(), QueueTimeout, factory)
-	if err != nil {
-		return nil, err
-	}
+	pool := newRuntimePool(pkg.Manifest.Name, poolSize(), QueueTimeout, factory)
 	return &jsFilter{name: pkg.Manifest.Name + "/" + part.Name, pool: pool}, nil
 }
 

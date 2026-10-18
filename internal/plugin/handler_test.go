@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 )
@@ -547,7 +549,7 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 	ctx.reply.json(200, "ok");
 }`)
 	_ = pkg
-	pool := newHandlerPool(100, func() (*handlerInstance, error) {
+	pool := newHandlerPool("t", 100, func() (*handlerInstance, error) {
 		return &handlerInstance{}, nil
 	})
 	inst, err := pool.Borrow()
@@ -572,5 +574,35 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 	}
 	if i3 == inst {
 		t.Fatal("instance must be discarded after max borrows")
+	}
+}
+
+func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
+	// Given 池空且 10ms 窗内有归还 When 借用 Then 复用归还实例(不新建)
+	var builds atomic.Int64
+	pool := newHandlerPool("t", 100, func() (*handlerInstance, error) {
+		builds.Add(1)
+		return &handlerInstance{}, nil
+	})
+	t.Cleanup(pool.Close)
+	inst1, err := pool.Borrow()
+	if err != nil {
+		t.Fatalf("borrow1: %v", err)
+	}
+	go func() {
+		time.Sleep(3 * time.Millisecond)
+		inst1.borrows = 0
+		pool.Return(inst1, false)
+	}()
+	inst2, err := pool.Borrow()
+	if err != nil {
+		t.Fatalf("borrow2: %v", err)
+	}
+	defer pool.Return(inst2, false)
+	if inst2 != inst1 {
+		t.Fatal("window reuse expected")
+	}
+	if builds.Load() != 1 {
+		t.Fatalf("reuse must not build, built %d", builds.Load())
 	}
 }

@@ -16,11 +16,10 @@ import (
 
 // 执行预算(定案常量)
 const (
-	handlerOverallBudget  = 60 * time.Minute // 整体预算(含 prepare/池排队/锁排队)
-	handlerStatementCap   = 10 * time.Second // 纯计算上限(无原语活动即超限)
-	handlerGlobalConcurr  = 64               // 全局 handler 总并发(所有包合计)
-	handlerQueueTimeout   = 60 * time.Second // 池排队上界(写死,不做配置)
-	handlerVMMaxBorrowDft = 100              // 借出次数缺省(≤0 视为缺省)
+	handlerOverallBudget = 60 * time.Minute  // 整体预算(含 prepare/池排队/锁排队)
+	handlerStatementCap  = 10 * time.Second  // 纯计算上限(无原语活动即超限)
+	handlerQueueTimeout  = 60 * time.Second  // 池排队上界(写死,不做配置)
+	handlerVMMaxBorrowDft = 100               // 借出次数缺省(≤0 视为缺省)
 )
 
 // ErrHandlerTimeout 执行级超时哨兵(整体/纯计算/池排队/锁等待)
@@ -89,11 +88,9 @@ type handlerExec struct {
 	replyDone  bool
 }
 
-// HandlerEngine handler 池引擎((包,revision) 维度池 + 全局并发闸)
+// HandlerEngine handler 池引擎((包,revision) 维度池;总量由 VM 预算约束)
 type HandlerEngine struct {
 	deps HandlerDeps
-
-	sem chan struct{}
 
 	mu     sync.Mutex
 	pools  map[string]*handlerPool
@@ -107,7 +104,6 @@ func NewHandlerEngine(deps HandlerDeps) *HandlerEngine {
 	}
 	return &HandlerEngine{
 		deps:  deps,
-		sem:   make(chan struct{}, handlerGlobalConcurr),
 		pools: map[string]*handlerPool{},
 	}
 }
@@ -135,7 +131,7 @@ func (e *HandlerEngine) poolFor() (*handlerPool, error) {
 	if p, ok := e.pools[key]; ok {
 		return p, nil
 	}
-	p := newHandlerPool(e.deps.MaxBorrow, func() (*handlerInstance, error) {
+	p := newHandlerPool(e.deps.Package.Manifest.Name, e.deps.MaxBorrow, func() (*handlerInstance, error) {
 		return buildHandlerInstance(e.deps)
 	})
 	e.pools[key] = p
@@ -155,22 +151,6 @@ func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink Ha
 	defer ex.cancel()
 	startWatchdog(ex)
 
-	// 池排队(全局并发闸)上界 60s,计入整体预算
-	queueDeadline := time.Now().Add(handlerQueueTimeout)
-	if ex.deadline.Before(queueDeadline) {
-		queueDeadline = ex.deadline
-	}
-	timer := time.NewTimer(time.Until(queueDeadline))
-	defer timer.Stop()
-	select {
-	case e.sem <- struct{}{}:
-	case <-timer.C:
-		return fmt.Errorf("handler %s: %w (global concurrency queue)", e.deps.Package.Manifest.Name, ErrHandlerTimeout)
-	case <-parent.Done():
-		return parent.Err()
-	}
-	defer func() { <-e.sem }()
-
 	// 缺省传输解析(组参数解析槽;失败 = 502)
 	defTr, err := e.deps.Transport(in.Transport)
 	if err != nil {
@@ -179,6 +159,7 @@ func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink Ha
 	ex.out = newOutboundClient(defTr, defaultOutboundTimeouts())
 	ex.tx = NewStorageTx(nil) // ② 缓冲;③ 经 deps.Store
 
+	// 池排队(VM 预算轮询)上界 60s,计入整体预算
 	pool, err := e.poolFor()
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)

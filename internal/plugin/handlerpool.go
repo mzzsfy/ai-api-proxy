@@ -4,6 +4,7 @@ package plugin
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin/jsengine"
 )
@@ -34,8 +35,9 @@ func (hi *handlerInstance) release() {
 	_ = hi.env.q.Close()
 }
 
-// handlerPool 实例池:容量从 0 按需增长(全局并发闸约束总量);broken/借满即弃并懒补建
+// handlerPool 实例池:容量从 0 按需增长(VM 预算约束总量);broken/借满即弃
 type handlerPool struct {
+	pkg       string
 	instances chan *handlerInstance
 	factory   func() (*handlerInstance, error)
 	mu        sync.Mutex
@@ -44,12 +46,12 @@ type handlerPool struct {
 	maxBorrow int
 }
 
-func newHandlerPool(maxBorrow int, factory func() (*handlerInstance, error)) *handlerPool {
-	return &handlerPool{instances: make(chan *handlerInstance, handlerGlobalConcurr), factory: factory, maxBorrow: maxBorrow}
+func newHandlerPool(pkg string, maxBorrow int, factory func() (*handlerInstance, error)) *handlerPool {
+	return &handlerPool{pkg: pkg, instances: make(chan *handlerInstance, poolSizeDefault), factory: factory, maxBorrow: maxBorrow}
 }
 
-// Borrow 取实例;池空懒建(构建失败 = 该次借出报错,不回溯拒装,下次借出重试构建)。
-// 排队语义由全局并发闸承担(60s 上界);本池不排队。
+// Borrow 取实例;10ms 空闲窗内复用归还,超窗按 VM 预算弹性新建(达顶轮询至排队上界);
+// wg 计在途借用,成功借出的 Done 转移到 Return
 func (p *handlerPool) Borrow() (*handlerInstance, error) {
 	p.mu.Lock()
 	if p.closed {
@@ -58,59 +60,68 @@ func (p *handlerPool) Borrow() (*handlerInstance, error) {
 	}
 	p.wg.Add(1) // 与 closed 检查同临界区(Close→Wait 不允许与 Add 并发)
 	p.mu.Unlock()
-	defer p.wg.Done()
-	select {
-	case inst := <-p.instances:
-		inst.borrows++
-		return inst, nil
-	default:
-	}
-	inst, err := p.factory()
-	if err != nil {
+	fail := func(err error) (*handlerInstance, error) {
+		p.wg.Done()
 		return nil, err
 	}
-	inst.borrows++
-	return inst, nil
+	wait := time.NewTimer(PoolIdleWait)
+	select {
+	case inst := <-p.instances:
+		wait.Stop()
+		inst.borrows++
+		return inst, nil
+	case <-wait.C:
+	}
+	deadline := time.NewTimer(handlerQueueTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(PoolIdleWait)
+	defer tick.Stop()
+	for {
+		if vmBudgets.tryAcquire(p.pkg) {
+			inst, err := p.factory()
+			if err != nil {
+				vmBudgets.release(p.pkg)
+				return fail(err)
+			}
+			inst.borrows++
+			return inst, nil
+		}
+		select {
+		case inst := <-p.instances:
+			inst.borrows++
+			return inst, nil
+		case <-tick.C:
+		case <-deadline.C:
+			return fail(ErrPoolTimeout)
+		}
+	}
 }
 
-// Return 归还;broken(执行级取消污染)/借满即弃并懒补建
+// Return 归还;broken(执行级取消污染)/借满即弃并按 VM 预算放行新建
 func (p *handlerPool) Return(inst *handlerInstance, broken bool) {
+	defer p.wg.Done()
 	if broken || inst.borrows >= p.maxBorrow {
-		inst.release()
-		go p.refill()
+		p.discard(inst)
 		return
 	}
 	p.mu.Lock()
 	closed := p.closed
 	p.mu.Unlock()
 	if closed {
-		inst.release()
+		p.discard(inst)
 		return
 	}
 	select {
 	case p.instances <- inst:
 	default:
-		inst.release()
+		p.discard(inst)
 	}
 }
 
-// refill 补建实例(失败 = 待下次补建)
-func (p *handlerPool) refill() {
-	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-	if closed {
-		return
-	}
-	inst, err := p.factory()
-	if err != nil {
-		return
-	}
-	select {
-	case p.instances <- inst:
-	default:
-		inst.release()
-	}
+// discard 销毁实例并归还 VM 预算
+func (p *handlerPool) discard(inst *handlerInstance) {
+	inst.release()
+	vmBudgets.release(p.pkg)
 }
 
 // Close 停新借出并等待在途归零

@@ -71,29 +71,22 @@ func TestPool_BusyHookTimesOut(t *testing.T) {
 }
 
 func TestPool_PoisonedInstanceReplaced(t *testing.T) {
-	// Given 池大小=1 When 归还 broken 实例 Then 下次借到工厂补建的新实例(工厂再调用断言)
+	// Given 归还 broken 实例 Then 下次借到弹性新建的实例(工厂再调用断言)
 	var factoryCalls atomic.Int64
-	p, err := newRuntimePool(1, QueueTimeout, func() (*hookInstance, error) {
+	p := newRuntimePool("t", 1, QueueTimeout, func() (*hookInstance, error) {
 		n := factoryCalls.Add(1)
 		return &hookInstance{id: n, hooks: &Hooks{}}, nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(p.Close)
 	inst1, err := p.Borrow()
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Return(inst1, true) // 污染丢弃 → 懒补建
-	deadline := time.Now().Add(time.Second)
-	var inst2 *hookInstance
-	for time.Now().Before(deadline) {
-		if inst2, err = p.Borrow(); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if factoryCalls.Load() != 1 {
+		t.Fatalf("first borrow must build once, got %d", factoryCalls.Load())
 	}
+	p.Return(inst1, true) // 污染丢弃 → 下次弹性新建
+	inst2, err := p.Borrow()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,14 +96,148 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 	}
 }
 
-func TestPool_CloseWaitsInFlight(t *testing.T) {
-	// Given 在途借用 When Close Then 阻塞至归还后才完成;关闭后借用拒绝
-	p, err := newRuntimePool(1, QueueTimeout, func() (*hookInstance, error) {
+func TestPool_NoWarmup(t *testing.T) {
+	// Given 构造池 When 未借用 Then 工厂零调用(不预热,省内存)
+	var factoryCalls atomic.Int64
+	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+		factoryCalls.Add(1)
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
+	t.Cleanup(p.Close)
+	if factoryCalls.Load() != 0 {
+		t.Fatalf("no warmup expected, built %d", factoryCalls.Load())
+	}
+}
+
+func TestPool_ElasticAfterIdleWindow(t *testing.T) {
+	// Given 空池 When 首次借用(空闲窗超时)Then 弹性新建恰好一个
+	var factoryCalls atomic.Int64
+	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+		factoryCalls.Add(1)
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
+	t.Cleanup(p.Close)
+	inst, err := p.Borrow()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer p.Return(inst, false)
+	if factoryCalls.Load() != 1 {
+		t.Fatalf("elastic build once, got %d", factoryCalls.Load())
+	}
+}
+
+func TestPool_ReuseWithinWindow(t *testing.T) {
+	// Given 池空且 10ms 窗内有归还 When 借用 Then 复用归还实例(不新建)
+	var factoryCalls atomic.Int64
+	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+		factoryCalls.Add(1)
+		return &hookInstance{id: factoryCalls.Load(), hooks: &Hooks{}}, nil
+	})
+	t.Cleanup(p.Close)
+	inst1, err := p.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(3 * time.Millisecond)
+		p.Return(inst1, false)
+	}()
+	inst2, err := p.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Return(inst2, false)
+	if inst2.id != inst1.id {
+		t.Fatalf("window reuse expected: got id %d want %d", inst2.id, inst1.id)
+	}
+	if factoryCalls.Load() != 1 {
+		t.Fatalf("reuse must not build, built %d", factoryCalls.Load())
+	}
+}
+
+func TestPool_ShrinkOnReturnFull(t *testing.T) {
+	// Given 常驻上限 1、并发借出 2 When 依次归还 Then 池内只留 1(临时实例弃置缩容)
+	p := newRuntimePool("t", 1, QueueTimeout, func() (*hookInstance, error) {
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
+	t.Cleanup(p.Close)
+	a, err := p.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Return(a, false)
+	p.Return(b, false)
+	if len(p.instances) != 1 {
+		t.Fatalf("resident after shrink: %d", len(p.instances))
+	}
+}
+
+func TestPool_VMGateQueues(t *testing.T) {
+	// Given 单插件 VM 预算占满 When 借用 Then 轮询至排队上界报池耗尽
+	pkg := "capped"
+	for range PerPkgVMCap {
+		if !vmBudgets.tryAcquire(pkg) {
+			t.Fatal("acquire until cap")
+		}
+	}
+	t.Cleanup(func() {
+		for range PerPkgVMCap {
+			vmBudgets.release(pkg)
+		}
+	})
+	p := newRuntimePool(pkg, 1, 60*time.Millisecond, func() (*hookInstance, error) {
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
+	t.Cleanup(p.Close)
+	if _, err := p.Borrow(); !errors.Is(err, ErrPoolTimeout) {
+		t.Fatalf("vm-gated borrow: %v", err)
+	}
+}
+
+func TestVMBudget(t *testing.T) {
+	// Given 双闸预算 When 单包达 64 顶 Then 拒;全局 128 顶拒;归还后可再用
+	b := &vmBudget{perPkg: map[string]int{}}
+	for range PerPkgVMCap {
+		if !b.tryAcquire("a") {
+			t.Fatalf("acquire within per-pkg cap failed at %d", b.perPkg["a"])
+		}
+	}
+	if b.tryAcquire("a") {
+		t.Fatal("per-pkg cap must reject")
+	}
+	if !b.tryAcquire("b") {
+		t.Fatal("other package unaffected")
+	}
+	b2 := &vmBudget{perPkg: map[string]int{}}
+	// 全局顶须跨包触达(单包 64 顶先挡)
+	for i := range GlobalVMCap {
+		key := "x"
+		if i >= PerPkgVMCap {
+			key = "y"
+		}
+		if !b2.tryAcquire(key) {
+			t.Fatalf("acquire within global cap failed at %d", i)
+		}
+	}
+	if b2.tryAcquire("z") {
+		t.Fatal("global cap must reject")
+	}
+	b2.release("x")
+	if !b2.tryAcquire("z") {
+		t.Fatal("release must free budget")
+	}
+}
+
+func TestPool_CloseWaitsInFlight(t *testing.T) {
+	// Given 在途借用 When Close Then 阻塞至归还后才完成;关闭后借用拒绝
+	p := newRuntimePool("t", 1, QueueTimeout, func() (*hookInstance, error) {
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
 	inst, err := p.Borrow()
 	if err != nil {
 		t.Fatal(err)
