@@ -1,24 +1,17 @@
 package plugin
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	_ "embed"
-	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/dop251/goja"
-	"github.com/google/uuid"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin/jsengine"
 )
 
 //go:embed jshelper/eventstream.js
@@ -49,353 +42,207 @@ type StorageKV interface {
 	Delete(key string)
 }
 
-// Compile 编译部件源码(语法错误带位置)
-func Compile(src []byte, entry string) (*goja.Program, error) {
-	pr, err := goja.Compile(entry, string(src), true)
+// Compile 编译部件源码(字节码跨实例共享;语法错误带位置)
+func Compile(src []byte, entry string) (*jsengine.Program, error) {
+	pr, err := jsengine.NewProgram(entry, string(src))
 	if err != nil {
 		return nil, fmt.Errorf("compile %s: %w", entry, err)
 	}
 	return pr, nil
 }
 
-// bindUtil 构造 util 对象注入 runtime
-func bindUtil(vm *goja.Runtime, deps HostDeps) {
-	util := vm.NewObject()
-	_ = util.Set("deepMerge", func(a, b goja.Value) goja.Value {
-		am, aok := toMap(vm, a)
-		bm, bok := toMap(vm, b)
-		if !aok || !bok {
-			panic(vm.NewGoError(fmt.Errorf("deepMerge requires two objects")))
-		}
-		return vm.ToValue(mergeMaps(am, bm))
-	})
-	_ = util.Set("deepClone", func(v goja.Value) goja.Value {
-		var tmp any
-		b, _ := json.Marshal(v.Export())
-		_ = json.Unmarshal(b, &tmp)
-		return vm.ToValue(tmp)
-	})
-	_ = util.Set("get", func(v goja.Value, path string) goja.Value {
-		m, ok := toMap(vm, v)
-		if !ok {
-			return goja.Undefined()
-		}
-		return vm.ToValue(getPath(m, path))
-	})
-	_ = util.Set("set", func(v goja.Value, path string, nv goja.Value) goja.Value {
-		m, ok := toMap(vm, v)
-		if !ok {
-			panic(vm.NewGoError(fmt.Errorf("set requires object")))
-		}
-		return vm.ToValue(setPath(m, path, nv.Export()))
-	})
-	_ = util.Set("pick", func(v goja.Value, keys []string) goja.Value {
-		m, ok := toMap(vm, v)
-		if !ok {
-			panic(vm.NewGoError(fmt.Errorf("pick requires object")))
-		}
-		out := map[string]any{}
-		for _, k := range keys {
-			if val, ok := m[k]; ok {
-				out[k] = val
-			}
-		}
-		return vm.ToValue(out)
-	})
-	_ = util.Set("omit", func(v goja.Value, keys []string) goja.Value {
-		m, ok := toMap(vm, v)
-		if !ok {
-			panic(vm.NewGoError(fmt.Errorf("omit requires object")))
-		}
-		drop := map[string]bool{}
-		for _, k := range keys {
-			drop[k] = true
-		}
-		out := map[string]any{}
-		for k, val := range m {
-			if !drop[k] {
-				out[k] = val
-			}
-		}
-		return vm.ToValue(out)
-	})
-	_ = util.Set("b64encode", func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) })
-	_ = util.Set("b64decode", func(s string) (string, error) {
-		b, err := base64.StdEncoding.DecodeString(s)
-		if err != nil {
-			return "", fmt.Errorf("b64decode: %w", err)
-		}
-		return string(b), nil
-	})
-	_ = util.Set("b64urlEncode", func(s string) string { return base64.URLEncoding.EncodeToString([]byte(s)) })
-	_ = util.Set("b64urlDecode", func(s string) (string, error) {
-		b, err := base64.URLEncoding.DecodeString(s)
-		if err != nil {
-			return "", fmt.Errorf("b64urlDecode: %w", err)
-		}
-		return string(b), nil
-	})
-	_ = util.Set("u64be", func(buf goja.Value, offset int) (*big.Int, error) {
-		return readBigEndian64(vm, buf, offset, false)
-	})
-	_ = util.Set("i64be", func(buf goja.Value, offset int) (*big.Int, error) {
-		return readBigEndian64(vm, buf, offset, true)
-	})
-	_ = vm.Set("util", util)
-	_ = util.Set("uuid", func() string {
-		return uuid.NewString()
-	})
-	_ = util.Set("now", func() int64 {
-		return time.Now().UnixMilli()
-	})
-	_ = util.Set("isoNow", func() string {
-		return time.Now().UTC().Format(time.RFC3339)
-	})
-	_ = util.Set("sha256hex", func(s string) string {
-		sum := sha256.Sum256([]byte(s))
-		return hex.EncodeToString(sum[:])
-	})
-	_ = util.Set("hmacSha256hex", func(key, s string) string {
-		mac := hmac.New(sha256.New, []byte(key))
-		mac.Write([]byte(s))
-		return hex.EncodeToString(mac.Sum(nil))
-	})
-	_ = util.Set("template", func(str string, vars goja.Value) string {
-		vm2 := vm
-		m, ok := toMap(vm2, vars)
-		if !ok {
-			return str
-		}
-		return renderTemplate(str, m)
-	})
-	_ = util.Set("inspect", func(v goja.Value) string {
-		b, _ := json.Marshal(v.Export())
-		return maskSecrets(deps, string(b))
-	})
-	// json:原始 JSON 文档句柄(字面量读写,不经 JS Number,未触碰文本保真)
-	_ = util.Set("json", func(raw string) (*goja.Object, error) {
-		return newJsonDoc(vm, raw)
-	})
-	// key:当前键 data 唯一出口(无参;多余参数被忽略 = 不支持按名取;无键 = undefined)
-	_ = util.Set("key", func(args ...goja.Value) any {
-		if deps.Key == nil || deps.Key.Data == nil {
-			return goja.Undefined()
-		}
-		return deps.Key.Data
-	})
-	// evict:主动失效上报出口(管理命令转发;仅失效当前绑定,不改当前请求重试行为)
-	_ = util.Set("evict", func(transport, scope, value string) (bool, error) {
-		if deps.TransportEvict == nil {
-			return false, fmt.Errorf("evict %q: no transport context (package %s)", transport, deps.PackageName)
-		}
-		if err := deps.TransportEvict(transport, scope, value); err != nil {
-			return false, err
-		}
-		return true, nil
-	})
-	_ = vm.Set("util", util)
-	injectSettingBuilders(vm)
-	_, err := vm.RunString(eventStreamHelper)
+// instantiate 运行部件:CJS 声明由宿主注入(不进源码文本,保持错误行号=源文件行号)
+func instantiate(prog *jsengine.Program, entry string, config any, deps HostDeps) (*qjsRuntime, jsengine.Value, error) {
+	q, err := newQJSRuntime(deps, jsengine.Option{})
 	if err != nil {
-		panic(vm.NewGoError(err))
+		return nil, jsengine.Value{}, err
 	}
-	if _, err := vm.RunString(`Object.defineProperty(util, "eventstream", {writable:false, configurable:false})`); err != nil {
-		panic(vm.NewGoError(err))
-	}
-	// log(输出经 secrets 掩码)
-	logObj := vm.NewObject()
-	for _, lvl := range []string{"info", "warn", "error"} {
-		level := lvl
-		_ = logObj.Set(level, func(args ...goja.Value) {
-			if deps.Log != nil {
-				deps.Log(level, maskSecrets(deps, sprintArgs(vm, args)))
-			}
-		})
-	}
-	logWrapper := vm.NewObject()
-	_ = logWrapper.Set("info", logObj.Get("info"))
-	_ = logWrapper.Set("warn", logObj.Get("warn"))
-	_ = logWrapper.Set("error", logObj.Get("error"))
-	_ = vm.Set("log", logWrapper)
-	// storage(ns=包名)
-	st := vm.NewObject()
-	if deps.Storage != nil {
-		_ = st.Set("get", func(key string) (any, error) {
-			v, ok := deps.Storage.Get(key)
-			if !ok {
-				return nil, nil
-			}
-			return v, nil
-		})
-		_ = st.Set("set", func(key, value string) error {
-			if len(value) > MaxStorageValue {
-				return fmt.Errorf("storage value exceeds limit")
-			}
-			return deps.Storage.Set(key, value)
-		})
-		_ = st.Set("delete", func(key string) { deps.Storage.Delete(key) })
-	} else {
-		_ = st.Set("get", func(string) (any, error) { return nil, nil })
-		_ = st.Set("set", func(string, string) error { return fmt.Errorf("storage unavailable") })
-		_ = st.Set("delete", func(string) {})
-	}
-	_ = vm.Set("storage", st)
-}
-
-func readBigEndian64(vm *goja.Runtime, buf goja.Value, offset int, signed bool) (*big.Int, error) {
-	if offset < 0 {
-		return nil, fmt.Errorf("64-bit integer offset must be non-negative")
-	}
-	if buffer, ok := buf.Export().(goja.ArrayBuffer); ok {
-		return readBigEndian64Bytes(buffer.Bytes(), offset, signed)
-	}
-	value, ok := buf.(*goja.Object)
-	if !ok {
-		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
-	}
-	isViewValue, err := vm.RunString("ArrayBuffer.isView")
+	exports, err := q.inst.NewObject()
 	if err != nil {
-		return nil, err
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
 	}
-	isView, ok := goja.AssertFunction(isViewValue)
-	if !ok {
-		return nil, fmt.Errorf("ArrayBuffer.isView unavailable")
+	module, err := q.inst.NewObject()
+	if err != nil {
+		exports.Free()
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
 	}
-	result, err := isView(goja.Undefined(), value)
-	if err != nil || !result.ToBoolean() {
-		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
+	if err := q.inst.SetProp(module, "exports", exports); err != nil {
+		exports.Free()
+		module.Free()
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
 	}
-	bufferValue := value.Get("buffer")
-	buffer, ok := bufferValue.Export().(goja.ArrayBuffer)
-	if !ok {
-		return nil, fmt.Errorf("64-bit integer input must be an ArrayBuffer or TypedArray")
-	}
-	byteOffset := int(value.Get("byteOffset").ToInteger())
-	byteLength := int(value.Get("byteLength").ToInteger())
-	if byteOffset < 0 || byteLength < 0 || byteOffset > len(buffer.Bytes()) || byteLength > len(buffer.Bytes())-byteOffset {
-		return nil, fmt.Errorf("invalid TypedArray view")
-	}
-	return readBigEndian64Bytes(buffer.Bytes()[byteOffset:byteOffset+byteLength], offset, signed)
-}
-
-func readBigEndian64Bytes(view []byte, offset int, signed bool) (*big.Int, error) {
-	if offset > len(view) || len(view)-offset < 8 {
-		return nil, fmt.Errorf("64-bit integer read out of bounds")
-	}
-	value := new(big.Int).SetUint64(binary.BigEndian.Uint64(view[offset : offset+8]))
-	if signed && value.Bit(63) != 0 {
-		value.Sub(value, new(big.Int).Lsh(big.NewInt(1), 64))
-	}
-	return value, nil
-}
-
-func injectSettingBuilders(vm *goja.Runtime) {
-	b := map[string]any{}
-	for _, typ := range []string{"string", "int", "number", "bool", "enum"} {
-		t := typ
-		b[t] = func(opts map[string]any) map[string]any {
-			out := map[string]any{"type": t}
-			for k, v := range opts {
-				out[k] = v
-			}
-			return out
-		}
-	}
-	_ = vm.Set("setting", b)
-}
-
-// instantiate 运行部件:CommonJS 包装 + factory 检测(config 闭包注入)
-func instantiate(prog *goja.Program, entry string, config any, deps HostDeps) (*goja.Runtime, goja.Value, error) {
-	vm := goja.New()
-	bindUtil(vm, deps)
-	var exports, module *goja.Object
-	exports = vm.NewObject()
-	module = vm.NewObject()
-	_ = module.Set("exports", exports)
-	_ = vm.Set("module", module)
-	_ = vm.Set("exports", exports)
 	if config != nil {
-		_ = vm.Set("__config", config)
-	} else {
-		_ = vm.Set("__config", goja.Undefined())
-	}
-	if _, err := vm.RunProgram(prog); err != nil {
-		return nil, nil, fmt.Errorf("run %s: %w", entry, err)
-	}
-	mv := module.Get("exports")
-	if mv == nil || goja.IsUndefined(mv) || goja.IsNull(mv) {
-		return nil, nil, fmt.Errorf("%s: module.exports empty", entry)
-	}
-	fn, ok := goja.AssertFunction(mv)
-	if ok {
-		// factory 形态:(config) => hooks
-		out, err := fn(goja.Undefined(), vm.ToValue(config))
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: factory error: %w", entry, err)
+		for _, step := range []func() error{
+			func() error { return q.inst.SetGlobal("module", module) },
+			func() error { return q.inst.SetGlobal("exports", exports) },
+			func() error { return q.inst.SetGlobal("__config", config) },
+		} {
+			if err := step(); err != nil {
+				exports.Free()
+				module.Free()
+				_ = q.Close()
+				return nil, jsengine.Value{}, fmt.Errorf("%s: globals: %w", entry, err)
+			}
 		}
-		return vm, out, nil
+	} else {
+		for _, step := range []func() error{
+			func() error { return q.inst.SetGlobal("module", module) },
+			func() error { return q.inst.SetGlobal("exports", exports) },
+			func() error { return q.inst.EvalString("globalThis.__config = undefined;") },
+		} {
+			if err := step(); err != nil {
+				exports.Free()
+				module.Free()
+				_ = q.Close()
+				return nil, jsengine.Value{}, fmt.Errorf("%s: globals: %w", entry, err)
+			}
+		}
 	}
-	return vm, mv, nil
+	module.Free() // 全局引用已持;局部引用释放
+	if err := q.inst.RunProgram(prog); err != nil {
+		_ = q.Close()
+		return nil, jsengine.Value{}, fmt.Errorf("run %s: %w", entry, err)
+	}
+	mv, err := q.inst.GetGlobal("module")
+	if err != nil {
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
+	}
+	out, err := q.inst.GetProp(mv, "exports")
+	mv.Free()
+	if err != nil {
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
+	}
+	if out.IsUndefined() || out.IsNull() {
+		out.Free()
+		_ = q.Close()
+		return nil, jsengine.Value{}, fmt.Errorf("%s: module.exports empty", entry)
+	}
+	// factory 形态:exports(config) → hooks 对象(v2 参数经 __config 闭包)
+	isFn, err := q.inst.IsFunction(out)
+	if err != nil {
+		out.Free()
+		_ = q.Close()
+		return nil, jsengine.Value{}, err
+	}
+	if isFn {
+		cfg, cerr := q.inst.GetGlobal("__config")
+		if cerr != nil {
+			out.Free()
+			_ = q.Close()
+			return nil, jsengine.Value{}, cerr
+		}
+		defer cfg.Free()
+		hooksObj, cerr := q.inst.Call(out, cfg)
+		out.Free()
+		if cerr != nil {
+			_ = q.Close()
+			return nil, jsengine.Value{}, fmt.Errorf("%s: factory: %w", entry, cerr)
+		}
+		return q, hooksObj, nil
+	}
+	return q, out, nil
+}
+
+// hookInstance 单个 JS 实例(池内并行,实例内串行)
+type hookInstance struct {
+	id     int64 // 工厂序号(测试观测补建)
+	q      *qjsRuntime
+	hooks  *Hooks
+	keyRef *KeyRef // 键槽(deps.Key 指向;出池时按 pctx.Key 无条件重绑,含空值清槽)
+}
+
+// closeInstance 释放实例(nil q = 测试桩)
+func (inst *hookInstance) closeInstance() {
+	if inst == nil {
+		return
+	}
+	if inst.hooks != nil {
+		inst.hooks.release()
+	}
+	if inst.q != nil {
+		_ = inst.q.Close()
+	}
 }
 
 // newInstance 池工厂:实例化 + hook 抽取(keyRef 槽 = deps.Key;适配器出池重绑)
-func newInstance(prog *goja.Program, entry string, config any, deps HostDeps) (*hookInstance, error) {
+func newInstance(prog *jsengine.Program, entry string, config any, deps HostDeps) (*hookInstance, error) {
 	keyRef := &KeyRef{}
 	if deps.Key != nil {
 		*keyRef = *deps.Key
 	}
 	deps.Key = keyRef // 闭包持槽指针,运行期读值随重绑变化
-	vm, obj, err := instantiate(prog, entry, config, deps)
+	q, obj, err := instantiate(prog, entry, config, deps)
 	if err != nil {
 		return nil, err
 	}
-	hooks, err := ExtractHooks(vm, obj)
+	hooks, err := extractHooks(q.inst, obj)
+	obj.Free()
 	if err != nil {
+		_ = q.Close()
 		return nil, err
 	}
-	return &hookInstance{vm: vm, hooks: hooks, keyRef: keyRef}, nil
+	return &hookInstance{q: q, hooks: hooks, keyRef: keyRef}, nil
 }
 
-// ProbeHooks 结构探测:求值一次取钩子存在性(不进池;对象导出形态可探测)
-func ProbeHooks(prog *goja.Program) (*Hooks, error) {
+// ProbeHooks 结构探测:求值一次取钩子存在性(不进池;探测实例即毁,不外借 JS 引用)
+func ProbeHooks(prog *jsengine.Program) (hasMapEvent, hasMapResponse bool, err error) {
 	inst, err := newInstance(prog, "", map[string]any{}, HostDeps{})
 	if err != nil {
-		return nil, err
+		return false, false, err
 	}
-	return inst.hooks, nil
+	defer inst.closeInstance()
+	return inst.hooks.MapEvent.VM() != nil, inst.hooks.MapResponse.VM() != nil, nil
 }
 
-// Hooks 部件导出的 hook 函数集(同步调用);恰一次直发语义下无 refresh
+// Hooks 部件导出的 hook 函数集;恰一次直发语义下无 refresh
 type Hooks struct {
-	VM           *goja.Runtime
-	Obj          goja.Value
-	BuildRequest goja.Callable
-	MapEvent     goja.Callable
-	MapResponse  goja.Callable
-	MapError     goja.Callable
-	MapRequest   goja.Callable
-	MapChunk     goja.Callable
+	BuildRequest jsengine.Value
+	MapEvent     jsengine.Value
+	MapResponse  jsengine.Value
+	MapError     jsengine.Value
+	MapRequest   jsengine.Value
+	MapChunk     jsengine.Value
 }
 
-// ExtractHooks 从导出对象抽取 hook;双向绑定校验由调用方按 Supports 执行
-func ExtractHooks(vm *goja.Runtime, obj goja.Value) (*Hooks, error) {
-	get := func(name string) goja.Callable {
-		var v goja.Value
-		if o, ok := obj.(*goja.Object); ok {
-			v = o.Get(name)
+// release 释放持有的导出函数引用
+func (h *Hooks) release() {
+	for _, v := range []*jsengine.Value{&h.BuildRequest, &h.MapEvent, &h.MapResponse, &h.MapError, &h.MapRequest, &h.MapChunk} {
+		if v.VM() != nil {
+			v.Free()
+			*v = jsengine.Value{}
 		}
-		if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-			return nil
+	}
+}
+
+// hasAny 至少一个主钩子已导出
+func (h *Hooks) hasAny() bool {
+	return h.BuildRequest.VM() != nil || h.MapEvent.VM() != nil || h.MapResponse.VM() != nil ||
+		h.MapRequest.VM() != nil || h.MapChunk.VM() != nil
+}
+
+// extractHooks 从导出对象抽取 hook;双向绑定校验由调用方按 Supports 执行
+func extractHooks(inst *jsengine.Instance, obj jsengine.Value) (*Hooks, error) {
+	get := func(name string) jsengine.Value {
+		v, err := inst.GetProp(obj, name)
+		if err != nil {
+			return jsengine.Value{}
 		}
-		fn, ok := goja.AssertFunction(v)
-		if !ok {
-			return nil
+		defer v.Free()
+		if v.IsUndefined() || v.IsNull() {
+			return jsengine.Value{}
 		}
-		return fn
+		isFn, err := inst.IsFunction(v)
+		if err != nil || !isFn {
+			return jsengine.Value{}
+		}
+		return v.Dup()
 	}
 	h := &Hooks{
-		VM:           vm,
-		Obj:          obj,
 		BuildRequest: get("buildRequest"),
 		MapEvent:     get("mapEvent"),
 		MapResponse:  get("mapResponse"),
@@ -403,20 +250,27 @@ func ExtractHooks(vm *goja.Runtime, obj goja.Value) (*Hooks, error) {
 		MapRequest:   get("mapRequest"),
 		MapChunk:     get("mapChunk"),
 	}
-	if h.BuildRequest == nil && h.MapEvent == nil && h.MapResponse == nil &&
-		h.MapRequest == nil && h.MapChunk == nil {
+	if !h.hasAny() {
+		h.release()
 		return nil, fmt.Errorf("no hooks exported")
 	}
 	return h, nil
 }
 
-// toMap JS 值 → Go map
-func toMap(vm *goja.Runtime, v goja.Value) (map[string]any, bool) {
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+// valueToMap JS 导出值 → Go map(JSON 通道;非对象 = false)
+func valueToMap(v jsengine.Value) (map[string]any, bool) {
+	if v.VM() == nil || v.IsUndefined() || v.IsNull() {
 		return nil, false
 	}
-	m, ok := v.Export().(map[string]any)
-	return m, ok
+	b, err := v.JSON()
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	return m, true
 }
 
 // mergeMaps 深合并;b 覆盖,数组整体替换
@@ -599,11 +453,14 @@ func maskSecrets(deps HostDeps, s string) string {
 	return s
 }
 
-// sprintArgs 参数拼接(JS 值序列化)
-func sprintArgs(vm *goja.Runtime, args []goja.Value) string {
-	parts := make([]string, 0, len(args))
-	for _, a := range args {
-		parts = append(parts, a.String())
+// readBigEndian64Bytes 大端 8 字节读(quickjs __u_bigEndian 路径)
+func readBigEndian64Bytes(view []byte, offset int, signed bool) (*big.Int, error) {
+	if offset > len(view) || len(view)-offset < 8 {
+		return nil, fmt.Errorf("64-bit integer read out of bounds")
 	}
-	return strings.Join(parts, " ")
+	value := new(big.Int).SetUint64(binary.BigEndian.Uint64(view[offset : offset+8]))
+	if signed && value.Bit(63) != 0 {
+		value.Sub(value, new(big.Int).Lsh(big.NewInt(1), 64))
+	}
+	return value, nil
 }

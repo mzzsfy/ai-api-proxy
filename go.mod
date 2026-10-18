@@ -3,7 +3,6 @@ module github.com/mzzsfy/ai-api-proxy
 go 1.27.0
 
 require (
-	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
 	github.com/google/uuid v1.6.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/robfig/cron/v3 v3.0.1
@@ -19,10 +18,7 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
-	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
-	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -31,7 +27,6 @@ require (
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/libquickjs v0.13.1 // indirect

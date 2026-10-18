@@ -4,8 +4,6 @@ import (
 	"errors"
 	"sync"
 	"time"
-
-	"github.com/dop251/goja"
 )
 
 // QueueTimeout 借用排队预算(超时=池耗尽)
@@ -16,14 +14,6 @@ var errPoolClosed = errors.New("runtime pool closed")
 
 // ErrPoolTimeout 借用排队超时(适配层映射 pipeline.ErrPoolBusy)
 var ErrPoolTimeout = errors.New("runtime pool queue timeout")
-
-// hookInstance 单个 runtime 实例(独立 module,池内并行,实例内串行)
-type hookInstance struct {
-	id     int64  // 工厂序号(测试观测补建)
-	vm     *goja.Runtime
-	hooks  *Hooks
-	keyRef *KeyRef // 键槽(deps.Key 指向;出池时按 pctx.Key 无条件重绑,含空值清槽)
-}
 
 // runtimePool hook 粒度借还池;poisoned 实例归还时丢弃,懒补建
 type runtimePool struct {
@@ -66,10 +56,11 @@ func (p *runtimePool) Borrow() (*hookInstance, error) {
 	}
 }
 
-// Return 归还;broken(超时污染)丢弃并懒补建
+// Return 归还;broken(内存超限/中断/引擎错误污染)丢弃关闭并懒补建
 func (p *runtimePool) Return(inst *hookInstance, broken bool) {
 	defer p.wg.Done()
 	if broken {
+		inst.closeInstance()
 		go p.refill()
 		return
 	}
@@ -77,11 +68,13 @@ func (p *runtimePool) Return(inst *hookInstance, broken bool) {
 	closed := p.closed
 	p.mu.Unlock()
 	if closed {
-		return // 关闭中的在途归还:直接销毁
+		inst.closeInstance() // 关闭中的在途归还:直接销毁
+		return
 	}
 	select {
 	case p.instances <- inst:
 	default:
+		inst.closeInstance()
 	}
 }
 

@@ -14,7 +14,8 @@ const idleSpinLimit = 1024
 
 var errNoVM = errors.New("js engine: instance closed")
 
-// Call 经异常包装调用 JS 函数;返回值(调用方负责 Free)或 EngineError
+// Call 经异常包装调用 JS 函数;返回值(调用方负责 Free)或 EngineError。
+// 参数所有权:quickjs convertArgs 内部 Dup,调用方保留原引用
 func (i *Instance) Call(fn Value, args ...any) (Value, error) {
 	if i.vm == nil {
 		return Value{}, errNoVM
@@ -34,7 +35,7 @@ func (i *Instance) Call(fn Value, args ...any) (Value, error) {
 	}
 	defer out.Free()
 	if ok := i.propBool(out, "ok"); ok {
-		return i.GetProp(Value{i.vm, out}, "v")
+		return i.GetProp(Value{i, out}, "v")
 	}
 	msg := i.propStr(out, "msg")
 	stack := i.propStr(out, "stack")
@@ -62,8 +63,8 @@ func (i *Instance) Await(v Value, budget time.Duration) (result Value, wasPromis
 	}
 	ch := make(chan settled, 1)
 	if _, err := v.raw().Then(
-		func(okVal quickjs.Value) { ch <- settled{val: Value{i.vm, okVal.Dup()}} },
-		func(failVal quickjs.Value) { ch <- settled{failVal: Value{i.vm, failVal.Dup()}, failed: true} },
+		func(okVal quickjs.Value) { ch <- settled{val: Value{i, okVal.Dup()}} },
+		func(failVal quickjs.Value) { ch <- settled{failVal: Value{i, failVal.Dup()}, failed: true} },
 	); err != nil {
 		return Value{}, true, i.wrapEngineErr(err)
 	}
@@ -100,6 +101,15 @@ type errRejected struct{ val Value }
 
 func (e errRejected) Error() string { return "js promise rejected" }
 
+// Rejection err 是否 rejection 载体;是则返回原值(调用方负责 Free)
+func (i *Instance) Rejection(err error) (Value, bool) {
+	var rej errRejected
+	if !errors.As(err, &rej) {
+		return Value{}, false
+	}
+	return rej.val, true
+}
+
 // ExceptionOf rejection 原值 → EngineError(Error 对象取 message/stack;原始值 String 化)
 func (i *Instance) ExceptionOf(v Value) *EngineError {
 	if v.IsUndefined() || v.IsNull() {
@@ -129,7 +139,7 @@ func classifyEngineErr(msg, stack string) *EngineError {
 
 // propStr 读对象字符串属性(即取即释;非字符串返回空)
 func (i *Instance) propStr(obj quickjs.Value, name string) string {
-	s, _ := i.propString(Value{i.vm, obj}, name)
+	s, _ := i.propString(Value{i, obj}, name)
 	return s
 }
 

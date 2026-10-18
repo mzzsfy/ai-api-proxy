@@ -249,8 +249,8 @@ func TestRuntime_SyncViolationDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = proto.MapEvent(nil, []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "sync violation") {
-		t.Fatalf("sync violation: %v", err)
+	if _, err = proto.MapEvent(nil, []byte(`{"x":1}`)); err != nil {
+		t.Fatalf("async mapEvent must settle: %v", err)
 	}
 }
 

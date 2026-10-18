@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 
+	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin/jsengine"
 )
 
@@ -57,6 +58,57 @@ func newQJSRuntime(deps HostDeps, opt jsengine.Option) (*qjsRuntime, error) {
 
 // Close 释放实例
 func (q *qjsRuntime) Close() error { return q.inst.Close() }
+
+// ctxToValue PipelineContext → JS 可读对象(upstream 快照/state/vars;nil 安全)。
+// state 经 JSON 通道为值拷贝(quickjs host 桥无引用通道;与 goja 引用语义差异见迁移文档)
+func (q *qjsRuntime) ctxToValue(ctx *pipeline.PipelineContext) (jsengine.Value, error) {
+	inst := q.inst
+	ctxObj, err := inst.NewObject()
+	if err != nil {
+		return jsengine.Value{}, err
+	}
+	set := func(obj jsengine.Value, name string, v any) {
+		if err := inst.SetProp(obj, name, v); err != nil {
+			_ = err
+		}
+	}
+	if ctx == nil {
+		set(ctxObj, "requestId", "")
+		state, _ := inst.NewObject()
+		defer state.Free()
+		set(ctxObj, "state", state)
+		up, _ := inst.NewObject()
+		defer up.Free()
+		set(ctxObj, "upstream", up)
+		vars, _ := inst.NewObject()
+		defer vars.Free()
+		set(ctxObj, "vars", vars)
+		return ctxObj, nil
+	}
+	set(ctxObj, "requestId", ctx.RequestID)
+	up, err := inst.NewObject()
+	if err != nil {
+		ctxObj.Free()
+		return jsengine.Value{}, err
+	}
+	defer up.Free()
+	set(up, "name", ctx.Upstream.Name)
+	set(ctxObj, "upstream", up)
+	if err := inst.SetProp(ctxObj, "state", ctx.State); err != nil {
+		ctxObj.Free()
+		return jsengine.Value{}, err
+	}
+	vars, err := inst.NewObject()
+	if err != nil {
+		ctxObj.Free()
+		return jsengine.Value{}, err
+	}
+	defer vars.Free()
+	set(vars, "model", ctx.Vars.Model)
+	set(vars, "entryStream", ctx.Vars.EntryStream)
+	set(ctxObj, "vars", vars)
+	return ctxObj, nil
+}
 
 // bytesOfJS __u_bytes 实现:类型与越界校验,返回字节数组或错误哨兵(对齐 goja 版错误文案)
 const bytesOfJS = `

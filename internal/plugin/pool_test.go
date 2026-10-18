@@ -22,7 +22,7 @@ const busyProtoSrc = `module.exports = { buildRequest: function (ctx) {
 }, mapResponse: function (ctx, b) { return b; } };`
 
 // mustProto 实例化池化协议(自动注册 ClosePools 清理)
-func mustProto(t *testing.T, name, src, poolSize string) *gojaProtocol {
+func mustProto(t *testing.T, name, src, poolSize string) *jsProtocol {
 	t.Helper()
 	pkg, err := ParseAAP(buildAAP(t, `{"manifestVersion":1,"name":"`+name+`","version":"1","parts":{
 		"protocol":{"protocol":"openai-completions"}}}`, map[string]string{ProtocolEntry: src}))
@@ -36,7 +36,7 @@ func mustProto(t *testing.T, name, src, poolSize string) *gojaProtocol {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gp := p.(*gojaProtocol)
+	gp := p.(*jsProtocol)
 	t.Cleanup(gp.ClosePools)
 	return gp
 }

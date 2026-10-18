@@ -62,6 +62,7 @@ type Program struct {
 }
 
 // NewProgram 编译源码为可跨实例执行的字节码
+// NewProgram 编译源码为字节码缓存(跨实例共享;语法错误带行号)
 func NewProgram(name, src string) (*Program, error) {
 	vm, err := quickjs.NewVM()
 	if err != nil {
@@ -70,6 +71,10 @@ func NewProgram(name, src string) (*Program, error) {
 	defer func() { _ = vm.Close() }()
 	bc, err := vm.Compile(src, quickjs.EvalGlobal)
 	if err != nil {
+		var qe *quickjs.Error
+		if errors.As(err, &qe) && qe.LineNumber > 0 {
+			return nil, fmt.Errorf("compile %s: Line %d: %s", name, qe.LineNumber, qe.Message)
+		}
 		return nil, fmt.Errorf("compile %s: %w", name, err)
 	}
 	return &Program{Name: name, bc: bc}, nil
@@ -184,6 +189,30 @@ func (i *Instance) EvalString(src string) error {
 	return nil
 }
 
+// EvalExpression 求值表达式并返回值(调用方负责 Free)
+func (i *Instance) EvalExpression(src string) (Value, error) {
+	v, err := i.vm.EvalValue(src, quickjs.EvalGlobal)
+	if err != nil {
+		return Value{}, i.wrapEngineErr(err)
+	}
+	return Value{i, v}, nil
+}
+
+// CallExpression 求值单参函数表达式并以 args 调用(冻结/属性定义等 JS 胶水)
+func (i *Instance) CallExpression(expr string, args ...any) error {
+	fn, err := i.EvalExpression(expr)
+	if err != nil {
+		return err
+	}
+	defer fn.Free()
+	out, err := i.Call(fn, args...)
+	if err != nil {
+		return err
+	}
+	out.Free()
+	return nil
+}
+
 // RunProgram 执行编译缓存(实例构造阶段)
 func (i *Instance) RunProgram(p *Program) error {
 	if _, err := i.vm.EvalBytecode(p.bc); err != nil {
@@ -192,12 +221,21 @@ func (i *Instance) RunProgram(p *Program) error {
 	return nil
 }
 
+// RunProgramValue 执行编译缓存并返回求值结果(模块装载;调用方负责 Free)
+func (i *Instance) RunProgramValue(p *Program) (Value, error) {
+	v, err := i.vm.EvalBytecodeValue(p.bc)
+	if err != nil {
+		return Value{}, i.wrapEngineErr(err)
+	}
+	return Value{i, v}, nil
+}
+
 // RegisterFunc 注册宿主函数为全局名;fn 返回非 nil error 时以 JS 异常抛出
 func (i *Instance) RegisterFunc(name string, fn func(args []any) (any, error)) error {
 	return i.vm.RegisterHostFunc(name, fn)
 }
 
-// SetGlobal 设置全局值;包装 Value 走引用路径(标量走转换路径,map 等未知类型会被引擎 JSON 深拷贝)
+// SetGlobal 设置全局值;包装 Value 走引用路径(quickjs SetPropertyValue 内部 Dup,调用方保留原引用;map 等未知类型会被引擎 JSON 深拷贝)
 func (i *Instance) SetGlobal(name string, v any) error {
 	atom, err := i.vm.NewAtom(name)
 	if err != nil {
@@ -215,17 +253,17 @@ func (i *Instance) NewObject() (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return Value{i.vm, v}, nil
+	return Value{i, v}, nil
 }
 
-// SetProp 设置对象属性(标量/Value)
+// SetProp 设置对象属性(标量/Value;quickjs SetPropertyValue 内部 Dup,调用方保留原引用)
 func (i *Instance) SetProp(obj Value, name string, v any) error {
 	atom, err := i.vm.NewAtom(name)
 	if err != nil {
 		return err
 	}
 	if jv, ok := v.(Value); ok {
-		return i.vm.SetPropertyValue(obj.v, atom, jv.v)
+		return i.vm.SetPropertyValue(obj.v, atom, jv.raw())
 	}
 	return i.vm.SetProperty(obj.v, atom, v)
 }
@@ -240,16 +278,16 @@ func (i *Instance) GetProp(obj Value, name string) (Value, error) {
 	if err != nil {
 		return Value{}, i.wrapEngineErr(err)
 	}
-	return Value{i.vm, v}, nil
+	return Value{i, v}, nil
 }
 
 // GetGlobal 读全局(调用方负责 Free)
 func (i *Instance) GetGlobal(name string) (Value, error) {
-	return i.GetProp(Value{i.vm, i.global}, name)
+	return i.GetProp(Value{i, i.global}, name)
 }
 
 // Undef this 参数用 undefined(实例持有,禁止 Free)
-func (i *Instance) Undef() Value { return Value{i.vm, i.undef} }
+func (i *Instance) Undef() Value { return Value{i, i.undef} }
 
 // SetBudget 设置下一次 JS 入口的墙钟预算(Call/Await 自动布防)
 func (i *Instance) SetBudget(d time.Duration) error {

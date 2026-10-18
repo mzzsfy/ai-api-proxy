@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dop251/goja"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -53,46 +52,7 @@ func requireParent(doc, path string) error {
 	return nil
 }
 
-// newJsonDoc 构造 util.json 文档对象
-func newJsonDoc(vm *goja.Runtime, raw string) (*goja.Object, error) {
-	if !gjson.Valid(raw) {
-		return nil, fmt.Errorf("util.json: invalid JSON")
-	}
-	d := &jsonDoc{raw: raw}
-	doc := vm.NewObject()
-	// get:定位读取,返回字面量文本(对象/数组为子树原文;缺失 = undefined)
-	_ = doc.Set("get", func(path string) any {
-		r := gjson.Get(d.raw, resolvePath(d.raw, path, false))
-		if !r.Exists() {
-			return goja.Undefined()
-		}
-		return r.Raw
-	})
-	_ = doc.Set("has", func(path string) bool {
-		return gjson.Get(d.raw, resolvePath(d.raw, path, false)).Exists()
-	})
-	_ = doc.Set("ops", func(list goja.Value) (map[string]any, error) {
-		return d.apply(vm, list)
-	})
-	_ = doc.Set("finalize", func() (map[string]any, error) {
-		if !gjson.Valid(d.raw) {
-			return nil, fmt.Errorf("util.json: finalize produced invalid JSON")
-		}
-		return map[string]any{"body": d.raw, "applied": d.applied, "skipped": d.skipped}, nil
-	})
-	return doc, nil
-}
-
-// apply 顺序执行编辑指令;value 一律为 JSON 字面量字符串
-func (d *jsonDoc) apply(vm *goja.Runtime, list goja.Value) (map[string]any, error) {
-	items, ok := list.Export().([]any)
-	if !ok {
-		return nil, fmt.Errorf("util.json ops: requires array")
-	}
-	return d.applyList(items)
-}
-
-// applyList 顺序执行编辑指令(引擎无关)
+// applyList 顺序执行编辑指令(util.json 的 ops 通道;value 一律为 JSON 字面量字符串)
 func (d *jsonDoc) applyList(items []any) (map[string]any, error) {
 	for _, it := range items {
 		im, ok := it.(map[string]any)

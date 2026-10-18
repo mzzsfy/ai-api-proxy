@@ -231,12 +231,16 @@ func TestHandlerEngineReplyOutOfOrder(t *testing.T) {
 }
 
 // 场景: 同步性违规——Promise 返回 = 502
-func TestHandlerEngineSyncViolation(t *testing.T) {
-	pkg := handlerPkg(t, `module.exports = function(ctx){ return Promise.resolve(1) }`)
+func TestHandlerEngineAsyncHandlerSettled(t *testing.T) {
+	// Given async handler 返回 Promise When Execute Then 宿主等待 settled(async 放开;未应答仍违规)
+	pkg := handlerPkg(t, `module.exports = async function(ctx){ await Promise.resolve(1); ctx.reply.json(200, "ok"); }`)
 	e, _, _ := testEngine(t, pkg, testTransport())
-	err := e.Execute(context.Background(), execIn("m1", false, "k1"), &fakeSink{})
-	if err == nil || !strings.Contains(err.Error(), "async") {
-		t.Fatalf("sync violation: %v", err)
+	sink := &fakeSink{}
+	if err := e.Execute(context.Background(), execIn("m1", false, "k1"), sink); err != nil {
+		t.Fatalf("async handler: %v", err)
+	}
+	if len(sink.json) == 0 || sink.json[0] != "ok" {
+		t.Fatalf("reply lost: %+v", sink)
 	}
 }
 
@@ -544,7 +548,7 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 }`)
 	_ = pkg
 	pool := newHandlerPool(100, func() (*handlerInstance, error) {
-		return &handlerInstance{vm: nil, handlerFn: nil}, nil
+		return &handlerInstance{}, nil
 	})
 	inst, err := pool.Borrow()
 	if err != nil {

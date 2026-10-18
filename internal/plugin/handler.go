@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin/jsengine"
 )
 
 // 执行预算(定案常量)
@@ -74,8 +74,12 @@ type handlerExec struct {
 	heldMu   sync.Mutex
 	sources  []*outboundSource
 	srcMu    sync.Mutex
-	vm       *goja.Runtime
-	ctxObj   *goja.Object
+	srcStates map[string]*srcState // base → 迭代状态(ctx 期宿主原语定位)
+	srcSeq    int
+	inst      *jsengine.Instance
+	ctxObj    jsengine.Value
+
+	preparePhase bool // prepare 期(reply 全禁;data 访问抛错)
 
 	broken     atomic.Bool  // 执行级取消污染(实例丢弃)
 	lastAct    atomic.Int64 // 最近原语活动(unixnano;纯计算超限判定锚点)
@@ -143,7 +147,8 @@ func (e *HandlerEngine) poolFor() (*handlerPool, error) {
 func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink HandlerReplySink) error {
 	ex := &handlerExec{
 		engine: e, deps: e.deps, in: in, sink: sink,
-		held: map[string]func(){},
+		held:      map[string]func(){},
+		srcStates: map[string]*srcState{},
 	}
 	ex.ctx, ex.cancel = context.WithTimeout(parent, handlerOverallBudget)
 	ex.deadline = time.Now().Add(handlerOverallBudget)
@@ -222,26 +227,65 @@ func (ex *handlerExec) enter() func() {
 	}
 }
 
+// registerHeld 持锁登记(执行已取消 = 拒绝;调用方负责立即释放)
+func (ex *handlerExec) registerHeld(slot string, rel func()) bool {
+	ex.heldMu.Lock()
+	defer ex.heldMu.Unlock()
+	if ex.ctx.Err() != nil {
+		return false
+	}
+	ex.held[slot] = rel
+	return true
+}
+
+// releaseHeld 放锁(登记表移除 + 释放)
+func (ex *handlerExec) releaseHeld(slot string) {
+	ex.heldMu.Lock()
+	rel, ok := ex.held[slot]
+	if ok {
+		delete(ex.held, slot)
+	}
+	ex.heldMu.Unlock()
+	if ok {
+		rel()
+	}
+}
+
 // run 池内执行体:构建 ctx → prepare → handler → 终局账目
 func (ex *handlerExec) run(inst *handlerInstance) error {
-	ex.vm = inst.vm
-	ex.vm.ClearInterrupt() // 封死上一执行迟到中断对本次的误伤
+	ex.inst = inst.env.q.inst
+	inst.cur = ex
+	defer func() { inst.cur = nil }()
 	defer ex.finalize()
 
-	ctxObj := ex.buildCtx(inst.prepareFn != nil)
-	var data goja.Value = goja.Undefined()
-	if inst.prepareFn != nil {
-		v, err := ex.callJS("prepare", inst.prepareFn, ctxObj)
+	ex.preparePhase = true
+	ctxObj, err := ex.buildCtx(inst.prepareFn.VM() != nil)
+	if err != nil {
+		return fmt.Errorf("handler %s: ctx: %w", ex.deps.Package.Manifest.Name, err)
+	}
+	if inst.prepareFn.VM() != nil {
+		data, err := ex.callJS("prepare", inst.prepareFn, ctxObj)
 		if err != nil {
+			ctxObj.Free()
 			return fmt.Errorf("handler %s: prepare: %w", ex.deps.Package.Manifest.Name, err)
 		}
-		data = v
 		// handler 期 ctx:reply 解禁,data 重绑(prepare 持有的锁经登记表自然延续)
-		ctxObj = ex.buildCtx(false)
+		ctxObj.Free()
+		ex.preparePhase = false
+		ctxObj, err = ex.buildCtx(false)
+		if err != nil {
+			data.Free()
+			return fmt.Errorf("handler %s: ctx: %w", ex.deps.Package.Manifest.Name, err)
+		}
+		if err := ex.bindData(data); err != nil {
+			data.Free()
+			return fmt.Errorf("handler %s: %w", ex.deps.Package.Manifest.Name, err)
+		}
+		data.Free()
+	} else {
+		ex.preparePhase = false
 	}
-	if err := ex.bindData(data); err != nil {
-		return fmt.Errorf("handler %s: %w", ex.deps.Package.Manifest.Name, err)
-	}
+	defer ctxObj.Free()
 	if _, err := ex.callJS("handler", inst.handlerFn, ctxObj); err != nil {
 		if terr, ok := err.(*handlerError); ok {
 			return ex.terminalError(terr)
@@ -257,41 +301,51 @@ type handlerError struct{ err error }
 func (e *handlerError) Error() string { return e.err.Error() }
 func (e *handlerError) Unwrap() error { return e.err }
 
-// callJS 同步调用(执行级取消 = Interrupt 双发;同步性违规判定)
-func (ex *handlerExec) callJS(name string, fn goja.Callable, ctxObj *goja.Object) (val goja.Value, err error) {
-	vm := ex.vm
-	vm.ClearInterrupt()
-	done := make(chan struct{})
+// callJS 执行钩子(宿主等待 settled;执行级取消 = Interrupt 双发;async 放开)
+func (ex *handlerExec) callJS(name string, fn jsengine.Value, ctxVal jsengine.Value) (jsengine.Value, error) {
+	// 执行级取消:ctx.Done → 中断当前 JS(实例按 broken 丢弃)
+	interruptDone := make(chan struct{})
 	go func() {
 		select {
-		case <-done:
+		case <-interruptDone:
 		case <-ex.ctx.Done():
-			vm.Interrupt(ErrHandlerTimeout)
+			ex.inst.Interrupt()
 		}
 	}()
-	defer close(done)
-	defer func() {
-		if rec := recover(); rec != nil {
-			if errors.Is(asError(rec), ErrHandlerTimeout) {
-				ex.broken.Store(true)
-				err = &handlerError{fmt.Errorf("%s: %w", name, ErrHandlerTimeout)}
-				return
-			}
-			err = &handlerError{fmt.Errorf("%s: %v", name, rec)}
-		}
-	}()
-	v, callErr := fn(goja.Undefined(), ctxObj)
-	if callErr != nil {
-		if errors.Is(asError(callErr), ErrHandlerTimeout) || strings.Contains(callErr.Error(), ErrHandlerTimeout.Error()) {
+	defer close(interruptDone)
+	if err := ex.inst.SetBudget(handlerStatementCap); err != nil {
+		return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %w", name, err)}
+	}
+	out, err := ex.inst.Call(fn, ctxVal)
+	if err != nil {
+		if brokenFromErr(err) {
 			ex.broken.Store(true)
-			return nil, &handlerError{fmt.Errorf("%s: %w", name, ErrHandlerTimeout)}
 		}
-		return nil, &handlerError{fmt.Errorf("%s: %w", name, callErr)}
+		if errors.Is(asError(err), ErrHandlerTimeout) || strings.Contains(err.Error(), ErrHandlerTimeout.Error()) {
+			ex.broken.Store(true)
+			return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %w", name, ErrHandlerTimeout)}
+		}
+		return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %w", name, err)}
 	}
-	if isThenable(vm, v) {
-		return nil, &handlerError{fmt.Errorf("%s: async return (sync violation; no async execution environment)", name)}
+	settled, _, rerr := ex.inst.Await(out, handlerStatementCap)
+	out.Free()
+	if rerr != nil {
+		if rej, ok := ex.inst.Rejection(rerr); ok {
+			defer rej.Free()
+			ee := ex.inst.ExceptionOf(rej)
+			_ = ee
+			return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %s", name, ee.Error())}
+		}
+		if brokenFromErr(rerr) {
+			ex.broken.Store(true)
+		}
+		if strings.Contains(rerr.Error(), ErrHandlerTimeout.Error()) {
+			ex.broken.Store(true)
+			return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %w", name, ErrHandlerTimeout)}
+		}
+		return jsengine.Value{}, &handlerError{fmt.Errorf("%s: %w", name, rerr)}
 	}
-	return v, nil
+	return settled, nil
 }
 
 // asError 恢复值归一

@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 )
@@ -66,21 +65,38 @@ func (b *countingCloseBody) Close() error {
 func TestOutboundChunkIteratorReturnCloseError(t *testing.T) {
 	closeErr := errors.New("body close failed")
 	src := &outboundSource{headers: map[string]string{"Content-Type": "text/event-stream"}, body: &closeErrorBody{closeErr: closeErr}, stop: make(chan struct{}), closeDone: make(chan struct{})}
-	vm := goja.New()
-	var ex handlerExec
-	source := ex.bindSource(vm, src)
-	if err := vm.Set("source", source); err != nil {
+	// 完整装配:env + ctx 原语注册 + 绑定执行(freeze 不做;胶水在 ctxGlueJS)
+	pkg := &Package{Manifest: &Manifest{Name: "t", Version: "1"}, Files: map[string][]byte{}}
+	env := newHooksEnv(pkg, HooksDeps{PackageName: "t"}, false)
+	defer func() { _ = env.q.Close() }()
+	inst := &handlerInstance{env: env}
+	if err := env.q.inst.EvalString(ctxGlueJS); err != nil {
 		t.Fatal(err)
 	}
-	got, err := vm.RunString(`(function(){
+	if err := inst.registerCtxHostFuncs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.registerSrcHostFuncs(); err != nil {
+		t.Fatal(err)
+	}
+	ex := &handlerExec{inst: env.q.inst, held: map[string]func(){}, srcStates: map[string]*srcState{}}
+	inst.cur = ex
+	source, err := ex.bindSource(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.q.inst.SetGlobal("source", source); err != nil {
+		t.Fatal(err)
+	}
+	source.Free()
+	if err := env.q.inst.EvalString(`(function(){
 	const it=source.chunks();
 	let first=false, second=false;
 	try { it.return(); } catch (e) { first=String(e).includes("body close failed"); }
 	try { it.return(); } catch (e) { second=String(e).includes("body close failed"); }
-	return first && second;
-})()`)
-	if err != nil || !got.ToBoolean() {
-		t.Fatalf("both return calls should preserve close error: %v, %v", got, err)
+	if (!(first && second)) throw new Error("both return calls should preserve close error: "+first+","+second);
+})()`); err != nil {
+		t.Fatal(err)
 	}
 }
 

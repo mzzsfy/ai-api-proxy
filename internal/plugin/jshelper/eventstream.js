@@ -133,8 +133,10 @@
             const step = source.next();
             if (step.done) break;
             const item = step.value;
-            const chunk = item instanceof ArrayBuffer ? new Uint8Array(item) : null;
-            if (!chunk) throw new Error("EventStream chunk must be an ArrayBuffer");
+            const chunk = item instanceof ArrayBuffer ? new Uint8Array(item)
+              : ArrayBuffer.isView(item) ? new Uint8Array(item.buffer, item.byteOffset, item.byteLength)
+              : null;
+            if (!chunk) throw new Error("EventStream chunk must be an ArrayBuffer or typed array view");
             if (chunk.length) {
               segments.push(chunk);
               available += chunk.length;

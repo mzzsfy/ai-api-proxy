@@ -3,8 +3,6 @@ package plugin
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/dop251/goja"
 )
 
 // jsStr Go 字符串 → JS 字符串字面量
@@ -13,16 +11,35 @@ func jsStr(s string) string {
 	return string(b)
 }
 
-// runUtilErr 执行 util 表达式,捕获 JS 异常
+// runUtil 在一次性 quickjs runtime 执行 util 脚本,返回最后表达式完成值的 JSON 序列化
+func runUtil(t *testing.T, expr string) string {
+	t.Helper()
+	q := newUtilVM(t, HostDeps{})
+	v, err := q.inst.EvalExpression(expr)
+	if err != nil {
+		t.Fatalf("run %s: %v", expr, err)
+	}
+	defer v.Free()
+	b, err := v.JSON()
+	if err != nil {
+		t.Fatalf("export %s: %v", expr, err)
+	}
+	return string(b)
+}
+
+// runUtilErr 执行 util 脚本,捕获 JS 异常
 func runUtilErr(t *testing.T, expr string) (string, error) {
 	t.Helper()
-	vm := goja.New()
-	bindUtil(vm, HostDeps{})
-	v, err := vm.RunString(expr)
+	q := newUtilVM(t, HostDeps{})
+	v, err := q.inst.EvalExpression(expr)
 	if err != nil {
 		return "", err
 	}
-	b, _ := json.Marshal(v.Export())
+	defer v.Free()
+	b, jerr := v.JSON()
+	if jerr != nil {
+		return "", jerr
+	}
 	return string(b), nil
 }
 

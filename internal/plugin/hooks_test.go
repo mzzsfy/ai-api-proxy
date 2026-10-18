@@ -132,12 +132,12 @@ func TestHooks_ProgramCache(t *testing.T) {
 func TestHooks_TaskRunAndCtxTask(t *testing.T) {
 	// Given 任务文件导出 handler When RunTask Then 执行且 ctx.task=任务名;多行同指一实现各自带名
 	seen := map[string]string{}
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	_ = mem
 	files := map[string]string{"tasks/signIn.js": `module.exports={handler:function(ctx){ctx.storage && storage.set("task", ctx.task);}}`}
 	_ = seen
 	pkg := hooksPkg(t, files, HooksTask{Name: "signIn", Cron: "* * * * *"}, HooksTask{Name: "signInPm", Cron: "0 18 * * *", Entry: "tasks/signIn.js"})
-	rt, err := LoadTask(pkg, HooksTask{Name: "signIn", Cron: "* * * * *"}, HooksDeps{Storage: &memKV{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
+	rt, err := LoadTask(pkg, HooksTask{Name: "signIn", Cron: "* * * * *"}, HooksDeps{Storage: &mapStorage{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestHooks_TaskRunAndCtxTask(t *testing.T) {
 	}
 	_ = mem
 	// 共用实现:第二行同文件,task 名不同
-	rt2, err := LoadTask(pkg, HooksTask{Name: "signInPm", Cron: "0 18 * * *", Entry: "tasks/signIn.js"}, HooksDeps{Storage: &memKV{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
+	rt2, err := LoadTask(pkg, HooksTask{Name: "signInPm", Cron: "0 18 * * *", Entry: "tasks/signIn.js"}, HooksDeps{Storage: &mapStorage{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestHooks_Require(t *testing.T) {
 			module.exports={handler:function(ctx){ c.obj.n += 1; storage.set("n", String(c.obj.n)); }}`,
 	}
 	pkg := hooksPkg(t, files, HooksTask{Name: "a", Cron: "* * * * *"})
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	deps := HooksDeps{Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}
 	rt, err := LoadTask(pkg, HooksTask{Name: "a", Cron: "* * * * *"}, deps, nil)
 	if err != nil {
@@ -209,7 +209,7 @@ func TestHooks_OnLoadAndSettings(t *testing.T) {
 	files := map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("acct", String(ctx.settings.account));}}`}
 	pkg := hooksPkg(t, files)
 	snap := map[string]any{"account": "over@x"}
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	rt, err := LoadInit(pkg, HooksDeps{Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}, snap)
 	if err != nil {
 		t.Fatal(err)
@@ -223,14 +223,14 @@ func TestHooks_OnLoadAndSettings(t *testing.T) {
 }
 
 func TestHooks_PromiseRejected(t *testing.T) {
-	// Given task 返回 Promise When RunTask Then 同步性违规报错
+	// Given task 返回 Promise(async handler)When RunTask Then 宿主等待 settled 正常完成(async 放开)
 	pkg := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:async function(ctx){}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
 	rt, err := LoadTask(pkg, HooksTask{Name: "a", Cron: "* * * * *"}, HooksDeps{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.RunTask(HooksTask{Name: "a", Cron: "* * * * *"}, time.Unix(0, 0)); err == nil || !strings.Contains(err.Error(), "sync violation") {
-		t.Fatalf("promise accepted: %v", err)
+	if err := rt.RunTask(HooksTask{Name: "a", Cron: "* * * * *"}, time.Unix(0, 0)); err != nil {
+		t.Fatalf("async task must complete: %v", err)
 	}
 }
 
@@ -409,7 +409,7 @@ func TestValidate_ReservedPrefixRejected(t *testing.T) {
 
 func TestStorage_TxCommitOnSuccessRollbackOnFailure(t *testing.T) {
 	// Given 任务写 storage When 成功 Then 归并落库;失败(抛错/超时)Then 缓冲丢弃持久层不变
-	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}
+	deps := HooksDeps{Storage: &mapStorage{m: map[string]string{}}, Now: func() time.Time { return time.Unix(0, 0) }}
 	pkg := hooksPkg(t, map[string]string{"tasks/a.js": `module.exports={handler:function(ctx){storage.set("k","v");}}`}, HooksTask{Name: "a", Cron: "* * * * *"})
 	rt, err := LoadTask(pkg, HooksTask{Name: "a", Cron: "* * * * *"}, deps, nil)
 	if err != nil {
@@ -438,7 +438,7 @@ func TestStorage_TxCommitOnSuccessRollbackOnFailure(t *testing.T) {
 
 func TestHooks_WriteWindowScoped(t *testing.T) {
 	// BDD 16/写窗矩阵:onLoad ctx 无 set/merge/remove(阉割即权限);任务窗有
-	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
+	deps := HooksDeps{Storage: &mapStorage{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
 	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined && ctx.keys.merge===undefined && ctx.keys.remove===undefined));}}`})
 	rt, err := LoadInit(pkg, deps, nil)
 	if err != nil {

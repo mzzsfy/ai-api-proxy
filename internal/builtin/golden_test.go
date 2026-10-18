@@ -36,12 +36,12 @@ const goldenBaseURL = "https://api.x.com"
 func loadJSPackage(t *testing.T) pipeline.Protocol {
 	t.Helper()
 	root := findRepoRoot(t)
-	// 该包只作为 Go 内置协议的对拍基准,已从 plugins/ 移入 testdata/(与可安装包区分)
+	// 该包只作为 Go 内置协议的对拍基准,在插件仓库 testdata/(同级 ai-api-proxy-plugin)
 	dir := filepath.Join(root, "testdata", "js-openai-full")
 	if _, err := os.Stat(dir); err != nil {
-		sibling := filepath.Join(root, "..", "plugins-repo", "testdata", "js-openai-full")
+		sibling := filepath.Join(root, "..", "ai-api-proxy-plugin", "testdata", "js-openai-full")
 		if _, err2 := os.Stat(sibling); err2 != nil {
-			t.Skip("js-openai-full fixture not found (split repo); skipping golden JS-vs-Go comparison")
+			t.Skipf("js-openai-full fixture not found (%s); skipping golden JS-vs-Go comparison", sibling)
 		}
 		dir = sibling
 	}
@@ -53,9 +53,9 @@ func loadJSPackage(t *testing.T) pipeline.Protocol {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 素材库迁移检测:util.secret 机制已废除(键面统一 util.key());外部夹具未迁移前显式跳过
+	// 素材库迁移检测:util.secret 机制已废除(键面统一 util.key());夹具若回退旧 API 直接失败
 	if strings.Contains(string(protoSrc), "util.secret") {
-		t.Skip("js-openai-full fixture still uses removed util.secret (pending plugins-repo migration to util.key)")
+		t.Fatal("js-openai-full fixture uses removed util.secret (migrate to util.key in plugins repo)")
 	}
 	aap := zipBytes(t, manifest, map[string]string{"protocol.js": string(protoSrc)})
 	pkg, err := plugin.ParseAAP(aap)

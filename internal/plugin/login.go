@@ -2,10 +2,11 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/mzzsfy/ai-api-proxy/internal/plugin/jsengine"
 )
 
 // LoginFlowTimeoutMs 登录流程预算(出站登录慢于普通钩子)
@@ -26,61 +27,123 @@ func (a AuthoritativeStore) Set(key, value string) error {
 func (a AuthoritativeStore) Delete(key string) {
 	_ = a.S.Delete(key)
 }
+
 // LoadLogin 装载 login/index.js(导出 = 单函数;返回值经宿主 Keys.Set 落库,storage 直写③打权威标)
 func LoadLogin(pkg *Package, deps HooksDeps, params any) (*HooksRuntime, error) {
 	deps = normalizeDeps(deps)
 	env := newHooksEnv(pkg, deps, false)
 	exp, err := env.load("", LoginEntry)
 	if err != nil {
+		_ = env.q.Close()
 		return nil, fmt.Errorf("load %s: %w", LoginEntry, err)
 	}
-	fn, ok := goja.AssertFunction(exp)
-	if !ok {
+	isFn, err := env.q.inst.IsFunction(exp)
+	if err != nil || !isFn {
+		exp.Free()
+		_ = env.q.Close()
 		return nil, fmt.Errorf("%s: export must be a function", LoginEntry)
 	}
-	return &HooksRuntime{pkg: pkg.Manifest.Name, vm: env.vm, exports: exp, deps: deps, loginFn: fn, loginParams: params}, nil
+	return &HooksRuntime{pkg: pkg.Manifest.Name, env: env, inst: env.q.inst, exports: exp, deps: deps, loginFn: exp.Dup(), loginParams: params}, nil
 }
 
-// RunLogin 调 login/index.js(params 注入 ctx;返回值 = 账号 data,落库归宿主)
+// RunLogin 调 login/index.js(params 注入 ctx;返回值 = 账号 data,落库归宿主)。
+// 返回值经 JSON 通道深导出(quickjs Any() 对对象只给引用壳)
 func (h *HooksRuntime) RunLogin() (any, error) {
-	v, err := h.callValue("login", h.loginFn, LoginFlowTimeoutMs, h.newLoginCtx())
+	ctxVal, err := h.newLoginCtx()
 	if err != nil {
 		return nil, err
 	}
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+	defer ctxVal.Free()
+	v, err := h.callValue("login", h.loginFn, LoginFlowTimeoutMs, ctxVal)
+	if err != nil {
+		return nil, err
+	}
+	defer v.Free()
+	if v.IsUndefined() || v.IsNull() {
 		return nil, fmt.Errorf("%s: login returned nothing", LoginEntry)
 	}
-	return v.Export(), nil
+	b, err := v.JSON()
+	if err != nil {
+		return nil, fmt.Errorf("%s: login result: %w", LoginEntry, err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("%s: login result must be an object", LoginEntry)
+	}
+	return out, nil
 }
 
-// newLoginCtx login ctx 契约:{params, http, storage}(util 为全局;无 key/keys/settings/cron)
-func (h *HooksRuntime) newLoginCtx() *goja.Object {
-	ctx := h.vm.NewObject()
-	_ = ctx.Set("params", h.loginParams)
-	httpObj := h.vm.NewObject()
-	_ = httpObj.Set("request", func(opts map[string]any) (map[string]any, error) {
-		return h.doHTTP(opts, LoginFlowTimeoutMs)
-	})
-	_ = ctx.Set("http", httpObj)
-	if h.deps.Storage != nil {
-		st := h.vm.NewObject()
-		_ = st.Set("get", func(key string) (any, error) {
-			v, ok := h.deps.Storage.Get(key)
-			if !ok || v == "" {
-				return nil, nil
-			}
-			return v, nil
-		})
-		_ = st.Set("set", func(key, value string) error {
-			if len(value) > MaxStorageValue {
-				return fmt.Errorf("storage value exceeds limit")
-			}
-			return h.deps.Storage.Set(key, value)
-		})
-		_ = st.Set("delete", func(key string) { h.deps.Storage.Delete(key) })
-		_ = ctx.Set("storage", st)
+// newLoginCtx login ctx 契约:{params, http, storage}(util 为全局;无 key/keys/settings/cron)。
+// 宿主原语复用 ctx 契约函数(每实例一次;login 实例独立 runtime,无写窗语义)
+func (h *HooksRuntime) newLoginCtx() (jsengine.Value, error) {
+	inst := h.inst
+	h.activeMs = LoginFlowTimeoutMs
+	if !h.hasCtxFuncs {
+		h.writeWindow = ""
+		if err := h.registerCtxFuncs(); err != nil {
+			return jsengine.Value{}, err
+		}
+		h.hasCtxFuncs = true
 	}
-	return ctx
+	ctx, err := inst.NewObject()
+	if err != nil {
+		return jsengine.Value{}, err
+	}
+	if h.loginParams != nil {
+		if err := inst.SetProp(ctx, "params", h.loginParams); err != nil {
+			ctx.Free()
+			return jsengine.Value{}, err
+		}
+	}
+	httpObj, err := inst.NewObject()
+	if err != nil {
+		ctx.Free()
+		return jsengine.Value{}, err
+	}
+	defer httpObj.Free()
+	fn, err := inst.GetGlobal("__h_http_request")
+	if err != nil {
+		ctx.Free()
+		return jsengine.Value{}, err
+	}
+	if err := inst.SetProp(httpObj, "request", fn); err != nil {
+		fn.Free()
+		ctx.Free()
+		return jsengine.Value{}, err
+	}
+	fn.Free()
+	if err := inst.SetProp(ctx, "http", httpObj); err != nil {
+		ctx.Free()
+		return jsengine.Value{}, err
+	}
+	if h.deps.Storage != nil {
+		st, err := inst.NewObject()
+		if err != nil {
+			ctx.Free()
+			return jsengine.Value{}, err
+		}
+		defer st.Free()
+		for _, p := range []struct{ prop, global string }{
+			{"get", "__h_storage_get"}, {"set", "__h_storage_set"}, {"delete", "__h_storage_del"},
+		} {
+			gfn, err := inst.GetGlobal(p.global)
+			if err != nil {
+				ctx.Free()
+				return jsengine.Value{}, err
+			}
+			if err := inst.SetProp(st, p.prop, gfn); err != nil {
+				gfn.Free()
+				ctx.Free()
+				return jsengine.Value{}, err
+			}
+			gfn.Free()
+		}
+		if err := inst.SetProp(ctx, "storage", st); err != nil {
+			ctx.Free()
+			return jsengine.Value{}, err
+		}
+	}
+	return ctx, nil
 }
 
 // InspectTimeoutMs 展示变换预算
@@ -94,20 +157,38 @@ func LoadInspect(pkg *Package) (func(data any) (any, error), error) {
 	env := newHooksEnv(pkg, HooksDeps{PackageName: pkg.Manifest.Name}, false)
 	exp, err := env.load("", "inspect.js")
 	if err != nil {
+		_ = env.q.Close()
 		return nil, fmt.Errorf("load inspect.js: %w", err)
 	}
-	fn, ok := goja.AssertFunction(exp)
-	if !ok {
+	isFn, err := env.q.inst.IsFunction(exp)
+	if err != nil || !isFn {
+		exp.Free()
+		_ = env.q.Close()
 		return nil, fmt.Errorf("inspect.js: export must be a function")
 	}
 	return func(data any) (any, error) {
-		env.vm.ClearInterrupt()
-		timer := time.AfterFunc(InspectTimeoutMs, func() { env.vm.Interrupt(errHookTimeout) })
-		defer timer.Stop()
-		v, err := fn(goja.Undefined(), env.vm.ToValue(data))
+		if err := env.q.inst.SetBudget(InspectTimeoutMs * time.Millisecond); err != nil {
+			return nil, err
+		}
+		out, err := env.q.inst.Call(exp, data)
 		if err != nil {
 			return nil, err
 		}
-		return v.Export(), nil
+		settled, _, rerr := env.q.inst.Await(out, InspectTimeoutMs*time.Millisecond)
+		out.Free()
+		if rerr != nil {
+			if rej, ok := env.q.inst.Rejection(rerr); ok {
+				rej.Free()
+				ee := env.q.inst.ExceptionOf(rej)
+				return nil, ee
+			}
+			return nil, rerr
+		}
+		defer settled.Free()
+		a, err := settled.Any()
+		if err != nil {
+			return nil, err
+		}
+		return a, nil
 	}, nil
 }

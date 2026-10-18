@@ -380,15 +380,15 @@ func (r *Registry) probeSupports(name string, p *Package) *pipeline.Supports {
 	if err != nil {
 		return nil
 	}
-	hooks, err := ProbeHooks(prog)
+	hasEvent, hasResponse, err := ProbeHooks(prog)
 	if err != nil {
 		return nil
 	}
 	s := pipeline.Supports{Features: p.Manifest.Parts.Protocol.Features}
-	if hooks.MapEvent != nil {
+	if hasEvent {
 		s.Forms = append(s.Forms, string(FormStreaming))
 	}
-	if hooks.MapResponse != nil {
+	if hasResponse {
 		s.Forms = append(s.Forms, string(FormNonStreaming))
 	}
 	return &s

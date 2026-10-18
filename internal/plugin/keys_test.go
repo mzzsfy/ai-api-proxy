@@ -213,7 +213,7 @@ func TestHooks_CtxKeyInjection(t *testing.T) {
 	pkg := hooksPkg(t, files, tk)
 	ks := NewKeysStore(testKeysDB(t))
 	_, _ = ks.Set("hp", "main", map[string]any{"api_key": "old"})
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	deps := HooksDeps{Keys: ks, Storage: mem, Key: &KeyRef{ID: "main", Data: map[string]any{"api_key": "old"}}, Now: func() time.Time { return time.Unix(0, 0) }}
 	rt, err := LoadTask(pkg, tk, deps, nil)
 	if err != nil {
@@ -248,7 +248,7 @@ func TestHooks_MergePatch(t *testing.T) {
 	pkg := hooksPkg(t, files, tk)
 	ks := NewKeysStore(testKeysDB(t))
 	_, _ = ks.Set("hp", "main", map[string]any{"keep": 1})
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	deps := HooksDeps{Keys: ks, Storage: mem, Key: &KeyRef{ID: "main", Data: map[string]any{"keep": 1}}, Now: func() time.Time { return time.Unix(0, 0) }}
 	rt, err := LoadTask(pkg, tk, deps, nil)
 	if err != nil {
@@ -290,7 +290,7 @@ func TestHooks_NoMultiKeyJS(t *testing.T) {
 	}}`}
 	tk := HooksTask{Name: "a", Cron: "* * * * *"}
 	pkg := hooksPkg(t, files, tk)
-	mem := &memKV{m: map[string]string{}}
+	mem := &mapStorage{m: map[string]string{}}
 	// 无键上下文:ctx.key undefined,util.key() undefined(HostDeps 无 Key)
 	rt, err := LoadTask(pkg, tk, HooksDeps{Keys: NewKeysStore(testKeysDB(t)), Storage: mem, Now: func() time.Time { return time.Unix(0, 0) }}, nil)
 	if err != nil {
@@ -306,7 +306,7 @@ func TestHooks_NoMultiKeyJS(t *testing.T) {
 
 func TestHooks_WriteWindowOnlyTask(t *testing.T) {
 	// BDD 16/写窗矩阵:onLoad ctx 无 set/merge(阉割即权限)
-	deps := HooksDeps{Storage: &memKV{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
+	deps := HooksDeps{Storage: &mapStorage{m: map[string]string{}}, Keys: NewKeysStore(testKeysDB(t)), Now: func() time.Time { return time.Unix(0, 0) }}
 	pkg := hooksPkg(t, map[string]string{"init.js": `module.exports={onLoad:function(ctx){storage.set("probe", String(ctx.keys.set===undefined && ctx.keys.merge===undefined));}}`})
 	rt, err := LoadInit(pkg, deps, nil)
 	if err != nil {
