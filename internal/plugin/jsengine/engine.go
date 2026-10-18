@@ -111,6 +111,10 @@ globalThis.__hostCall = function (fn) {
 };
 globalThis.__hostIsPromise = function (v) { return !!(v && typeof v.then === "function"); };
 globalThis.__hostIsFunction = function (v) { return typeof v === "function"; };
+globalThis.__hostToGo = function (v) {
+  var s = JSON.stringify(v, function (k, x) { return x === undefined ? null : x; });
+  return s === undefined ? "null" : s;
+};
 `
 
 // New 构造实例(内存上限默认生效;helper 注入失败=构造失败)

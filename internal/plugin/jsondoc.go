@@ -89,6 +89,11 @@ func (d *jsonDoc) apply(vm *goja.Runtime, list goja.Value) (map[string]any, erro
 	if !ok {
 		return nil, fmt.Errorf("util.json ops: requires array")
 	}
+	return d.applyList(items)
+}
+
+// applyList 顺序执行编辑指令(引擎无关)
+func (d *jsonDoc) applyList(items []any) (map[string]any, error) {
 	for _, it := range items {
 		im, ok := it.(map[string]any)
 		if !ok {
