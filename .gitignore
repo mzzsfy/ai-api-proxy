@@ -10,3 +10,4 @@ node_modules/
 *.key
 warp-state/
 .idea/
+docs/progress/*
