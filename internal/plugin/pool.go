@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ const PerPkgVMCap = 64
 const GlobalVMCap = 128
 
 // vmBudget 进程级 VM 存活预算(工厂产出前占用,销毁后归还;约束内存与宿主函数注册的进程级上限)
+// 装载期探测实例(NewProtocol/NewFilter 的 first)账外:串行装载 + 即时销毁,不占不还
 type vmBudget struct {
 	mu     sync.Mutex
 	global int
@@ -40,14 +42,27 @@ func (b *vmBudget) tryAcquire(pkg string) bool {
 	return true
 }
 
-// release 归还预算;空键回收防 map 无界
+// release 归还预算;空键回收防 map 无界;下溢 = 配对破坏,fail-fast 对齐 wg 双 Done
 func (b *vmBudget) release(pkg string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.global <= 0 {
+		panic("vm budget underflow: release without acquire (global)")
+	}
+	if b.perPkg[pkg] <= 0 {
+		panic("vm budget underflow: release without acquire (pkg " + pkg + ")")
+	}
 	b.global--
 	if b.perPkg[pkg]--; b.perPkg[pkg] <= 0 {
 		delete(b.perPkg, pkg)
 	}
+}
+
+// budgetSnapshot 测试观测(锁内读双闸计数)
+func budgetSnapshot(pkg string) (global, perPkg int) {
+	vmBudgets.mu.Lock()
+	defer vmBudgets.mu.Unlock()
+	return vmBudgets.global, vmBudgets.perPkg[pkg]
 }
 
 // errPoolClosed 池已关闭(Reload 销毁后借用)
@@ -72,9 +87,9 @@ func newRuntimePool(pkg string, warm int, queue time.Duration, factory func() (*
 	return &runtimePool{pkg: pkg, instances: make(chan *hookInstance, warm), factory: factory, queue: queue}
 }
 
-// Borrow 取实例:空闲窗内复用;超窗按 VM 预算弹性新建(达顶轮询至排队上界);关闭后拒绝
+// Borrow 取实例:空闲窗内复用;超窗按 VM 预算弹性新建(达顶轮询至排队上界);ctx 取消即中断;关闭后拒绝
 // wg 计在途借用,成功借出的 Done 转移到 Return
-func (p *runtimePool) Borrow() (*hookInstance, error) {
+func (p *runtimePool) Borrow(ctx context.Context) (*hookInstance, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -87,10 +102,12 @@ func (p *runtimePool) Borrow() (*hookInstance, error) {
 		return nil, err
 	}
 	wait := time.NewTimer(poolWait())
+	defer wait.Stop()
 	select {
 	case inst := <-p.instances:
-		wait.Stop()
 		return inst, nil
+	case <-ctx.Done():
+		return fail(ctx.Err())
 	case <-wait.C:
 	}
 	p.mu.Lock()
@@ -115,6 +132,8 @@ func (p *runtimePool) Borrow() (*hookInstance, error) {
 		select {
 		case inst := <-p.instances:
 			return inst, nil
+		case <-ctx.Done():
+			return fail(ctx.Err())
 		case <-tick.C:
 		case <-deadline.C:
 			return fail(ErrPoolTimeout)
@@ -149,10 +168,18 @@ func (p *runtimePool) discard(inst *hookInstance) {
 	vmBudgets.release(p.pkg)
 }
 
-// Close 停新借出并等待在途归零(阻塞;调用方异步触发)
+// Close 停新借出;在途归零后排空常驻(销毁并归还预算;Reload 旧池不留泄漏)
 func (p *runtimePool) Close() {
 	p.mu.Lock()
 	p.closed = true
 	p.mu.Unlock()
 	p.wg.Wait()
+	for {
+		select {
+		case inst := <-p.instances:
+			p.discard(inst)
+		default:
+			return
+		}
+	}
 }

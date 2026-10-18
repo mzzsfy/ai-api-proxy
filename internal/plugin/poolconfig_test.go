@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ func TestPoolWaitConfiguresBorrowWindow(t *testing.T) {
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	inst1, err := p.Borrow()
+	inst1, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func TestPoolWaitConfiguresBorrowWindow(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		p.Return(inst1, false)
 	}()
-	inst2, err := p.Borrow()
+	inst2, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

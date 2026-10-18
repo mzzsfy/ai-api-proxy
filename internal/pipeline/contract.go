@@ -55,6 +55,8 @@ type PipelineContext struct {
 	State     map[string]any
 	Vars      Vars
 	Key       *KeyEntry // 当前键(空池 = nil;适配器出池时无条件重绑键槽)
+	// Ctx 执行级取消信号(executor.Run 装入;适配层池排队感知客户端断连/预算)
+	Ctx context.Context
 }
 
 // NewContext 构造(初始化 State)

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -192,9 +193,17 @@ func brokenFromErr(err error) bool {
 	return ee.Kind != jsengine.KindException
 }
 
+// borrowCtx 借用取消信号:管道执行 ctx(executor.Run 装入;测试构造缺省 Background)
+func borrowCtx(ctx *pipeline.PipelineContext) context.Context {
+	if ctx != nil && ctx.Ctx != nil {
+		return ctx.Ctx
+	}
+	return context.Background()
+}
+
 // borrowWrap 借还包装:出池按 pctx.Key 无条件重绑键槽(含空值清槽,防池化残留);broken 实例归还时丢弃
 func (g *jsProtocol) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
-	inst, err := g.pool.Borrow()
+	inst, err := g.pool.Borrow(borrowCtx(ctx))
 	if err != nil {
 		return nil, pipeline.ErrPoolBusy
 	}
@@ -458,7 +467,7 @@ func buildFilter(pkg *Package, part FilterPart, params map[string]any, storage S
 func (g *jsFilter) Name() string { return g.name }
 
 func (g *jsFilter) borrowWrap(ctx *pipeline.PipelineContext, fn func(inst *hookInstance) (any, bool, error)) (any, error) {
-	inst, err := g.pool.Borrow()
+	inst, err := g.pool.Borrow(borrowCtx(ctx))
 	if err != nil {
 		return nil, pipeline.ErrPoolBusy
 	}

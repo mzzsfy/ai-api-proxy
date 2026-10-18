@@ -549,17 +549,17 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 	ctx.reply.json(200, "ok");
 }`)
 	_ = pkg
-	pool := newHandlerPool("t", 100, func() (*handlerInstance, error) {
+	pool := newHandlerPool("close-leak-h", 100, func() (*handlerInstance, error) {
 		return &handlerInstance{}, nil
 	})
-	inst, err := pool.Borrow()
+	inst, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatalf("borrow1: %v", err)
 	}
 	// 借还至第 maxBorrow 次归还时丢弃
 	for inst.borrows < pool.maxBorrow {
 		pool.Return(inst, false)
-		next, err := pool.Borrow()
+		next, err := pool.Borrow(context.Background())
 		if err != nil {
 			t.Fatalf("borrow n=%d: %v", inst.borrows, err)
 		}
@@ -568,13 +568,15 @@ func TestHandlerEnginePoolReuse(t *testing.T) {
 		}
 	}
 	pool.Return(inst, false) // 第 maxBorrow 次归还:丢弃
-	i3, err := pool.Borrow()
+	i3, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatalf("borrow3: %v", err)
 	}
 	if i3 == inst {
 		t.Fatal("instance must be discarded after max borrows")
 	}
+	pool.Return(i3, false)
+	pool.Close()
 }
 
 func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
@@ -585,7 +587,7 @@ func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
 		return &handlerInstance{}, nil
 	})
 	t.Cleanup(pool.Close)
-	inst1, err := pool.Borrow()
+	inst1, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatalf("borrow1: %v", err)
 	}
@@ -594,7 +596,7 @@ func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
 		inst1.borrows = 0
 		pool.Return(inst1, false)
 	}()
-	inst2, err := pool.Borrow()
+	inst2, err := pool.Borrow(context.Background())
 	if err != nil {
 		t.Fatalf("borrow2: %v", err)
 	}
@@ -604,5 +606,21 @@ func TestHandlerPool_ReuseWithinWindow(t *testing.T) {
 	}
 	if builds.Load() != 1 {
 		t.Fatalf("reuse must not build, built %d", builds.Load())
+	}
+}
+
+func TestHandlerPool_CloseReleasesBudget(t *testing.T) {
+	// Given 池内空闲实例 When Close Then 排空 + 预算归零
+	pool := newHandlerPool("close-leak-h", 100, func() (*handlerInstance, error) {
+		return &handlerInstance{}, nil
+	})
+	inst, err := pool.Borrow(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Return(inst, false)
+	pool.Close()
+	if _, perPkg := budgetSnapshot("close-leak-h"); perPkg != 0 {
+		t.Fatalf("budget leaked after close: %d", perPkg)
 	}
 }

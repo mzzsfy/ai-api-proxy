@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -78,7 +79,7 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 		return &hookInstance{id: n, hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	inst1, err := p.Borrow()
+	inst1, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 		t.Fatalf("first borrow must build once, got %d", factoryCalls.Load())
 	}
 	p.Return(inst1, true) // 污染丢弃 → 下次弹性新建
-	inst2, err := p.Borrow()
+	inst2, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestPool_PoisonedInstanceReplaced(t *testing.T) {
 func TestPool_NoWarmup(t *testing.T) {
 	// Given 构造池 When 未借用 Then 工厂零调用(不预热,省内存)
 	var factoryCalls atomic.Int64
-	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+	p := newRuntimePool("close-leak", 4, QueueTimeout, func() (*hookInstance, error) {
 		factoryCalls.Add(1)
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
@@ -112,12 +113,12 @@ func TestPool_NoWarmup(t *testing.T) {
 func TestPool_ElasticAfterIdleWindow(t *testing.T) {
 	// Given 空池 When 首次借用(空闲窗超时)Then 弹性新建恰好一个
 	var factoryCalls atomic.Int64
-	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+	p := newRuntimePool("close-leak", 4, QueueTimeout, func() (*hookInstance, error) {
 		factoryCalls.Add(1)
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	inst, err := p.Borrow()
+	inst, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,12 +131,12 @@ func TestPool_ElasticAfterIdleWindow(t *testing.T) {
 func TestPool_ReuseWithinWindow(t *testing.T) {
 	// Given 池空且 10ms 窗内有归还 When 借用 Then 复用归还实例(不新建)
 	var factoryCalls atomic.Int64
-	p := newRuntimePool("t", 4, QueueTimeout, func() (*hookInstance, error) {
+	p := newRuntimePool("close-leak", 4, QueueTimeout, func() (*hookInstance, error) {
 		factoryCalls.Add(1)
 		return &hookInstance{id: factoryCalls.Load(), hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	inst1, err := p.Borrow()
+	inst1, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestPool_ReuseWithinWindow(t *testing.T) {
 		time.Sleep(3 * time.Millisecond)
 		p.Return(inst1, false)
 	}()
-	inst2, err := p.Borrow()
+	inst2, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,11 +163,11 @@ func TestPool_ShrinkOnReturnFull(t *testing.T) {
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	a, err := p.Borrow()
+	a, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := p.Borrow()
+	b, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestPool_VMGateQueues(t *testing.T) {
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
 	t.Cleanup(p.Close)
-	if _, err := p.Borrow(); !errors.Is(err, ErrPoolTimeout) {
+	if _, err := p.Borrow(context.Background()); !errors.Is(err, ErrPoolTimeout) {
 		t.Fatalf("vm-gated borrow: %v", err)
 	}
 }
@@ -238,7 +239,7 @@ func TestPool_CloseWaitsInFlight(t *testing.T) {
 	p := newRuntimePool("t", 1, QueueTimeout, func() (*hookInstance, error) {
 		return &hookInstance{hooks: &Hooks{}}, nil
 	})
-	inst, err := p.Borrow()
+	inst, err := p.Borrow(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,10 +256,57 @@ func TestPool_CloseWaitsInFlight(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close did not finish after return")
 	}
-	if _, err := p.Borrow(); !errors.Is(err, errPoolClosed) {
+	if _, err := p.Borrow(context.Background()); !errors.Is(err, errPoolClosed) {
 		t.Fatalf("borrow after close: %v", err)
 	}
 }
 
 // 编译引用(池耗尽 → pipeline.ErrPoolBusy 映射在 borrowWrap)
 var _ = pipeline.ErrPoolBusy
+
+func TestPool_CloseReleasesBudget(t *testing.T) {
+	// Given 池内空闲实例与在途借用 When Close Then 排空常驻 + 预算归零(账目无泄漏)
+	p := newRuntimePool("close-leak", 4, QueueTimeout, func() (*hookInstance, error) {
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
+	inst, err := p.Borrow(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Return(inst, false)
+	p.Close()
+	if _, perPkg := budgetSnapshot("close-leak"); perPkg != 0 {
+		t.Fatalf("budget leaked after close: %d", perPkg)
+	}
+}
+
+func TestPool_CtxCancelInterruptsQueue(t *testing.T) {
+	// Given 单插件预算占满 When ctx 取消 Then 借用立即中断(不等排队上界)
+	pkg := "cancel"
+	for range PerPkgVMCap {
+		if !vmBudgets.tryAcquire(pkg) {
+			t.Fatal("acquire until cap")
+		}
+	}
+	t.Cleanup(func() {
+		for range PerPkgVMCap {
+			vmBudgets.release(pkg)
+		}
+	})
+	p := newRuntimePool(pkg, 1, time.Minute, func() (*hookInstance, error) {
+		return &hookInstance{hooks: &Hooks{}}, nil
+	})
+	t.Cleanup(p.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if _, err := p.Borrow(ctx); err == nil {
+		t.Fatal("expect cancel error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("cancel must interrupt queue, took %v", elapsed)
+	}
+}

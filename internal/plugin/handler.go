@@ -159,12 +159,12 @@ func (e *HandlerEngine) Execute(parent context.Context, in HandlerInput, sink Ha
 	ex.out = newOutboundClient(defTr, defaultOutboundTimeouts())
 	ex.tx = NewStorageTx(nil) // ② 缓冲;③ 经 deps.Store
 
-	// 池排队(VM 预算轮询)上界 60s,计入整体预算
+	// 池排队(VM 预算轮询)上界 60s,计入整体预算;客户端断连/预算耗尽即中断
 	pool, err := e.poolFor()
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}
-	inst, err := pool.Borrow()
+	inst, err := pool.Borrow(ex.ctx)
 	if err != nil {
 		return fmt.Errorf("handler %s: %w", e.deps.Package.Manifest.Name, err)
 	}

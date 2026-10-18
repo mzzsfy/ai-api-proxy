@@ -2,6 +2,7 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -52,7 +53,7 @@ func newHandlerPool(pkg string, maxBorrow int, factory func() (*handlerInstance,
 
 // Borrow 取实例;10ms 空闲窗内复用归还,超窗按 VM 预算弹性新建(达顶轮询至排队上界);
 // wg 计在途借用,成功借出的 Done 转移到 Return
-func (p *handlerPool) Borrow() (*handlerInstance, error) {
+func (p *handlerPool) Borrow(ctx context.Context) (*handlerInstance, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -65,12 +66,20 @@ func (p *handlerPool) Borrow() (*handlerInstance, error) {
 		return nil, err
 	}
 	wait := time.NewTimer(poolWait())
+	defer wait.Stop()
 	select {
 	case inst := <-p.instances:
-		wait.Stop()
 		inst.borrows++
 		return inst, nil
+	case <-ctx.Done():
+		return fail(ctx.Err())
 	case <-wait.C:
+	}
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return fail(fmt.Errorf("handler pool closed"))
 	}
 	deadline := time.NewTimer(handlerQueueTimeout)
 	defer deadline.Stop()
@@ -90,6 +99,8 @@ func (p *handlerPool) Borrow() (*handlerInstance, error) {
 		case inst := <-p.instances:
 			inst.borrows++
 			return inst, nil
+		case <-ctx.Done():
+			return fail(ctx.Err())
 		case <-tick.C:
 		case <-deadline.C:
 			return fail(ErrPoolTimeout)
@@ -124,12 +135,20 @@ func (p *handlerPool) discard(inst *handlerInstance) {
 	vmBudgets.release(p.pkg)
 }
 
-// Close 停新借出并等待在途归零
+// Close 停新借出;在途归零后排空常驻(销毁并归还预算;热加载旧池不留泄漏)
 func (p *handlerPool) Close() {
 	p.mu.Lock()
 	p.closed = true
 	p.mu.Unlock()
 	p.wg.Wait()
+	for {
+		select {
+		case inst := <-p.instances:
+			p.discard(inst)
+		default:
+			return
+		}
+	}
 }
 
 // buildHandlerInstance 池构建:new runtime → util/require/ctx 原语注入 → require handler.js 复核导出 → freeze globalThis

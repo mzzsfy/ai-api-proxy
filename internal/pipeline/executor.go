@@ -33,6 +33,7 @@ type Executor struct {
 
 // Run 执行模型:①修改链 ②直发 ③响应映射。entryReq = 入口协议请求体(声明协议与之恒等)
 func (e *Executor) Run(ctx context.Context, pctx *PipelineContext, u Resolved, entryReq []byte) (*Response, error) {
+	pctx.Ctx = ctx
 	// 入口形态把关:声明未覆盖 → 拒绝,不调用部件(不做任何转换)
 	if err := guardForm(u.Protocol, pctx.Vars.EntryStream); err != nil {
 		return nil, err
