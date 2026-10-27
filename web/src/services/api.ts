@@ -8,6 +8,8 @@ import type {
   HistoryPage,
   InspectSummary,
   AccountsView,
+  KeysCheckMode,
+  KeysCheckReport,
   KeysView,
   MetaView,
   MetricsLive,
@@ -36,6 +38,10 @@ export const api = {
     test: (id: number) => post<TestResult>(`/groups/${id}/test`),
     chatTest: (id: number, message: string) =>
       post<ChatTestResult>(`/groups/${id}/chat-test`, { message }),
+    keysCheck: (
+      id: number,
+      body: { mode?: KeysCheckMode; message?: string; concurrency?: number },
+    ) => post<KeysCheckReport>(`/groups/${id}/keys-check`, body),
     members: (id: number) => get<GroupMember[]>(`/groups/${id}/members`),
     createMember: (groupId: number, member: { name: string; enabled: boolean }) =>
       post<{ ok: true; id: number }>(`/groups/${groupId}/members`, member),

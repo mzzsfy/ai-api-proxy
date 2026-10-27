@@ -475,6 +475,8 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrConflict 唯一键冲突(→ 409)
 	ErrConflict = errors.New("conflict")
+	// ErrNoEnabledMember 组内无启用成员(→ 400;组级测试与逐键探测共用)
+	ErrNoEnabledMember = errors.New("no enabled member")
 )
 
 // normalizeUniqueErr SQLite UNIQUE 冲突 → ErrConflict 包装(并发检查-写入窗口兜底;非冲突原样返回)
@@ -535,6 +537,17 @@ func (r *Registry) ListMembers(groupID int64) []*Member {
 		out = append(out, &c)
 	}
 	return out
+}
+
+// TestTarget 组级测试目标:组副本 + 组内首个启用成员名(无启用成员即不可测)。
+// 组不存在包 ErrNotFound(admin 据此 404)
+func (r *Registry) TestTarget(grp *Group) (*Group, string, error) {
+	for _, m := range r.ListMembers(grp.ID) {
+		if m.Enabled {
+			return grp, m.Name, nil
+		}
+	}
+	return nil, "", fmt.Errorf("%w: group %d has no enabled member", ErrNoEnabledMember, grp.ID)
 }
 
 // DeclaredProtocol 组主包声明的协议全名(实例缓存命中即免查包表;缓存未命中回退包表)

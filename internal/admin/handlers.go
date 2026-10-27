@@ -31,6 +31,9 @@ type Deps struct {
 	TestFunc func(modelID int64) (latencyMS int64, errMsg string) // 连通性测试(走完整管道)
 	// ChatTestFunc 对话测试(走完整管道,非流式;行名即模型名;返回延迟/状态码/响应体/错误说明)
 	ChatTestFunc func(ctx context.Context, modelID int64, message string) (latencyMS int64, status int, body []byte, errMsg string)
+	// KeysCheckFunc 组级 key 池逐键探测(mode 空 = 端点探测;报告 = {ok,total,results[]},
+	// results 行含 key/verdict/status/latency_ms/error;errMsg 非空时按 "not found" 前缀分类 404,其余 400)
+	KeysCheckFunc func(ctx context.Context, modelID int64, mode, message string, concurrency int) (map[string]any, string)
 	// SeriesFunc 最近 n 个分钟点(老到新;空切片=无数据)
 	SeriesFunc func(minutes int) ([]map[string]any, error)
 	// TransportsFunc 命名传输实例清单(只读;名称+URL)
@@ -136,6 +139,7 @@ func (d *Deps) Mux() *http.ServeMux {
 	mux.HandleFunc("DELETE /admin/api/groups/{id}", d.deleteGroup)
 	mux.HandleFunc("POST /admin/api/groups/{id}/test", d.testGroup)
 	mux.HandleFunc("POST /admin/api/groups/{id}/chat-test", d.chatTestGroup)
+	mux.HandleFunc("POST /admin/api/groups/{id}/keys-check", d.keysCheckGroup)
 	mux.HandleFunc("GET /admin/api/groups/{id}/members", d.listMembers)
 	mux.HandleFunc("POST /admin/api/groups/{id}/members", d.saveMember)
 	mux.HandleFunc("PUT /admin/api/members/{id}", d.saveMemberByID)
@@ -1278,6 +1282,46 @@ func (d *Deps) chatTestGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// keysCheckTimeout 逐键探测整池总预算(到期未完的键经 ctx 取消归为 unknown;
+// 单键时延受上游支配,大池耗时可摊薄,故总预算独立于单次传输探测)
+const keysCheckTimeout = 2 * time.Minute
+
+// keysCheckGroup 组级 key 池逐键探测:遍历池,每键强制注入管道,按上游响应分类 verdict
+// 错误路径:501 未装配 / 404 组不存在 / 400 键池空或无启用成员
+func (d *Deps) keysCheckGroup(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if d.KeysCheckFunc == nil {
+		httpError(w, http.StatusNotImplemented, "keys check not configured")
+		return
+	}
+	var req struct {
+		Mode        string `json:"mode"`
+		Message     string `json:"message"`
+		Concurrency int    `json:"concurrency"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil && err != io.EOF {
+		httpError(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), keysCheckTimeout)
+	defer cancel()
+	report, errMsg := d.KeysCheckFunc(ctx, id, req.Mode, req.Message, req.Concurrency)
+	if errMsg != "" {
+		// 装配层错误串无法 errors.Is(跨 Deps 边界),按哨兵文案前缀分类:延续 chat-test "group not found" 约定
+		if strings.HasPrefix(errMsg, "not found") {
+			httpError(w, http.StatusNotFound, errMsg)
+			return
+		}
+		httpError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	writeJSON(w, report)
 }
 
 func (d *Deps) metricsLive(w http.ResponseWriter, r *http.Request) {

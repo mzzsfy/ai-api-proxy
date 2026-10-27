@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mzzsfy/ai-api-proxy/internal/builtin"
@@ -78,6 +79,27 @@ const requestIDHeader = "X-Request-Id"
 // testBody 管理连通性测试体:按上游声明协议构造最小请求
 func testBody(declared, model string) ([]byte, error) {
 	return chatBody(declared, model, "ping")
+}
+
+// keysCheckMaxTokens 端点探测预算(最小回复开销,验证认证与端点)
+const keysCheckMaxTokens = 1
+
+// probeBody 组端点探测请求体(keys-check 专用):单轮对话钳制最小回复预算,
+// 与实际探测请求(chatBody)可区分;anthropic 的 max_tokens 本就必填
+func probeBody(declared, model, message string) ([]byte, error) {
+	if declared == pipeline.ProtocolAnthropicMessages {
+		return json.Marshal(map[string]any{
+			"model":      model,
+			"max_tokens": keysCheckMaxTokens,
+			"messages":   []any{map[string]any{"role": "user", "content": message}},
+		})
+	}
+	return json.Marshal(map[string]any{
+		"model":      model,
+		"stream":     false,
+		"max_tokens": keysCheckMaxTokens,
+		"messages":   []any{map[string]any{"role": "user", "content": message}},
+	})
 }
 
 // anthropicTestMaxTokens anthropic 必填字段的最小回复预算(管理测试取最小)
@@ -436,6 +458,232 @@ func (g *Gateway) ChatTest(ctx context.Context, grp *upstream.Group, memberName,
 		return latency, resp.Status, []byte("[" + strings.Join(chunks, ",") + "]"), ""
 	}
 	return latency, resp.Status, resp.Body, ""
+}
+
+// KeysCheckMode 探测模式:端点探测(最小预算)/ 实际探测(真实对话)
+type KeysCheckMode string
+
+// KeysCheckModeProbe / KeysCheckModeChat 探测模式取值(空 = KeysCheckModeProbe)
+const (
+	KeysCheckModeProbe KeysCheckMode = "probe"
+	KeysCheckModeChat  KeysCheckMode = "chat"
+)
+
+// keysCheck 默认并发与上下限(钳制防打爆上游)
+const (
+	keysCheckConcurrencyDefault = 4
+	keysCheckConcurrencyMin     = 1
+	keysCheckConcurrencyMax     = 16
+)
+
+// ErrKeysCheckParam 参数级错误(admin 据此 400,与上游探测失败分野)
+var ErrKeysCheckParam = errors.New("keys-check param")
+
+// KeysCheckRequest 组级 keys-check 参数
+type KeysCheckRequest struct {
+	Mode        KeysCheckMode `json:"mode"`
+	Message     string        `json:"message"`
+	Concurrency int           `json:"concurrency"`
+}
+
+// normalize 缺省与钳制(0/负值 = 默认并发;超上限钳到上限;非法 mode 收敛 probe)
+func (r *KeysCheckRequest) normalize() {
+	if r.Mode != KeysCheckModeChat {
+		r.Mode = KeysCheckModeProbe
+	}
+	if r.Message == "" {
+		r.Message = "ping"
+	}
+	switch {
+	case r.Concurrency < keysCheckConcurrencyMin:
+		r.Concurrency = keysCheckConcurrencyDefault
+	case r.Concurrency > keysCheckConcurrencyMax:
+		r.Concurrency = keysCheckConcurrencyMax
+	}
+}
+
+// KeysCheckVerdict 单键判定(不误杀:限流非失效;网络/5xx 不判死)
+type KeysCheckVerdict string
+
+// verdict 枚举(响应契约值)
+const (
+	VerdictOK          KeysCheckVerdict = "ok"
+	VerdictInvalid     KeysCheckVerdict = "invalid"
+	VerdictRateLimited KeysCheckVerdict = "rate_limited"
+	VerdictUnknown     KeysCheckVerdict = "unknown"
+)
+
+// classifyKeyVerdict 上游探测结果 → verdict
+func classifyKeyVerdict(status int, execErr error) KeysCheckVerdict {
+	switch {
+	case execErr != nil:
+		return VerdictUnknown
+	case status >= http.StatusOK && status < 300:
+		return VerdictOK
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return VerdictInvalid
+	case status == http.StatusTooManyRequests:
+		return VerdictRateLimited
+	default:
+		return VerdictUnknown
+	}
+}
+
+// KeysCheck 单键探测结果(序列化契约,字段名即响应字段)
+type KeysCheckResult struct {
+	Key       string           `json:"key"`
+	Verdict   KeysCheckVerdict `json:"verdict"`
+	Status    int              `json:"status,omitempty"`
+	LatencyMS int64            `json:"latency_ms"`
+	Error     string           `json:"error,omitempty"`
+}
+
+// KeysCheckReport 组级 keys-check 汇总
+type KeysCheckReport struct {
+	Ok      bool              `json:"ok"`
+	Total   int               `json:"total"`
+	Results []KeysCheckResult `json:"results"`
+}
+
+// KeysCheck 组级 key 池逐键探测:遍历包 keys 池,每键强制注入管道发最小请求,
+// 按上游响应分类 verdict(诊断请求不计 metrics、不动轮转指针)。
+// 错误路径:组/成员/键池问题返回参数错误(包 upstream.ErrNotFound / ErrKeysCheckParam)。
+func (g *Gateway) KeysCheck(ctx context.Context, grp *upstream.Group, req KeysCheckRequest) (KeysCheckReport, error) {
+	req.normalize()
+	if g.Keys == nil {
+		return KeysCheckReport{}, fmt.Errorf("%w: key store not wired", ErrKeysCheckParam)
+	}
+	keys := g.Keys.List(grp.Plugin)
+	if len(keys) == 0 {
+		return KeysCheckReport{}, fmt.Errorf("%w: key pool empty for package %s", ErrKeysCheckParam, grp.Plugin)
+	}
+	grp, memberName, err := g.Registry.TestTarget(grp)
+	if err != nil {
+		return KeysCheckReport{}, err
+	}
+	// 探测原文整池一份:chat 模式 = 实际对话原文;probe 模式 = 最小预算端点探测
+	declared := g.Registry.DeclaredProtocol(grp)
+	buildBody := chatBody
+	if req.Mode != KeysCheckModeChat {
+		buildBody = probeBody
+	}
+	raw, err := buildBody(declared, memberName, req.Message)
+	if err != nil {
+		return KeysCheckReport{}, fmt.Errorf("%w: marshal probe body: %s", ErrKeysCheckParam, err)
+	}
+	// handler 包判定整组一次(部件实例与包绑定,不随键变化)
+	hp, isHandler := g.Registry.HandlerPackage(grp.Plugin)
+	results := make([]KeysCheckResult, len(keys))
+	// 无界逐键扇出经信号量钳制;ctx 取消即停(客户端断开不空耗上游配额)
+	sem := make(chan struct{}, req.Concurrency)
+	var wg sync.WaitGroup
+	for i, key := range keys {
+		wg.Add(1)
+		go func(i int, key plugin.KeyEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i] = g.probeOneKey(ctx, grp, memberName, key, raw, hp, isHandler)
+		}(i, key)
+	}
+	wg.Wait()
+	report := KeysCheckReport{Ok: true, Total: len(results), Results: results}
+	for _, r := range results {
+		if r.Verdict != VerdictOK {
+			report.Ok = false
+			break
+		}
+	}
+	return report, nil
+}
+
+// probeOneKey 单键探测:强制该键走完整管道,响应分类;诊断不计 metrics
+func (g *Gateway) probeOneKey(ctx context.Context, grp *upstream.Group, memberName string, key plugin.KeyEntry, raw []byte, hp *plugin.Package, isHandler bool) KeysCheckResult {
+	res := KeysCheckResult{Key: key.ID}
+	resolved, release, err := g.Registry.Resolve(grp)
+	if err != nil {
+		res.Verdict = VerdictUnknown
+		res.Error = "resolve: " + err.Error()
+		return res
+	}
+	defer release()
+	pctx := pipeline.NewContext("admin-keys-check-"+key.ID, pipeline.UpstreamInfo{Name: memberName},
+		pipeline.Vars{Model: memberName, EntryStream: false})
+	pctx.Key = &pipeline.KeyEntry{ID: key.ID, Data: key.Data}
+	start := time.Now()
+	if isHandler {
+		return g.probeHandlerKey(ctx, grp, hp, memberName, raw, pctx.Key, res, start)
+	}
+	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
+	res.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Verdict = VerdictUnknown
+		res.Error = err.Error()
+		return res
+	}
+	res.Status = resp.Status
+	if resp.Stream {
+		for range resp.Chunks { // 排空
+		}
+	}
+	return finishKeyVerdict(res, resp.Status, nil)
+}
+
+// probeHandlerKey handler 包组单键探测:指定键合成 HandlerInput 跑一次,真实执行错误与
+// 上游错误状态分离(状态进 verdict 分类,执行错误才归 unknown)
+func (g *Gateway) probeHandlerKey(ctx context.Context, grp *upstream.Group, hp *plugin.Package, memberName string, raw []byte, key *pipeline.KeyEntry, res KeysCheckResult, start time.Time) KeysCheckResult {
+	eng, err := g.Handlers.For(hp)
+	if err != nil {
+		res.LatencyMS = time.Since(start).Milliseconds()
+		res.Verdict = VerdictUnknown
+		res.Error = err.Error()
+		return res
+	}
+	in, err := g.handlerInputForKey(grp, memberName, false, raw, key)
+	if err != nil {
+		res.LatencyMS = time.Since(start).Milliseconds()
+		res.Verdict = VerdictUnknown
+		res.Error = err.Error()
+		return res
+	}
+	sink := &testSink{}
+	execErr := eng.Execute(ctx, in, sink)
+	res.LatencyMS = time.Since(start).Milliseconds()
+	res.Status = sink.status
+	return finishKeyVerdict(res, sink.status, execErr)
+}
+
+// finishKeyVerdict 探测结果终判:执行错误归 unknown,上游状态进 verdict 分类;非 ok 带状态错误说明
+func finishKeyVerdict(res KeysCheckResult, status int, execErr error) KeysCheckResult {
+	res.Verdict = classifyKeyVerdict(status, execErr)
+	switch {
+	case execErr != nil:
+		res.Error = execErr.Error()
+	case res.Verdict != VerdictOK:
+		res.Error = fmt.Sprintf("upstream status %d", status)
+	}
+	return res
+}
+
+// handlerInputForKey 指定键合成 HandlerInput(与 handlerInputFor 同构,键由调用方强制)
+func (g *Gateway) handlerInputForKey(grp *upstream.Group, model string, entryStream bool, body []byte, key *pipeline.KeyEntry) (plugin.HandlerInput, error) {
+	if key == nil {
+		return plugin.HandlerInput{}, fmt.Errorf("no key available for package %s", grp.Plugin)
+	}
+	params, err := g.Registry.MergedParams(grp)
+	if err != nil {
+		return plugin.HandlerInput{}, err
+	}
+	transportSlot := ""
+	if s, ok := params["transport"].(string); ok {
+		transportSlot = s
+	}
+	return plugin.HandlerInput{
+		Model: model, Stream: entryStream,
+		Headers: map[string]string{},
+		Body:    string(body), Key: *key, Params: params,
+		Transport: transportSlot, SessionKey: model,
+	}, nil
 }
 
 // writeRaw 原样状态与 body(错误透传语义)

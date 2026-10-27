@@ -324,6 +324,30 @@ func Build(cfg *Config) (*App, error) {
 		}
 		return gw.ChatTest(ctx, grp, memberName, message)
 	}
+	// 逐键探测:遍历包 keys 池,每键强制注入管道;诊断不计 metrics
+	adminDeps.KeysCheckFunc = func(ctx context.Context, id int64, mode, message string, concurrency int) (map[string]any, string) {
+		grp, err := reg.GetGroup(id)
+		if err != nil {
+			return nil, err.Error()
+		}
+		report, err := gw.KeysCheck(ctx, grp, gateway.KeysCheckRequest{
+			Mode: gateway.KeysCheckMode(mode), Message: message, Concurrency: concurrency})
+		if err != nil {
+			return nil, err.Error()
+		}
+		rows := make([]map[string]any, 0, len(report.Results))
+		for _, r := range report.Results {
+			row := map[string]any{"key": r.Key, "verdict": r.Verdict, "latency_ms": r.LatencyMS}
+			if r.Status != 0 {
+				row["status"] = r.Status
+			}
+			if r.Error != "" {
+				row["error"] = r.Error
+			}
+			rows = append(rows, row)
+		}
+		return map[string]any{"ok": report.Ok, "total": report.Total, "results": rows}, ""
+	}
 	// 监控时序:metrics_minutely 最近 n 分钟(老到新)
 	adminDeps.SeriesFunc = func(minutes int) ([]map[string]any, error) {
 		rows, err := st.DB().Query(`SELECT minute, requests, errors, max_concurrent, by_upstream_json, by_target_json, by_package_json

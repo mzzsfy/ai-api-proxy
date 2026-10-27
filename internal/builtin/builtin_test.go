@@ -79,6 +79,59 @@ func TestBuildRequest_MissingConfigRejected(t *testing.T) {
 	}
 }
 
+func TestBuildRequest_CtxKeyOverridesRotation(t *testing.T) {
+	// Given ctx.Key 已注入 When BuildRequest Then 授权头来自 ctx.Key,轮转闭包不被调用(与 JS 包 pctx.Key 同语义)
+	called := false
+	p := &Protocol{
+		Config:     map[string]any{BaseURLParam: "https://x"},
+		PackageKey: func() (any, bool) { called = true; return "sk-rotation", true },
+	}
+	ctx := pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m"})
+	ctx.Key = &pipeline.KeyEntry{ID: "forced", Data: map[string]any{APIKeyParam: "sk-forced"}}
+	req, err := p.BuildRequest(ctx, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Headers["Authorization"] != "Bearer sk-forced" {
+		t.Fatalf("auth: %q", req.Headers["Authorization"])
+	}
+	if called {
+		t.Fatal("rotation closure must not run when ctx.Key present")
+	}
+	if req.APIKey != "sk-forced" {
+		t.Fatalf("affinity key: %q", req.APIKey)
+	}
+}
+
+func TestBuildRequest_FallbackRotationWithoutCtxKey(t *testing.T) {
+	// Given ctx.Key 为空 When BuildRequest Then 回退轮转闭包(存量请求路径语义不变)
+	p := &Protocol{
+		Config:     map[string]any{BaseURLParam: "https://x"},
+		PackageKey: func() (any, bool) { return "sk-rotation", true },
+	}
+	req, err := p.BuildRequest(pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m"}), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Headers["Authorization"] != "Bearer sk-rotation" {
+		t.Fatalf("auth: %q", req.Headers["Authorization"])
+	}
+}
+
+func TestBuildRequest_CtxKeyWithoutAPIKeyRejected(t *testing.T) {
+	// Given ctx.Key 注入但 data 缺 api_key When BuildRequest Then 拒绝(不静默回退轮转,防错键出站)
+	p := &Protocol{
+		Config:     map[string]any{BaseURLParam: "https://x"},
+		PackageKey: func() (any, bool) { return "sk-rotation", true },
+	}
+	ctx := pipeline.NewContext("r", pipeline.UpstreamInfo{Name: "u"}, pipeline.Vars{Model: "m"})
+	ctx.Key = &pipeline.KeyEntry{ID: "bad", Data: map[string]any{"other": "x"}}
+	_, err := p.BuildRequest(ctx, []byte(`{}`))
+	if err == nil || !strings.Contains(err.Error(), APIKeyParam) {
+		t.Fatalf("missing api_key in ctx.Key: %v", err)
+	}
+}
+
 func TestPassthroughHooks(t *testing.T) {
 	// Given 信封帧 When MapEvent Then 返回声明协议事件对象数组;MapResponse 原样
 	p := New()

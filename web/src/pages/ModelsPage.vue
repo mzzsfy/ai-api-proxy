@@ -13,6 +13,8 @@ import {
   NInput,
   NInputNumber,
   NModal,
+  NRadio,
+  NRadioGroup,
   NSelect,
   NTag,
   useMessage,
@@ -23,10 +25,11 @@ import {
   ChatbubbleEllipsesOutline,
   GitNetworkOutline,
   PlayOutline,
+  ShieldCheckmarkOutline,
   TrashOutline,
 } from '@vicons/ionicons5'
 import { api } from '@/services/api'
-import type { DiscoveryHit, DiscoveryRule, GroupMember, ModelGroup } from '@/services/types'
+import type { DiscoveryHit, DiscoveryRule, GroupMember, KeysCheckReport, KeysCheckRow, KeysCheckVerdict, ModelGroup } from '@/services/types'
 
 const message = useMessage()
 
@@ -163,6 +166,69 @@ async function runChatTest() {
 }
 
 const deleting = ref<ModelGroup | null>(null)
+
+// ── key 池逐键检测(端点探测 / 实际探测)──
+const checkOpen = ref(false)
+const checkGroup = ref<ModelGroup | null>(null)
+const checkMode = ref<'probe' | 'chat'>('probe')
+const checkMessage = ref('')
+const checkBusy = ref(false)
+const checkReport = ref<KeysCheckReport | null>(null)
+
+const verdictTag: Record<KeysCheckVerdict, { label: string; type: 'success' | 'error' | 'warning' | 'default' }> = {
+  ok: { label: '有效', type: 'success' },
+  invalid: { label: '失效', type: 'error' },
+  rate_limited: { label: '限流', type: 'warning' },
+  unknown: { label: '未知', type: 'default' },
+}
+
+// 契约外值兜底(防后端扩展枚举时渲染崩溃)
+function verdictOf(v: KeysCheckVerdict): { label: string; type: 'success' | 'error' | 'warning' | 'default' } {
+  return verdictTag[v] ?? { label: v, type: 'default' }
+}
+
+const checkColumns: DataTableColumns<KeysCheckRow> = [
+  { title: '键', key: 'key', ellipsis: { tooltip: true } },
+  {
+    title: '判定',
+    key: 'verdict',
+    width: 90,
+    render: (row) => {
+      const v = verdictOf(row.verdict)
+      return h(NTag, { size: 'small', type: v.type }, { default: () => v.label })
+    },
+  },
+  { title: '状态码', key: 'status', width: 90, render: (row) => (row.status ? String(row.status) : '-') },
+  { title: '延迟', key: 'latency_ms', width: 100, render: (row) => `${row.latency_ms}ms` },
+  { title: '错误', key: 'error', ellipsis: { tooltip: true }, render: (row) => row.error ?? '-' },
+]
+
+function openKeysCheck(row: ModelGroup) {
+  checkGroup.value = row
+  checkMode.value = 'probe'
+  checkMessage.value = ''
+  checkReport.value = null
+  checkOpen.value = true
+}
+
+async function runKeysCheck() {
+  if (!checkGroup.value || checkBusy.value) return
+  checkBusy.value = true
+  try {
+    checkReport.value = await api.groups.keysCheck(checkGroup.value.id, {
+      mode: checkMode.value,
+      message: checkMode.value === 'chat' && checkMessage.value.trim() ? checkMessage.value.trim() : undefined,
+    })
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '检测失败')
+  } finally {
+    checkBusy.value = false
+  }
+}
+
+
+const checkInvalidCount = (report: KeysCheckReport) =>
+  report.results.filter((r) => r.verdict === 'invalid').length
 
 async function confirmDelete() {
   if (!deleting.value) return
@@ -394,6 +460,7 @@ const columns: DataTableColumns<ModelGroup> = [
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openEdit(row) }, { default: () => '编辑' }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => runTest(row) }, { icon: () => h(NIcon, { component: PlayOutline }) }),
       h(NButton, { size: 'small', style: 'margin-left:6px', onClick: () => openChatTest(row) }, { icon: () => h(NIcon, { component: ChatbubbleEllipsesOutline }) }),
+      h(NButton, { size: 'small', style: 'margin-left:6px', title: 'key 池逐键检测', onClick: () => openKeysCheck(row) }, { icon: () => h(NIcon, { component: ShieldCheckmarkOutline }) }),
       h(NButton, { size: 'small', type: 'error', quaternary: true, style: 'margin-left:6px', onClick: () => (deleting.value = row) }, { icon: () => h(NIcon, { component: TrashOutline }) }),
     ],
   },
@@ -530,6 +597,49 @@ const columns: DataTableColumns<ModelGroup> = [
     </NModal>
 
     <NModal
+      v-model:show="checkOpen"
+      preset="card"
+      :title="`key 池检测 — ${checkGroup?.prefix ?? ''}`"
+      class="check-modal"
+    >
+      <div class="check-controls">
+        <NRadioGroup v-model:value="checkMode">
+          <NRadio value="probe">端点探测(最小开销,验证认证与端点)</NRadio>
+          <NRadio value="chat">实际探测(真实对话)</NRadio>
+        </NRadioGroup>
+        <NInput
+          v-if="checkMode === 'chat'"
+          v-model:value="checkMessage"
+          type="text"
+          placeholder="测试消息(缺省 ping)"
+          style="margin-top: 8px"
+          @keyup.enter="runKeysCheck"
+        />
+      </div>
+      <NButton type="primary" :loading="checkBusy" style="margin-top:10px" @click="runKeysCheck">
+        开始检测
+      </NButton>
+      <div v-if="checkReport" class="check-summary">
+        共 {{ checkReport.total }} 键:
+        <NTag size="small" type="success">有效 {{ checkReport.results.filter((r) => r.verdict === 'ok').length }}</NTag>
+        <NTag size="small" type="error" style="margin-left:6px">失效 {{ checkInvalidCount(checkReport) }}</NTag>
+        <NTag size="small" type="warning" style="margin-left:6px">限流 {{ checkReport.results.filter((r) => r.verdict === 'rate_limited').length }}</NTag>
+        <NTag size="small" style="margin-left:6px">未知 {{ checkReport.results.filter((r) => r.verdict === 'unknown').length }}</NTag>
+      </div>
+      <NDataTable
+        v-if="checkReport"
+        :columns="checkColumns"
+        :data="checkReport.results"
+        size="small"
+        :max-height="360"
+        style="margin-top: 10px"
+      />
+      <p v-if="checkReport && checkInvalidCount(checkReport) > 0" class="check-hint">
+        失效键可在「插件 → 凭据」中删除;限流与未知不计入失效。
+      </p>
+    </NModal>
+
+    <NModal
       :show="deleting !== null"
       preset="dialog"
       type="warning"
@@ -588,5 +698,24 @@ const columns: DataTableColumns<ModelGroup> = [
   max-height: 320px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.check-modal {
+  width: min(760px, 94vw);
+}
+
+.check-summary {
+  margin-top: 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.check-hint {
+  color: var(--n-text-color-disabled, rgba(128, 128, 128, 0.8));
+  font-size: 12px;
+  margin: 10px 0 0;
 }
 </style>

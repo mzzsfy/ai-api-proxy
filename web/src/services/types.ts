@@ -72,6 +72,24 @@ export type ChatTestResult = TestResult & {
   body?: unknown
 }
 
+export type KeysCheckVerdict = 'ok' | 'invalid' | 'rate_limited' | 'unknown'
+
+export type KeysCheckRow = {
+  key: string
+  verdict: KeysCheckVerdict
+  status?: number
+  latency_ms: number
+  error?: string
+}
+
+export type KeysCheckReport = {
+  ok: boolean
+  total: number
+  results: KeysCheckRow[]
+}
+
+export type KeysCheckMode = 'probe' | 'chat'
+
 export type PackageInfo = {
   name: string
   version: string

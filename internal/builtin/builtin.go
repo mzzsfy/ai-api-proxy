@@ -62,27 +62,34 @@ const TransportParam = "transport"
 // APIKeyParam 密钥键名
 const APIKeyParam = "api_key"
 
-// BuildRequest 组请求:URL=包参数 base_url + /v1/chat/completions;鉴权 = 包级 key api_key
+// keyOf 键 data → api_key 字符串(string = 本身;map 取 api_key 字段)
+func keyOf(dataVal any) string {
+	switch v := dataVal.(type) {
+	case string:
+		return v
+	case map[string]any:
+		s, _ := v[APIKeyParam].(string)
+		return s
+	}
+	return ""
+}
+
+// BuildRequest 组请求:URL=包参数 base_url + /v1/chat/completions;鉴权 = 当前键 api_key
+// 键来源与 JS 包 util.key() 同语义:优先请求级 ctx.Key(强制注入),缺省回退轮转指针;
 // stream 标志透传入口意图;transport 槽随请求载体下传(空 = direct)
 func (p *Protocol) BuildRequest(ctx *pipeline.PipelineContext, entry []byte) (pipeline.Request, error) {
 	base := p.configString(BaseURLParam)
 	if base == "" {
 		return pipeline.Request{}, fmt.Errorf("builtin: package param %s missing", BaseURLParam)
 	}
-	if p.PackageKey == nil {
-		return pipeline.Request{}, fmt.Errorf("builtin: keys reader not wired")
-	}
-	dataVal, ok := p.PackageKey()
-	if !ok || dataVal == nil {
-		return pipeline.Request{}, fmt.Errorf("builtin: package key missing (data = current key entry)")
-	}
-	// data 形态:string = token 本身;map = 取 api_key 字段
 	var key string
-	switch v := dataVal.(type) {
-	case string:
-		key = v
-	case map[string]any:
-		key, _ = v[APIKeyParam].(string)
+	if ctx != nil && ctx.Key != nil {
+		key = keyOf(ctx.Key.Data)
+	} else if p.PackageKey != nil {
+		dataVal, ok := p.PackageKey()
+		if ok {
+			key = keyOf(dataVal)
+		}
 	}
 	if key == "" {
 		return pipeline.Request{}, fmt.Errorf("builtin: package key %s missing/empty in current key data", APIKeyParam)
