@@ -504,8 +504,10 @@ func TestKeysCheck_ErrorPaths(t *testing.T) {
 	}
 }
 
-// handlerKeySrc handler 部件:按 ctx.params.base_url 出站透传认证,回传上游状态(reply 透传 status)
+// handlerKeySrc handler 部件:按 ctx.params.base_url 出站透传认证,回传上游状态(reply 透传 status);
+// 键缺 api_key 直接抛错(部件自防,keys-check 归 unknown 执行错误)
 const handlerKeySrc = `module.exports = function(ctx){
+	if (!ctx.key.data.api_key) { throw new Error("key api_key missing"); }
 	var r = ctx.http.request({url: ctx.params.base_url + "/v1/chat/completions", method: "POST",
 		headers: {"Authorization": "Bearer " + ctx.key.data.api_key, "Content-Type": "application/json"},
 		body: ctx.request.body});
