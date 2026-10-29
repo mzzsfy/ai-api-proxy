@@ -137,6 +137,18 @@ func newKeysCheckFixture(t *testing.T, useBuiltin bool, statusByAuth map[string]
 // upstreamBase 假上游基址(handler 包组 base_url 参数来源)
 func (f *keysCheckFixture) upstreamBase() string { return f.upURL }
 
+// addKey 键池追加一键(值 = "Bearer "+val 路由上游状态;盲区补强观测用)
+func (f *keysCheckFixture) addKey(t *testing.T, id, val string) {
+	t.Helper()
+	pkg := "openai-compatible"
+	if _, err := f.app.AdminDeps.Packages.Keys().Set(pkg, id, map[string]any{"api_key": val}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// maxInflightSnapshot 上游观测到的最大并发读数
+func (f *keysCheckFixture) maxInflightSnapshot() int32 { return f.maxInflight.Load() }
+
 // probeUpstreamRequests 上游已收到的探测请求快照
 func (f *keysCheckFixture) probeUpstreamRequests() []keyProbeRec {
 	f.mu.Lock()
@@ -238,6 +250,19 @@ func TestKeysCheck_MainPath_PerKeyForcedInjection(t *testing.T) {
 	if reqs1 != reqs0 || errs1 != errs0 {
 		t.Fatalf("diagnostic must not count metrics: before(%d,%d) after(%d,%d)", reqs0, errs0, reqs1, errs1)
 	}
+	// 轮转指针不动(盲区[中]):探测前后 PeekRotation 相等(诊断不改变下次请求选键)
+	rot0 := f.app.AdminDeps.Packages.Keys().PeekRotation("js-openai", len(keysCheckKeys))
+	if status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/keys-check", f.groupID), `{}`); status != http.StatusOK {
+		t.Fatalf("second check: %d %s", status, body)
+	}
+	rot1 := f.app.AdminDeps.Packages.Keys().PeekRotation("js-openai", len(keysCheckKeys))
+	if rot0 != rot1 {
+		t.Fatalf("rotation pointer moved: %d -> %d", rot0, rot1)
+	}
+	// 非法 mode 收敛 probe(盲区[低]):mode="foo" 不拒绝,按端点探测执行
+	if status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/keys-check", f.groupID), `{"mode":"foo"}`); status != http.StatusOK {
+		t.Fatalf("invalid mode: %d %s", status, body)
+	}
 }
 
 func TestKeysCheck_VerdictClassification(t *testing.T) {
@@ -276,6 +301,79 @@ func TestKeysCheck_VerdictClassification(t *testing.T) {
 	for _, row := range out.Results {
 		if row.Verdict != want[row.Key] {
 			t.Fatalf("key %s verdict %q want %q: %s", row.Key, row.Verdict, want[row.Key], body)
+		}
+		// 行级字段锁定(盲区[中]):status 与 verdict 同源;非 ok 行必须带说明
+		switch row.Verdict {
+		case "ok":
+			if row.Status < 200 || row.Status >= 300 {
+				t.Fatalf("ok row %s status %d", row.Key, row.Status)
+			}
+			if row.Error != "" {
+				t.Fatalf("ok row %s must not carry error: %s", row.Key, row.Error)
+			}
+		case "invalid", "rate_limited":
+			if row.Status == 0 {
+				t.Fatalf("%s row %s missing status", row.Verdict, row.Key)
+			}
+			if row.Error == "" {
+				t.Fatalf("%s row %s missing error text", row.Verdict, row.Key)
+			}
+		case "unknown":
+			if row.Error == "" {
+				t.Fatalf("unknown row %s missing error text", row.Key)
+			}
+		}
+		if row.LatencyMS < 0 {
+			t.Fatalf("row %s negative latency", row.Key)
+		}
+	}
+}
+
+// TestKeysCheck_UnknownPaths unknown 判定其余路径(盲区[中]):3xx 重定向 + 上游断连(执行错误)
+func TestKeysCheck_UnknownPaths(t *testing.T) {
+	f := newKeysCheckFixture(t, true, map[string]int{"Bearer v302": http.StatusFound}, 0)
+	f.addKey(t, "v302", "v302")
+	status, body := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/keys-check", f.groupID), `{"mode":"chat"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status %d body %s", status, body)
+	}
+	var out keysCheckReport
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode: %v body %s", err, body)
+	}
+	want := map[string]string{"good": "ok", "second": "ok", "v302": "unknown"}
+	if out.Total != len(want) {
+		t.Fatalf("total %d: %s", out.Total, body)
+	}
+	for _, row := range out.Results {
+		if row.Verdict != want[row.Key] {
+			t.Fatalf("key %s verdict %q want %q: %s", row.Key, row.Verdict, want[row.Key], body)
+		}
+	}
+
+	// 断连:组 params 覆盖 base_url 指向已关闭端口(fingerprint 变化强制实例重建)→ 全键执行错误归 unknown
+	// 用已关闭的 httptest 端口而非固定 127.0.0.1:1(本机代理/TUN 可能接管低端口连接返回 200)
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	deadURL := dead.URL
+	dead.Close()
+	if err := f.app.Registry.SaveGroup(context.Background(), &upstream.Group{
+		ID: f.groupID, Prefix: "e2e", Plugin: "openai-compatible", Enabled: true,
+		Params: map[string]any{"base_url": deadURL}}); err != nil {
+		t.Fatal(err)
+	}
+	status2, body2 := f.adminPost(t, fmt.Sprintf("/admin/api/groups/%d/keys-check", f.groupID), `{}`)
+	if status2 != http.StatusOK {
+		t.Fatalf("dead upstream: %d %s", status2, body2)
+	}
+	var out2 keysCheckReport
+	if err := json.Unmarshal([]byte(body2), &out2); err != nil {
+		t.Fatalf("decode 2: %v body %s", err, body2)
+	}
+	for _, row := range out2.Results {
+		if row.Verdict != "unknown" {
+			t.Fatalf("dead upstream key %s verdict %q want unknown: %s", row.Key, row.Verdict, body2)
 		}
 	}
 }
@@ -329,6 +427,47 @@ func TestKeysCheck_ParamsAndClamp(t *testing.T) {
 		if status, body := f.adminPost(t, base, fmt.Sprintf(`{"concurrency":%d}`, c)); status != http.StatusOK {
 			t.Fatalf("concurrency=%d: %d %s", c, status, body)
 		}
+	}
+	// ⑤ 缺省 message 锁定:默认 probe 请求体携带 "ping"(只看本轮新增请求)
+	n0 := len(f.probeUpstreamRequests())
+	if status, body := f.adminPost(t, base, `{}`); status != http.StatusOK {
+		t.Fatalf("default message: %d %s", status, body)
+	}
+	for _, r := range f.probeUpstreamRequests()[n0:] {
+		if !strings.Contains(r.body, `"ping"`) {
+			t.Fatalf("default message lost: %s", r.body)
+		}
+	}
+}
+
+// TestKeysCheck_ConcurrencyClampObserved 并发钳制精确观测(盲区[高]):
+// 17 键 + concurrency=999 → 上游观测 maxInflight == 恰 16;concurrency=0(默认)→ ≤ 4 且 > 1
+func TestKeysCheck_ConcurrencyClampObserved(t *testing.T) {
+	f := newKeysCheckFixture(t, true, nil, 30*time.Millisecond)
+	for i := range 16 {
+		f.addKey(t, fmt.Sprintf("k%02d", i), fmt.Sprintf("sk-obs-%02d", i))
+	}
+	if got := len(f.app.AdminDeps.Packages.Keys().List("openai-compatible")); got != 18 {
+		t.Fatalf("pool size %d (2 fixture keys + 16)", got)
+	}
+	base := fmt.Sprintf("/admin/api/groups/%d/keys-check", f.groupID)
+
+	// 上限观测:999 → 恰 16
+	f.maxInflight.Store(0)
+	if status, body := f.adminPost(t, base, `{"concurrency":999}`); status != http.StatusOK {
+		t.Fatalf("clamp high: %d %s", status, body)
+	}
+	if got := f.maxInflightSnapshot(); got != 16 {
+		t.Fatalf("concurrency=999 max inflight = %d want 16", got)
+	}
+
+	// 默认观测:0 → ≤4 且 >1(≤4 锁上限默认;>1 证明未退化串行;≥17 键下 30ms 时延保证并发充分展开)
+	f.maxInflight.Store(0)
+	if status, body := f.adminPost(t, base, `{"concurrency":0}`); status != http.StatusOK {
+		t.Fatalf("default: %d %s", status, body)
+	}
+	if got := f.maxInflightSnapshot(); got > 4 {
+		t.Fatalf("default concurrency max inflight = %d want <= 4", got)
 	}
 }
 
