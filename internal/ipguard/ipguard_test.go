@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func TestForbidden_InvalidAddressFailsClosed(t *testing.T) {
+	// Given 空地址或不合法字节数 When 校验出站地址 Then 拒绝
+	for _, ip := range []net.IP{nil, {}, {1, 2, 3}, make(net.IP, 17)} {
+		if !Forbidden(ip) {
+			t.Errorf("invalid IP allowed: %v", []byte(ip))
+		}
+	}
+}
+
 func TestForbidden(t *testing.T) {
 	// Given 各保留段与公网地址 When 判定 Then 保留段全拒、公网放行
 	tests := []struct {
@@ -33,6 +42,8 @@ func TestForbidden(t *testing.T) {
 		{"203.0.113.1", true},
 		{"8.8.8.8", false},
 		{"1.1.1.1", false},
+		{"ff02::1", true},
+		{"ff0e::1", true},
 		{"::1", true},
 		{"::127.0.0.1", true},
 		{"::10.0.0.1", true},

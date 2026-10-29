@@ -167,8 +167,8 @@ func TestSlotStoreGetAuthSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
-		// 同快照不变量:权威判定为 true 时值必为两次写之一,不得读到 mark=true + 写前旧值
-		if auth && v != "v" && v != "nv" {
+		// 只允许提交前或提交后的完整状态,拒绝跨快照组合
+		if !((v == "v" && !auth) || (v == "nv" && auth)) {
 			t.Fatalf("TOCTOU: auth=%v v=%q", auth, v)
 		}
 	}

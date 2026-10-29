@@ -135,6 +135,23 @@ func TestKeys_Rotate(t *testing.T) {
 	}
 }
 
+func TestKeys_PeekEmptyAfterRotation(t *testing.T) {
+	// Given 指针已推进而键池变空 When 查询下次位置 Then 返回零且不取模崩溃
+	ks := NewKeysStore(testKeysDB(t))
+	if _, err := ks.Set("pkg", "a", "key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ks.Rotate("pkg"); !ok {
+		t.Fatal("nonempty pool did not rotate")
+	}
+	if err := ks.Delete("pkg", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ks.PeekRotation("pkg", len(ks.List("pkg"))); got != 0 {
+		t.Fatalf("empty rotation = %d", got)
+	}
+}
+
 func TestKeys_UpdatedAt(t *testing.T) {
 	// BDD 9 基准:不存在 = 0;写入后 = 行 updated_at
 	ks := NewKeysStore(testKeysDB(t))

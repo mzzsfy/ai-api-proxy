@@ -37,6 +37,15 @@ func TestOpenAICodec_Inspect(t *testing.T) {
 	}
 }
 
+func TestOpenAICodec_InspectSingleChoice(t *testing.T) {
+	// Given 显式单个候选回复 When 检查能力 Then 不要求多候选能力且原参数不变
+	m := map[string]any{"model": "m", "n": float64(1)}
+	model, stream, feats, err := NewOpenAICodec().Inspect(m)
+	if err != nil || model != "m" || stream || len(feats) != 0 || m["n"] != float64(1) {
+		t.Fatalf("single choice = %q/%v/%v/%v, input=%v", model, stream, feats, err, m)
+	}
+}
+
 // TestOpenAICodec_Inspect_MissingModel 缺 model → 错误
 func TestOpenAICodec_Inspect_MissingModel(t *testing.T) {
 	if _, _, _, err := NewOpenAICodec().Inspect(map[string]any{}); err == nil {
