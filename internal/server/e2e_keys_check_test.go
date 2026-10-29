@@ -298,6 +298,10 @@ func TestKeysCheck_VerdictClassification(t *testing.T) {
 	if out.Total != len(want) || len(out.Results) != len(want) {
 		t.Fatalf("total %d: %s", out.Total, body)
 	}
+	// 混合 verdict 下 ok 必为 false(汇总语义:存在非 ok 行即不健康)
+	if out.Ok {
+		t.Fatalf("mixed verdicts must not be ok: %s", body)
+	}
 	for _, row := range out.Results {
 		if row.Verdict != want[row.Key] {
 			t.Fatalf("key %s verdict %q want %q: %s", row.Key, row.Verdict, want[row.Key], body)
