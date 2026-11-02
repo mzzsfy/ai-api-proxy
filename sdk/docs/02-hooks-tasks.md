@@ -109,8 +109,8 @@ module.exports = {
 要点:
 
 - **可用性不依赖 JS**:select 任何失败路径都回落默认轮转,请求不失败
-- `inFlight` 由宿主记账(select 输入是快照;JS 不可写)——并发上限控制用它
-- 路由决策依据(积分余量等)是包自己的数据面:键 data 字段或包级 storage,维护通道见 03(任务窗回写/被动提取)
+- `inFlight` 由宿主记账(select 输入是快照;JS 不可写)——并发上限控制用它;handler 面请求的在途计数覆盖 handler 执行全程
+- 路由决策依据(积分余量等)是包自己的数据面:键 data 字段或包级 storage,维护通道见 03(任务窗回写/被动提取);handler 面并发累计请用槽锁通道 `storage.getWithLock/unlock`(串行读改写,避免整体覆盖丢更新,见 d.ts SlotLockStorage)
 - 单实例互斥执行:select 应同步微任务级;死循环只会烧掉自己的预算后回落
 
 ## 六、ctx 面(任务/init 共用)

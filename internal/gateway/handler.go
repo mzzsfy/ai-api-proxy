@@ -79,17 +79,17 @@ func (s *handlerSink) ErrorFrame(evtJSON string) error {
 }
 
 // handlerInputFor 合成 HandlerInput(键/参数/传输槽;无键 = 502 不进 handler)
-// 注意:此处 pickKey 的 inFlight 计数窗仅覆盖 input 合成期(handler JS 执行期间不持计数);
-// 长流式场景 router 快照低估该包在途——handler 面并发路由精度有限,不影响可用性
-func (g *Gateway) handlerInputFor(grp *upstream.Group, model string, entryStream bool, body []byte, r *http.Request) (plugin.HandlerInput, error) {
+// 返回归还闭包:inFlight 计数覆盖 handler 执行全程,调用方须在 Execute 终局调用
+func (g *Gateway) handlerInputFor(grp *upstream.Group, model string, entryStream bool, body []byte, r *http.Request) (plugin.HandlerInput, func(), error) {
 	key, releaseKey := g.pickKey(grp.Plugin)
-	defer releaseKey()
 	if key == nil {
-		return plugin.HandlerInput{}, fmt.Errorf("no key available for package %s", grp.Plugin)
+		releaseKey()
+		return plugin.HandlerInput{}, func() {}, fmt.Errorf("no key available for package %s", grp.Plugin)
 	}
 	params, err := g.Registry.MergedParams(grp)
 	if err != nil {
-		return plugin.HandlerInput{}, err
+		releaseKey()
+		return plugin.HandlerInput{}, func() {}, err
 	}
 	transportSlot := ""
 	if s, ok := params["transport"].(string); ok {
@@ -100,7 +100,7 @@ func (g *Gateway) handlerInputFor(grp *upstream.Group, model string, entryStream
 		Headers: headersFromBody(r.Header),
 		Body:    string(body), Key: *key, Params: params,
 		Transport: transportSlot, SessionKey: model,
-	}, nil
+	}, releaseKey, nil
 }
 
 // hopHeaders 逐跳头(handler ctx.request.headers 只读视图剔除)
@@ -130,11 +130,12 @@ func (g *Gateway) serveHandler(w http.ResponseWriter, r *http.Request, entry Ent
 		writeError(w, entry, http.StatusInternalServerError, err.Error())
 		return
 	}
-	in, err := g.handlerInputFor(cand.Group, model, entryStream, body, r)
+	in, releaseKey, err := g.handlerInputFor(cand.Group, model, entryStream, body, r)
 	if err != nil {
 		writeError(w, entry, http.StatusBadGateway, err.Error())
 		return
 	}
+	defer releaseKey()
 	sink := &handlerSink{w: w, framer: entry.Framer()}
 	if err := eng.Execute(r.Context(), in, sink); err != nil {
 		// 响应未提交才补错误(已提交 = 错误已分叉,零补偿)
@@ -154,10 +155,11 @@ func (g *Gateway) runViaHandler(ctx context.Context, grp *upstream.Group, hp *pl
 	if err != nil {
 		return 0, 0, nil, "marshal test body: " + err.Error()
 	}
-	in, err := g.handlerInputFor(grp, memberName, false, raw, &http.Request{Header: http.Header{}})
+	in, releaseKey, err := g.handlerInputFor(grp, memberName, false, raw, &http.Request{Header: http.Header{}})
 	if err != nil {
 		return 0, 0, nil, err.Error()
 	}
+	defer releaseKey()
 	sink := &testSink{}
 	start := time.Now()
 	execErr := eng.Execute(ctx, in, sink)
