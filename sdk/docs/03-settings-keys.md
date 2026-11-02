@@ -71,6 +71,8 @@ ctx.keys.merge({ token: newToken });       // 等价 ctx.keys.set(浅合并结�
 
 读:`ctx.key.id` / `ctx.key.data`(当前注入键;无键 undefined)。**没有按名取任意键的 API**——脚本只见宿主注入的那一个键;全组枚举/编辑是管理台(GUI)的专属能力。
 
+请求级选键默认 round-robin;包声明 `parts.hooks.router` 后由 router.js `select` 决定(输入含键池快照与在途计数,见 [02 §五](02-hooks-tasks.md));任务注入不受 router 影响(任务恒全键循环)。
+
 protocol/filter 部件只读:`util.key()` 返回当前注入键 data(请求级 round-robin 选键后注入;多余参数忽略)。data 形态由包约定:裸 token(string)或对象(map 取字段,如 `util.key().api_key`)。
 
 ### login/ 目录(自定义凭据采集)

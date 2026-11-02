@@ -79,8 +79,11 @@ func (s *handlerSink) ErrorFrame(evtJSON string) error {
 }
 
 // handlerInputFor 合成 HandlerInput(键/参数/传输槽;无键 = 502 不进 handler)
+// 注意:此处 pickKey 的 inFlight 计数窗仅覆盖 input 合成期(handler JS 执行期间不持计数);
+// 长流式场景 router 快照低估该包在途——handler 面并发路由精度有限,不影响可用性
 func (g *Gateway) handlerInputFor(grp *upstream.Group, model string, entryStream bool, body []byte, r *http.Request) (plugin.HandlerInput, error) {
-	key := g.pickKey(grp.Plugin)
+	key, releaseKey := g.pickKey(grp.Plugin)
+	defer releaseKey()
 	if key == nil {
 		return plugin.HandlerInput{}, fmt.Errorf("no key available for package %s", grp.Plugin)
 	}
@@ -95,7 +98,7 @@ func (g *Gateway) handlerInputFor(grp *upstream.Group, model string, entryStream
 	return plugin.HandlerInput{
 		Model: model, Stream: entryStream,
 		Headers: headersFromBody(r.Header),
-		Body: string(body), Key: *key, Params: params,
+		Body:    string(body), Key: *key, Params: params,
 		Transport: transportSlot, SessionKey: model,
 	}, nil
 }
@@ -182,7 +185,7 @@ func (s *testSink) SSEStart() error { return errors.New("test path is non-stream
 func (s *testSink) Event(string) error {
 	return errors.New("test path is non-streaming")
 }
-func (s *testSink) End() error   { return nil }
+func (s *testSink) End() error { return nil }
 func (s *testSink) ErrorFrame(e string) error {
 	s.status, s.body = http.StatusBadGateway, e
 	return nil

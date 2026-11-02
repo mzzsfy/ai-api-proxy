@@ -1,6 +1,6 @@
 # 02 · hooks 部件:时机、任务与可选项
 
-hooks 部件 = init.js(加载钩子)+ tasks/*.js(定时任务)+ settings.js(参数声明,见 [03](03-settings-keys.md))。全部文件可选——只写你需要的。凭据采集(login/ 目录)是独立部件,见 [03](03-settings-keys.md)。
+hooks 部件 = init.js(加载钩子)+ tasks/*.js(定时任务)+ router.js(键路由钩子)+ settings.js(参数声明,见 [03](03-settings-keys.md))。全部文件可选——只写你需要的。凭据采集(login/ 目录)是独立部件,见 [03](03-settings-keys.md)。
 
 ## 一、执行时机总表
 
@@ -83,12 +83,42 @@ module.exports = {
 - cron 行与 next 行互斥:一行只能是一种;宿主重启后 next 链自动重建并首跑
 - 禁用任务行 = 停链;重新启用 = 首跑重建
 
-## 五、ctx 面(任务/init 共用)
+## 五、键路由钩子:router.js
+
+包声明 `parts.hooks.router` 后,宿主请求级选键交由 `select(input)` 决定;未声明的包恒走默认 round-robin(默认行为不变)。
+
+```js
+// router.js(缺省路径;manifest: {"hooks":{"router":{}}},自定义 entry 同 tasks)
+module.exports = {
+  select: function (input) {
+    // input.keys: [{id, data}] 键池快照;input.inFlight: {<id>: 在途请求数};input.request: {model, stream}
+    for (const k of input.keys) {
+      if ((input.inFlight[k.id] || 0) === 0 && k.data.quota > 0) return k.id;
+    }
+    return null;                       // null/undefined = 交回宿主 round-robin
+  },
+};
+```
+
+| 返回 | 宿主行为 |
+|---|---|
+| 键池中的合法 id | 注入该键(请求级;在途计数 +1,请求终局 -1) |
+| null/undefined/"" | 回落 round-robin |
+| 未知 id / 抛错 / 超时(缺省 50ms,`timeoutMs` 可调)/ 非字符串 | 回落 round-robin;异常与超时实例即弃下次重建 |
+
+要点:
+
+- **可用性不依赖 JS**:select 任何失败路径都回落默认轮转,请求不失败
+- `inFlight` 由宿主记账(select 输入是快照;JS 不可写)——并发上限控制用它
+- 路由决策依据(积分余量等)是包自己的数据面:键 data 字段或包级 storage,维护通道见 03(任务窗回写/被动提取)
+- 单实例互斥执行:select 应同步微任务级;死循环只会烧掉自己的预算后回落
+
+## 六、ctx 面(任务/init 共用)
 
 | 字段 | 说明 | 可用性 |
 |---|---|---|
 | `ctx.http.request(req)` | 出站请求(与 handler/login 同名同形态);`{url, method?, headers?, body?, timeoutMs?}` → `{status, headers, body}`;body >1MB 截断;timeoutMs 缺省 min(30s, 外层剩余) | 全部 hooks 钩子 |
-| `ctx.key` | 当前注入键 `{id, data}`(任务执行 = round-robin 选中的键);无键 undefined。**JS 只见宿主注入的一个键**,无按名取任意键 API(见 03) | 任务 |
+| `ctx.key` | 当前注入键 `{id, data}`(任务执行 = 键池选中的键,选键规则见五 router.js;无键 undefined)。**JS 只见宿主注入的一个键**,无按名取任意键 API(见 03) | 任务 |
 | `ctx.keys.set(data)` / `merge(patch)` | 任务窗:整体替换(或对象浅合并)当前键 data,原 data 自动备份进 prev——**仅任务执行挂载**(其余钩子 undefined——阉割即权限);写**立即持久化不随任务回滚** | 仅任务 |
 | `storage`(全局注入,非 ctx 成员) | 包级 KV `get/set/delete`;任务/init 执行**直写持久层**(非 handler 执行不做事务缓冲,写失败即该次操作失败不回滚;handler 执行才有事务归并,见 [05](05-handler.md)) | 全部 |
 | `ctx.settings` | 参数快照(只读),见 03 | 全部 |
@@ -97,7 +127,7 @@ module.exports = {
 
 约束:**handler/next/onLoad 全部同步**。返回 Promise = 同步性违规报错;耗时长出站操作靠 `ctx.http.request` 的 timeoutMs 控制,不要 setTimeout。
 
-## 六、可选项速查
+## 七、可选项速查
 
 | 想做的事 | 需要写什么 | 不写会怎样 |
 |---|---|---|

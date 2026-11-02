@@ -53,24 +53,63 @@ type Gateway struct {
 	Metrics   *metrics.Recorder
 	// History 请求历史存储(nil = 不记录;装配可选)
 	History *history.Store
-	// Keys 键池(请求级 round-robin 选键;nil = 不注入键)
+	// Keys 键池(请求级选键;nil = 不注入键)
 	Keys *plugin.KeysStore
 	// Handlers handler 执行器注册表(nil = handler 包请求 501)
 	Handlers *plugin.HandlerEngines
+	// Routers 键路由钩子注册表(nil = 全部包走默认 round-robin)
+	Routers *plugin.RouterEngines
 	// ModelsListing /v1/models 列表模式(full|short|both;空 = full)
 	ModelsListing string
 }
 
-// pickKey 请求级选键(round-robin;空池/未装配 = nil,ctx.key = undefined)
-func (g *Gateway) pickKey(pkg string) *pipeline.KeyEntry {
+// pickKey 请求级选键:包声明 router 钩子时 JS 选择(在途计数随之记入),
+// 其余情形 round-robin;返回归还函数(空闭包 = 无路由引擎),请求终局必调。
+// JS select 缺失/异常/超时/未知 id 一律回落 round-robin,请求不失败。
+func (g *Gateway) pickKey(pkg string) (*pipeline.KeyEntry, func()) {
+	release := func() {}
+	if g.Routers != nil && g.Registry != nil && g.Keys != nil {
+		if hp, ok := g.Registry.HookPackage(pkg); ok {
+			if re, err := g.Routers.For(hp); err == nil && re != nil {
+				return g.pickKeyRouted(re, pkg)
+			}
+		}
+	}
 	if g.Keys == nil {
-		return nil
+		return nil, release
 	}
 	e, ok := g.Keys.Rotate(pkg)
 	if !ok {
-		return nil
+		return nil, release
 	}
-	return &pipeline.KeyEntry{ID: e.ID, Data: e.Data}
+	return &pipeline.KeyEntry{ID: e.ID, Data: e.Data}, release
+}
+
+// pickKeyRouted 路由路径选键:select 成功且 id 在池 = 注入该键并记在途;
+// 其余(含 select 返回空/错误/未知 id)= 回落 round-robin(不记路由在途)。
+func (g *Gateway) pickKeyRouted(re *plugin.RouterEngine, pkg string) (*pipeline.KeyEntry, func()) {
+	keys := g.Keys.List(pkg)
+	if len(keys) == 0 {
+		return nil, func() {}
+	}
+	input := plugin.RouterSelectInput{
+		Keys:     keys,
+		InFlight: re.InFlightSnapshot(),
+	}
+	out, err := re.Select(input)
+	if err == nil && out.Selected != "" {
+		for _, k := range keys {
+			if k.ID == out.Selected {
+				done := re.Begin(k.ID)
+				return &pipeline.KeyEntry{ID: k.ID, Data: k.Data}, done
+			}
+		}
+	}
+	e, ok := g.Keys.Rotate(pkg)
+	if !ok {
+		return nil, func() {}
+	}
+	return &pipeline.KeyEntry{ID: e.ID, Data: e.Data}, func() {}
 }
 
 // requestIDHeader 请求标识(header 键)
@@ -220,7 +259,9 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, entry Entry, ant
 	}
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: cand.Member.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
-	pctx.Key = g.pickKey(cand.Group.Plugin)
+	pctxKey, releaseKey := g.pickKey(cand.Group.Plugin)
+	defer releaseKey()
+	pctx.Key = pctxKey
 	resp, err := g.Executor.Run(r.Context(), pctx, resolved, body)
 	if err != nil {
 		g.recordUpstream(&cand, true)
@@ -390,7 +431,9 @@ func (g *Gateway) TestUpstream(ctx context.Context, grp *upstream.Group, memberN
 	}
 	pctx := pipeline.NewContext("admin-test-"+memberName, pipeline.UpstreamInfo{Name: memberName},
 		pipeline.Vars{Model: memberName, EntryStream: false})
-	pctx.Key = g.pickKey(grp.Plugin)
+	pctxKey, releaseKey := g.pickKey(grp.Plugin)
+	defer releaseKey()
+	pctx.Key = pctxKey
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -427,7 +470,9 @@ func (g *Gateway) ChatTest(ctx context.Context, grp *upstream.Group, memberName,
 	}
 	pctx := pipeline.NewContext("admin-chat-"+memberName, pipeline.UpstreamInfo{Name: memberName},
 		pipeline.Vars{Model: memberName, EntryStream: false})
-	pctx.Key = g.pickKey(grp.Plugin)
+	pctxKey, releaseKey := g.pickKey(grp.Plugin)
+	defer releaseKey()
+	pctx.Key = pctxKey
 	start := time.Now()
 	resp, err := g.Executor.Run(ctx, pctx, resolved, raw)
 	latency := time.Since(start).Milliseconds()
@@ -704,7 +749,9 @@ func (g *Gateway) fastPath(w http.ResponseWriter, r *http.Request, cand *upstrea
 	*rowName = cand.FullName()
 	pctx := pipeline.NewContext(r.Header.Get(requestIDHeader), pipeline.UpstreamInfo{Name: cand.Member.Name},
 		pipeline.Vars{Model: model, EntryStream: entryStream})
-	pctx.Key = g.pickKey(cand.Group.Plugin)
+	pctxKey, releaseKey := g.pickKey(cand.Group.Plugin)
+	defer releaseKey()
+	pctx.Key = pctxKey
 	req, err := resolved.Protocol.BuildRequest(pctx, body)
 	if err != nil {
 		g.recordUpstream(cand, true)

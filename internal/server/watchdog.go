@@ -3,8 +3,8 @@ package server
 
 import (
 	"context"
-	"os"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -16,9 +16,10 @@ const watchdogPoll = 5 * time.Second
 
 // Watchdog RSS 阈值看门狗(阈值按物理内存绝对字节数,config 侧换算;0 = 关闭)
 type Watchdog struct {
-	Engines   *plugin.HandlerEngines
-	SoftBytes uint64
-	// HardBytes = 软限×1.5;>0 且独立进程部署 = 到限进程退出
+	Engines *plugin.HandlerEngines
+	// Routers 键路由引擎(可选;软限随 handler 池同弃重建)
+	Routers     *plugin.RouterEngines
+	SoftBytes   uint64
 	HardBytes   uint64
 	Independent bool
 	readRSS     func() uint64
@@ -59,6 +60,9 @@ func (w *Watchdog) Run(ctx context.Context) {
 				slog.Warn("watchdog: RSS over soft limit, dropping all handler pools and rejecting new requests", "rss_bytes", rss, "soft_limit_bytes", w.SoftBytes)
 				w.Engines.SetRejectNew(true)
 				w.Engines.CloseAll() // 闲置全弃;在借不 Interrupt,随归还即弃
+				if w.Routers != nil {
+					w.Routers.CloseAll() // 路由引擎无在途概念(select 同步),直接全弃;下次请求懒重建
+				}
 			}
 		default:
 			if w.tripped.Swap(false) {

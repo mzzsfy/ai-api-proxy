@@ -30,9 +30,9 @@ import (
 	"github.com/mzzsfy/ai-api-proxy/internal/metrics"
 	"github.com/mzzsfy/ai-api-proxy/internal/pipeline"
 	"github.com/mzzsfy/ai-api-proxy/internal/plugin"
-	"github.com/mzzsfy/ai-api-proxy/internal/subscribe"
 	"github.com/mzzsfy/ai-api-proxy/internal/scheduler"
 	"github.com/mzzsfy/ai-api-proxy/internal/store"
+	"github.com/mzzsfy/ai-api-proxy/internal/subscribe"
 	"github.com/mzzsfy/ai-api-proxy/internal/transport"
 	"github.com/mzzsfy/ai-api-proxy/internal/upstream"
 	"github.com/mzzsfy/ai-api-proxy/ipprovider"
@@ -230,10 +230,21 @@ func Build(cfg *Config) (*App, error) {
 		Executor: &pipeline.Executor{
 			Transports: trMgr.Get,
 		},
-		Registry:      reg,
-		Metrics:       recorder,
-		History:       hist,
-		Keys:          pkgs.Keys(),
+		Registry: reg,
+		Metrics:  recorder,
+		History:  hist,
+		Keys:     pkgs.Keys(),
+		Routers: plugin.NewRouterEngines(func(pkg *plugin.Package) plugin.RouterDeps {
+			var selectTimeout int64
+			if h := pkg.Manifest.Parts.Hooks; h != nil && h.Router != nil {
+				selectTimeout = h.Router.TimeoutMs
+			}
+			return plugin.RouterDeps{
+				Package:         pkg,
+				Log:             hooksLog(pkg.Manifest.Name),
+				SelectTimeoutMs: selectTimeout,
+			}
+		}),
 		Handlers: plugin.NewHandlerEngines(func(pkg *plugin.Package) plugin.HandlerDeps {
 			return plugin.HandlerDeps{
 				Package: pkg,
@@ -242,7 +253,7 @@ func Build(cfg *Config) (*App, error) {
 				Transport: func(name string) (pipeline.Transport, error) {
 					return resolveOutboundTransport(trMgr, name)
 				},
-				Log: hooksLog(pkg.Manifest.Name),
+				Log:       hooksLog(pkg.Manifest.Name),
 				MaxBorrow: cfg.HandlerVMMaxBorrow,
 			}
 		}),
@@ -643,6 +654,7 @@ func Run(cfg *Config) error {
 		if total := sysTotalMemory(); total > 0 {
 			soft := total * uint64(cfg.HandlerRSSSoftPercent) / 100
 			wd := NewWatchdog(app.Gateway.Handlers, soft, soft*3/2, true, readRSS)
+			wd.Routers = app.Gateway.Routers
 			wdCtx, wdCancel := context.WithCancel(context.Background())
 			app.credsMu.Lock()
 			app.wdCancel = wdCancel

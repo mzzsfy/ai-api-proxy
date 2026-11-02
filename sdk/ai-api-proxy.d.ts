@@ -232,6 +232,24 @@ export interface HookContext {
   task?: string;
 }
 
+/** 键路由 select 输入(全宿主权威事实;只读) */
+export interface RouterSelectInput {
+  /** 键池快照(id+data) */
+  keys: KeyRef[];
+  /** 键id → 在途请求数(宿主记账;缺失 = 0) */
+  inFlight: Record<string, number>;
+  /** 请求要素 */
+  request: { model: string; stream: boolean };
+}
+
+/**
+ * router.js 导出(包声明 parts.hooks.router 时启用;缺省路径 router.js)
+ * select 返回要注入的键 id;null/undefined/抛错/超时/非字符串 = 回落宿主 round-robin,请求不失败
+ */
+export interface RouterModule {
+  select(input: RouterSelectInput): string | null | undefined;
+}
+
 /**
  * 任务文件导出(tasks/<name>.js 或 manifest 缺省路径)
  * handler:任务体;next 形态(声明 next:true)另导出 next

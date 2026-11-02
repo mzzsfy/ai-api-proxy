@@ -1003,6 +1003,15 @@ func (r *Registry) HandlerPackage(name string) (*plugin.Package, bool) {
 	return pkg, true
 }
 
+// HookPackage hooks 部件包查询(路由钩子判定;包缺失 = false)
+func (r *Registry) HookPackage(name string) (*plugin.Package, bool) {
+	pkg, err := r.pkgs.GetPackage(name)
+	if err != nil {
+		return nil, false
+	}
+	return pkg, true
+}
+
 // MergedParams 组参数合并结果(声明 ⊕ 插件参数 ⊕ 组覆盖;handler ctx.params 同源)
 func (r *Registry) MergedParams(g *Group) (map[string]any, error) {
 	return r.resolveParams(g)

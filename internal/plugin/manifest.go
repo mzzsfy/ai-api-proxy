@@ -32,12 +32,13 @@ const (
 
 // 部件路径约定(manifest 不写 entry:约定即路径)
 const (
-	ProtocolEntry     = "protocol.js" // protocol 单例部件固定路径
-	HandlerEntry      = "handler.js"  // handler 部件固定路径
-	LoginEntry        = "login/index.js"    // login 逻辑入口
+	ProtocolEntry     = "protocol.js"         // protocol 单例部件固定路径
+	HandlerEntry      = "handler.js"          // handler 部件固定路径
+	LoginEntry        = "login/index.js"      // login 逻辑入口
 	LoginUIEntry      = "login/ui/index.html" // login 页面入口(两入口必须同在)
-	FilterEntryPrefix = "filters/"    // filter 部件 = filters/<name>.js
-	HooksTaskEntryFmt = "tasks/%s.js" // hooks 任务缺省 = tasks/<name>.js
+	FilterEntryPrefix = "filters/"            // filter 部件 = filters/<name>.js
+	HooksTaskEntryFmt = "tasks/%s.js"         // hooks 任务缺省 = tasks/<name>.js
+	RouterEntry       = "router.js"           // hooks 键路由钩子缺省路径
 )
 
 // ProtocolEntryFor 部件入口路径的唯一定义点(manifest 不承载 entry)
@@ -72,9 +73,16 @@ type HooksTask struct {
 	TimeoutMs int64  `json:"timeoutMs,omitempty"` // ≤0 按缺省;上限钳制在运行时
 }
 
-// HooksPart hooks 部件声明(定时任务;计入合法插槽)
+// HooksRouter 键路由钩子声明(JS 接管请求级选键;缺省路径 router.js)
+type HooksRouter struct {
+	Entry     string `json:"entry,omitempty"`     // 缺省 router.js(相对包根)
+	TimeoutMs int64  `json:"timeoutMs,omitempty"` // select 调用预算;≤0 按缺省
+}
+
+// HooksPart hooks 部件声明(定时任务 + 键路由;计入合法插槽)
 type HooksPart struct {
-	Tasks []HooksTask `json:"tasks,omitempty"`
+	Tasks  []HooksTask  `json:"tasks,omitempty"`
+	Router *HooksRouter `json:"router,omitempty"`
 }
 
 // DiscoveryPart 模型自动发现声明(管理面拉上游 /v1/models 落成员;未声明 = 该包不支持发现)
@@ -238,6 +246,16 @@ func (p *Package) Validate() error {
 				if _, err := CronSchedule(tk.Cron); err != nil {
 					return fmt.Errorf("hooks task %s: %w", tk.Name, err)
 				}
+			}
+		}
+		// router 声明绑定:约定路径存在(导出形态判据在装载期)
+		if r := h.Router; r != nil {
+			entry := r.Entry
+			if entry == "" {
+				entry = RouterEntry
+			}
+			if _, ok := p.Files[entry]; !ok {
+				return fmt.Errorf("hooks router: entry %q missing in package", entry)
 			}
 		}
 	}

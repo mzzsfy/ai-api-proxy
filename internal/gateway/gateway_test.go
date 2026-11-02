@@ -28,6 +28,7 @@ import (
 type fixture struct {
 	g           *Gateway
 	reg         *upstream.Registry
+	regPkg      *plugin.Registry
 	tr          *transport.Manager
 	upstreamSrv *httptest.Server
 	seenBody    []byte
@@ -111,6 +112,7 @@ func newFixture(t *testing.T, upstreamStatus int, upstreamCT, upstreamBody strin
 		t.Fatal(err)
 	}
 	f.reg = reg
+	f.regPkg = pkgs
 	f.tr = trMgr
 	f.g = &Gateway{
 		OpenAI:    openaiEntry(),
@@ -210,6 +212,7 @@ func (f *fixture) installJSProtocolAs(t *testing.T, protocol string) {
 		t.Fatal(err)
 	}
 	f.reg = reg
+	f.regPkg = pkgs
 	f.g.Registry = reg
 	f.g.Keys = pkgs.Keys()
 }
@@ -574,7 +577,8 @@ func TestHistory_PickFailureEmptyRouting(t *testing.T) {
 	e := lastHistory(t, h)
 	if e.Status != 404 || e.Upstream != "" || e.Target != "-" || e.Model != "no-such" {
 		t.Fatalf("pick failure record: %+v", e)
-	}}
+	}
+}
 
 func TestHistory_AbsentNoPanic(t *testing.T) {
 	// Given 未装配历史库 When 请求 Then 正常服务不 panic

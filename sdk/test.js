@@ -121,11 +121,16 @@ function loadPart(src, config, keys) {
 
 // loadPackage 直接装载包目录(免去各测试文件的读文件样板)
 // dir 为包含 manifest.json 的目录;协议部件入口 = 约定路径 protocol.js(opts.entry 可显式覆盖)
+// opts.router = true 时装载 router.js(包声明 parts.hooks.router 的测试;返回 {select})
 function loadPackage(dir, opts) {
   const o = opts || {};
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
   const entry = o.entry || "protocol.js";
   const src = fs.readFileSync(path.join(dir, entry), "utf8");
+  if (o.router) {
+    const routerSrc = fs.readFileSync(path.join(dir, "router.js"), "utf8");
+    return loadPart(routerSrc, o.config, o.keys);
+  }
   return loadPart(src, o.config, o.keys);
 }
 

@@ -30,6 +30,7 @@ my-package/
 ├── inspect.js             # 可选;账号展示变换(纯函数)
 ├── settings.js            # 可选;hooks 包共享参数声明(纯声明,无逻辑)
 ├── init.js                # 可选;onLoad 加载钩子
+├── router.js              # 可选;键路由钩子(包声明 parts.hooks.router 时启用,见 02 §五)
 ├── tasks/
 │   └── <task-name>.js     # 任务体(路径约定:tasks/<name>.js)
 └── lib/
