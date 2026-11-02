@@ -118,33 +118,48 @@ func TestHandlerRoute_InFlightHeldDuringExecute(t *testing.T) {
 		`function(input){var best=null,bp=-1;for(var i=0;i<input.keys.length;i++){var k=input.keys[i];if(input.inFlight[k.id]){continue;}var p=(k.data&&k.data.pref)||0;if(p>bp){bp=p;best=k.id;}}return best;}`,
 		slowSrv)
 	body := `{"model":"hr-model","messages":[{"role":"user","content":"hi"}]}`
-	// 请求 A(异步发出;选 acct-1 后挂起于 slow 上游)
+	// 请求 A(异步发出;选 acct-1 后挂起于 slow 上游;终局经 done 通知避免跨 goroutine 读 recorder)
 	wa := httptest.NewRecorder()
-	go f.g.ChatCompletions(wa, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
-	waitFor(t, 5*time.Second, func() bool { _, ok := hits.Load("sk-1"); return ok })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.g.ChatCompletions(wa, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { _, ok := hits.Load("sk-1"); return ok }) {
+		close(releaseSlow) // 失败卫生:放行挂起的 A,防 slowSrv.Close 拖死测试进程
+		<-done
+		t.Fatal("request A never reached slow upstream as sk-1")
+	}
 	// 请求 B:此时 A 在途,B 的 select 应见 acct-1 inFlight=1 → 选 acct-2
 	wb := httptest.NewRecorder()
 	f.g.ChatCompletions(wb, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 	if wb.Code != http.StatusOK {
+		close(releaseSlow)
+		<-done
 		t.Fatalf("B status=%d body=%s", wb.Code, wb.Body.String())
 	}
 	if !strings.Contains(wb.Body.String(), "sk-2") {
+		close(releaseSlow)
+		<-done
 		t.Fatalf("B should route to sk-2 while sk-1 in flight, got %s", wb.Body.String())
 	}
 	// 放行 A 并等其终局(避免 t.Cleanup 关库先于 A 的 storage 归并)
 	close(releaseSlow)
-	waitFor(t, 5*time.Second, func() bool { return wa.Code == http.StatusOK })
+	<-done
+	if wa.Code != http.StatusOK {
+		t.Fatalf("A status=%d body=%s", wa.Code, wa.Body.String())
+	}
 }
 
-// waitFor 轮询条件(有界)
-func waitFor(t *testing.T, limit time.Duration, cond func() bool) {
+// waitFor 轮询条件(有界;false = 超时)
+func waitFor(t *testing.T, limit time.Duration, cond func() bool) bool {
 	t.Helper()
 	deadline := time.Now().Add(limit)
 	for time.Now().Before(deadline) {
 		if cond() {
-			return
+			return true
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("condition not met before deadline")
+	return false
 }
